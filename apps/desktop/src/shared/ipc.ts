@@ -13,6 +13,7 @@ import type {
   RefPreset,
 } from "@gitstudio/host-bridge/graphProtocol";
 import type { CommitDetailsPayload } from "@gitstudio/host-bridge/commitDetailsProtocol";
+import type { WorktreeOperation } from "@gitstudio/host-bridge/worktreeRemoval";
 import type {
   ConflictShape,
   ConflictsSnapshot,
@@ -40,6 +41,38 @@ export interface RepoInfo {
   root: string;
   /** Last path segment of the root — the display name. */
   name: string;
+}
+
+/**
+ * The repositories open as tabs (issue #32), in the order the tab row shows
+ * them, and the one in front. `active` is undefined only when no tab is open.
+ * See docs/desktop-repo-tabs.md.
+ */
+export interface RepoTabsState {
+  tabs: RepoInfo[];
+  active?: string;
+}
+
+/**
+ * Which tab an IPC call is FOR — the preload's third `invoke` argument. Main
+ * runs the handler inside it (repoStore's `repoScope`), so every bridge acts on
+ * the repository of the tab that asked, never on whichever one is in front by
+ * the time it gets there. `root: undefined` means "a window with no repository
+ * open asked".
+ */
+export interface InvokeScope {
+  root: string | undefined;
+}
+
+/**
+ * What the tab row says about one open tab (issue #32): how many files changed
+ * in its working tree, or that its folder is GONE — moved, deleted, on a drive
+ * that is not mounted, or no longer a Git repository. A gone tab stays until
+ * it is closed (the folder may come back); `dirty` is then absent.
+ */
+export interface RepoTabStatus {
+  dirty?: number;
+  gone?: boolean;
 }
 
 /** A ref decoration listed in the sidebar (branch / remote / tag). */
@@ -353,6 +386,13 @@ export interface CommitActionRequest {
   fullName?: string;
   /** See StashFirst: this request again, after the user chose Stash & Retry. */
   stashFirst?: string;
+  /**
+   * Cherry-pick or revert SEVERAL commits in one run (issue #32): all of them,
+   * newest first as the graph listed them — `sha` is the first. Main asks git
+   * for the order to run them in (oldest first for a pick, newest first for a
+   * revert) and refuses a merge among them. Only for "cherry-pick" and "revert".
+   */
+  shas?: string[];
 }
 
 /**
@@ -385,8 +425,13 @@ export interface CommitActionResult {
    */
   inTheWay?: InTheWayInfo;
   /** After a Stash & Retry: what became of the stashed changes, when it is
-   *  anything but "back where they were". Said in the neutral tone. */
+   *  anything but "back where they were". Said in the neutral tone. Also a
+   *  stash applied without the staging git could not restore (applyForDoor). */
   stashNote?: string;
+  /** A Pop that APPLIED its stash and kept it in the list: git could not
+   *  stage its staged changes again, and dropping it would lose them
+   *  (applyForDoor). `stashNote` says so; the page words its own toast by it. */
+  stashKept?: true;
   /** The renderer asked about changes in the way and the user cancelled:
    *  nothing ran, nothing failed, nothing to say. Never sent by main. */
   cancelled?: true;
@@ -397,6 +442,26 @@ export interface CommitActionResult {
    * `fullName` (branch:rename), which only a LOCAL branch can take.
    */
   optionLike?: { fullName: string; name: string; local: boolean };
+  /**
+   * A cherry-pick or revert of several commits (issue #32): HEAD before the
+   * run, and after it when it FINISHED — the two tips its Undo moves between
+   * (commits:undo). Absent when it stopped or failed.
+   */
+  before?: string;
+  after?: string;
+  /**
+   * With `before`/`after`: the branch the run moved, by full name (null: HEAD
+   * was detached). Its Undo (commits:undo) puts THAT branch back, never
+   * whichever branch HEAD is on by then.
+   */
+  branch?: string | null;
+  /**
+   * A cherry-pick or revert of several commits that git stopped part-way for
+   * the user — a conflict, an emptied commit — with the operation left open
+   * for Changes' Continue / Skip / Abort. (A pull's stop is PullActionResult's
+   * `stopped`.)
+   */
+  paused?: true;
 }
 
 /**
@@ -512,15 +577,67 @@ export interface StashInfo {
 
 /** A linked worktree for the Worktrees view. */
 export interface WorktreeInfo {
+  /** git's own spelling of the folder: what is sent back, and compared. */
   path: string;
+  /** The same folder spelled the system's way, for a person to read — git's
+   *  C:/Users/… is C:\Users\… on Windows (git-service's nativePath). Absent
+   *  from an older main: show `path`. */
+  shownPath?: string;
   head: string;
   branch?: string;
   bare?: boolean;
   locked?: boolean;
+  /** Why it is locked, when it was locked with a reason. */
+  lockReason?: string;
   prunable?: boolean;
   /** True when this worktree is the one the app currently has open. */
   current?: boolean;
+  /** The main worktree (git lists it first): it holds the repository, and git
+   *  never removes it. */
+  main?: boolean;
+  /** Its folder is gone — whether or not git calls it prunable (a locked one
+   *  never is). */
+  missing?: boolean;
+  /** Another repository tab of this window has it open (#32) — decided by
+   *  main, by the comparison its Remove is refused by (gitBridge's
+   *  heldByAnotherTab): the renderer cannot resolve a path on disk, and git's
+   *  spelling of a folder need not be the tab's. */
+  openInTab?: boolean;
 }
+
+/**
+ * What removing a worktree takes, read before anything is asked (git-service's
+ * WorktreeProvider.removal): refused outright (`main`, `current`, `notListed`),
+ * or the facts the one question is built from (host-bridge's
+ * worktreeRemovalQuestion).
+ */
+export type WorktreeRemovalInfo =
+  | { kind: "notListed" }
+  | { kind: "main" }
+  | { kind: "current" }
+  /** Another repository tab of this window has it open (#32). */
+  | { kind: "openInTab" }
+  | {
+      kind: "missing" | "present";
+      branch?: string;
+      head: string;
+      locked: boolean;
+      lockReason?: string;
+      /** Uncommitted paths removing it deletes; undefined when unreadable. */
+      changes?: string[];
+      /** What git is stopped in there; removing the worktree abandons it. */
+      operation?: WorktreeOperation;
+    };
+
+/**
+ * A worktree:remove answer. `changedSince`: nothing ran, because the worktree
+ * has uncommitted changes the question did not name — made while it was open,
+ * an agent still at work in it — and these are its facts NOW, to ask again
+ * from (once; `message` says so when it changes again). Always `expected`.
+ */
+export type WorktreeRemoveResult = CommitActionResult & {
+  changedSince?: WorktreeRemovalInfo;
+};
 
 /** One commit in a Compare result. */
 export interface CompareCommit {
@@ -1682,6 +1799,8 @@ export interface GitLogEntry {
   actionId?: number;
   /** Epoch milliseconds when the command finished. */
   at: number;
+  /** The repository it ran in — each tab's Output log shows only its own. */
+  root?: string;
 }
 
 // ── Clone / browse GitHub repos ──────────────────────────────────────────────
@@ -1992,18 +2111,114 @@ export interface DropRequest {
   carry?: boolean;
 }
 
-/** How a drop ended, plus the two tips its Undo needs. */
+/**
+ * A branch a rewrite carried along (the carry question's "move those
+ * branches"): where it was, and where the rewrite left it — git-service's
+ * CarriedBranch. Undo puts each one back.
+ */
+export interface CarriedBranchWire {
+  branch: string;
+  before: string;
+  after: string;
+}
+
+/** How a drop ended, plus what its Undo needs. */
 export interface DropOutcomeWire extends RebaseOutcomeWire {
   /** HEAD before the drop. */
   before?: string;
   /** HEAD after a drop that finished. */
   after?: string;
+  /** The branch it rewrote (refs/heads/…), null when HEAD was detached. */
+  branch?: string | null;
+  /** The other branches it carried, when it was asked to. */
+  carried?: CarriedBranchWire[];
 }
 
-/** Undo a drop: back from `after` to `before`, only while HEAD is still `after`. */
+/**
+ * Undo a drop: `branch` (or, detached, HEAD) back from `after` to `before`,
+ * and every `carried` branch back too — each only while it is still where the
+ * drop left it.
+ */
 export interface UndoDropRequest {
   before: string;
   after: string;
+  branch?: string | null;
+  carried?: CarriedBranchWire[];
+}
+
+/**
+ * Several commits at once (issue #32): what the graph's menu for a
+ * selection — and the "N commits selected" summary — may offer. Asked before
+ * the menu opens; an item that cannot apply is left out.
+ */
+export interface CommitsMenuWire {
+  /** Cherry-pick / Revert N: no merge among them. */
+  apply: boolean;
+  /** Drop N: all on the current branch's rewritable line. */
+  drop: boolean;
+  /** Squash N: that, and next to each other on it. */
+  squash: boolean;
+}
+
+/** Plan dropping or squashing several commits; `preflight` adds what stops it now. */
+export interface CommitsPlanRequest {
+  verb: "drop" | "squash";
+  /** Newest first, as the graph lists them. */
+  shas: string[];
+  preflight?: boolean;
+}
+
+export type CommitsPlanWire =
+  | {
+      ok: true;
+      verb: "drop" | "squash";
+      /** The selected commits, full shas, newest first along the branch. */
+      shas: string[];
+      /** Short sha and subject of each, in that order — what the question names. */
+      commits: Array<{ shortSha: string; subject: string }>;
+      /** HEAD when planned; the run refuses if it has moved. */
+      head: string;
+      branch: string | null;
+      /** Unselected commits replayed on top. */
+      replayed: number;
+      /** At least one of them is already on a remote. */
+      published: boolean;
+      /** Other local branches on a rewritten commit. */
+      carryable: string[];
+      /** Squash: the message pre-filled, every message in full, oldest first. */
+      message?: string;
+      /** With `preflight`: why it cannot start right now. */
+      blocked?: string;
+    }
+  | {
+      ok: false;
+      expected: true;
+      reason: string;
+      message: string;
+    };
+
+/** Run a confirmed drop or squash of several commits. */
+export interface CommitsRewriteRequest {
+  verb: "drop" | "squash";
+  shas: string[];
+  head: string;
+  carry?: boolean;
+  /** Squash: the new commit's message. */
+  message?: string;
+}
+
+/** Undo a rewrite of several commits (or their cherry-pick / revert). */
+export interface CommitsUndoRequest {
+  before: string;
+  after: string;
+  /** Names it in the refusal's words: "since the squash". */
+  what: "drop" | "squash" | "cherry-pick" | "revert";
+  /** The branch a drop, squash, cherry-pick or revert moved (refs/heads/…),
+   *  null when HEAD was detached: that branch goes back, not whichever HEAD
+   *  is on by then. */
+  branch?: string | null;
+  /** The branches a drop or squash carried: they go back too. */
+  carried?: CarriedBranchWire[];
 }
 
 /**
@@ -2015,7 +2230,21 @@ export interface IpcChannels {
   "repo:openPath": [string, RepoInfo | undefined];
   "repo:recent": [void, RepoInfo[]];
   "repo:current": [void, RepoInfo | undefined];
+  /** Close the tab the call came from (the menu's Close Tab uses repo:closeTab). */
   "repo:close": [void, void];
+  // ── Repositories as tabs (issue #32) ──
+  /** Every open tab and the active one. */
+  "repo:tabs": [void, RepoTabsState];
+  /** Bring an open tab to the front. False when it has no tab. */
+  "repo:activate": [string, boolean];
+  /** Close one tab by root. False when it had none. */
+  "repo:closeTab": [string, boolean];
+  /** Move a tab to a position in the row. */
+  "repo:moveTab": [{ root: string; index: number }, boolean];
+  /** The tab row's `●N`: each open tab's working-tree counts — or that its
+   *  folder is gone. The same probe as repos:localStatus, on its own channel
+   *  because it is the row's question, not a view's. */
+  "repo:tabStatus": [string[], Record<string, RepoTabStatus | undefined>];
   "graph:load": [GraphLoadRequest, GraphPage];
   /**
    * Whether the graph's current walk reaches a commit at all (issue #30).
@@ -2043,7 +2272,8 @@ export interface IpcChannels {
   "commit:branches": [string, CommitBranches];
   "commit:rowStats": [string[], RowStat[]];
   "diff:files": [void, ChangedFile[]];
-  "file:diff": [{ path: string; sha?: string }, FileDiff | undefined];
+  /** `oldPath`: with `sha`, the file's name in the parent when the commit renamed it. */
+  "file:diff": [{ path: string; sha?: string; oldPath?: string }, FileDiff | undefined];
   "conflict:model": [string, ConflictModel | undefined];
   "blame:file": [string, unknown];
   "commit:action": [CommitActionRequest, CommitActionResult];
@@ -2055,6 +2285,12 @@ export interface IpcChannels {
   "commit:dropPlan": [DropPlanRequest, DropPlanWire];
   "commit:drop": [DropRequest, DropOutcomeWire];
   "commit:undoDrop": [UndoDropRequest, CommitActionResult];
+  // ── Several commits at once from the graph (issue #32). Cherry-pick and
+  //    revert of several are commit:action with `shas`.
+  "commits:menu": [{ shas: string[] }, CommitsMenuWire];
+  "commits:plan": [CommitsPlanRequest, CommitsPlanWire];
+  "commits:rewrite": [CommitsRewriteRequest, DropOutcomeWire];
+  "commits:undo": [CommitsUndoRequest, CommitActionResult];
   // ── Working-tree staging + commit (Changes view) ──
   "stage": [string, CommitActionResult];
   "unstage": [string, CommitActionResult];
@@ -2114,8 +2350,23 @@ export interface IpcChannels {
   // ── Worktrees ──
   "worktree:list": [void, WorktreeInfo[]];
   "worktree:add": [{ ref: string; newBranch?: boolean }, CommitActionResult];
-  "worktree:remove": [{ path: string; force?: boolean }, CommitActionResult];
-  "worktree:open": [string, RepoInfo | undefined];
+  "worktree:removal": [{ path: string }, WorktreeRemovalInfo];
+  /**
+   * Remove a worktree as the person agreed (git-service's removeAsAgreed):
+   * `discardChanges` — the uncommitted changes the question listed go too,
+   * `listed` being exactly those (worktree:removal's `changes`; absent when
+   * they could not be read and the question said any go); `pastLock` — it is
+   * locked, and removing it anyway was agreed. A change made since the
+   * question, listed nowhere, runs nothing and answers `changedSince`.
+   */
+  "worktree:remove": [
+    { path: string; discardChanges?: boolean; listed?: string[]; pastLock?: boolean },
+    WorktreeRemoveResult,
+  ];
+  /** The worktree's tab (a new one, or the one it has); `{ said: true }` when
+   *  nothing opened and main has already said why in an app:notice (every tab
+   *  is taken, the folder isn't a repository); undefined for any other failure. */
+  "worktree:open": [string, RepoInfo | { said: true } | undefined];
   // ── Sync (control remote changes) ──
   "sync:status": [void, SyncStatus];
   "sync:fetch": [{ prune?: boolean } | void, CommitActionResult];
@@ -2650,8 +2901,12 @@ export type IpcResponse<C extends IpcChannel> = IpcChannels[C][1];
 
 /** Push events the main process emits to the renderer (host → renderer). */
 export interface IpcEvents {
-  /** The active repo changed (opened/closed) — the renderer reloads. */
-  "repo:changed": RepoInfo | undefined;
+  /**
+   * The open tabs or the active one changed (an open, a switch, a close, a
+   * move). The renderer's tab row and stage follow this; it replaces the old
+   * single-repository `repo:changed`.
+   */
+  "repo:tabs": RepoTabsState;
   /** The recent-repositories list changed (forgotten or trashed elsewhere in
    *  the app) — the repo switcher and the manager both re-render off this. */
   "repo:recentChanged": RepoInfo[];
@@ -2666,7 +2921,12 @@ export interface IpcEvents {
    * save cannot change a commit, so a build churning files must not drag a graph
    * reload behind every burst.
    */
-  "repo:filesChanged": { gitDir: boolean };
+  "repo:filesChanged": {
+    gitDir: boolean;
+    /** The repository the watcher saw it in. With tabs, an event that arrives
+     *  after a switch is about the tab you LEFT, and must not refresh this one. */
+    root?: string;
+  };
   /** A message from the main process to show in-app (never a native alert). */
   "app:notice": { kind: "info" | "warn" | "error"; message: string };
   /** A menu item asks the renderer to do something it owns. */
@@ -2675,6 +2935,12 @@ export interface IpcEvents {
       | "openRepo"
       | "refresh"
       | "closeRepo"
+      /** ⌘W / Ctrl+W — close the active repository tab (asks first when an
+       *  operation is still running in it). */
+      | "closeTab"
+      /** Open Recent ▸ <repo> — the renderer opens it, so a switch never
+       *  happens under an open dialog. `root` names it. */
+      | "openPath"
       | "toggleTerminal"
       | "cloneRepo"
       | "toggleSidebar"
@@ -2685,6 +2951,8 @@ export interface IpcEvents {
       /** ⇧⌘Z (Ctrl+Y on Windows). The merge editor's redo while focus is in
        *  it, otherwise the text redo the role used to perform. */
       | "redo";
+    /** For `openPath`: the repository to open. */
+    root?: string;
   };
   /** A chunk of PTY output for a terminal session. */
   "terminal:data": TerminalData;
@@ -2742,6 +3010,9 @@ export interface GitStudioBridge {
   invoke<C extends IpcChannel>(
     channel: C,
     payload: IpcRequest<C>,
+    /** Which tab the call is for. The renderer's bridge.ts always sends it;
+     *  absent, main answers for the active tab. */
+    scope?: InvokeScope,
   ): Promise<IpcResponse<C>>;
   on<E extends IpcEvent>(event: E, listener: (data: IpcEvents[E]) => void): () => void;
 }

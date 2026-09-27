@@ -33,21 +33,31 @@ import type { RepoManager, RepoEntry, UndoOptions } from "../git/repoManager";
 import { getGraphHtml, getNonce } from "./graphHtml";
 import { getAuthorAvatarResolver } from "./authorAvatars";
 import { getRefFilterStore } from "./refFilterStore";
-import { commitMenuItems, commitMenuItemsFor, refActionId, refMenuItems, runCommitAction } from "./commitActions";
+import {
+  commitMenuItems,
+  commitMenuItemsFor,
+  multiCommitMenuItemsFor,
+  refActionId,
+  refMenuItems,
+  runCommitAction,
+  runMultiCommitAction,
+} from "./commitActions";
+import { menuTarget, selectedCommits } from "@gitstudio/host-bridge/graphSelection";
+import { SettleLatest } from "@gitstudio/host-bridge/settleLatest";
+import { ComparePanel } from "../compare/comparePanel";
 import type { MenuRef } from "./checkoutTarget";
 import { rowStatsReply } from "./rowStatsReply";
 import { readRewritableChain } from "@gitstudio/git-service/rebaseChain";
 import { buildRebasePlan } from "@gitstudio/git-service/rebasePlan";
 import { runRebasePlan, isRebaseInProgress, reportRebaseFailure } from "../rebase/rebaseRunner";
 import { promptPick } from "../ui/dialogs";
-import { openRevisionDiff } from "../history/revisionContentProvider";
-import { commitWebUrl } from "../util/remoteUrl";
+// EMPTY_TREE: git's empty tree — the "parent" of a root commit's diff.
+import { commitChangeSides, EMPTY_TREE, openSidesDiff } from "../history/revisionContentProvider";
+import { commitWebUrlIn } from "../util/remoteUrl";
 import { relativePath, statusLetter } from "../changes/changesView";
 import type { Change } from "../git/git";
 import { notifyPaused } from "../git/pauseNotice";
 
-/** git's canonical empty-tree object — the "parent" of a root commit's diff. */
-const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /** Map the details-panel action ids to runCommitAction's ids. */
 const ACTION_ID_MAP: Record<string, string> = {
@@ -270,19 +280,32 @@ export class CommitGraphPanel {
       case "selectCommit":
       case "openCommit":
         this.shown = msg.sha;
+        // One commit now: a pending "N commits selected" answer is for a selection that is gone.
+        this.summary.cancel();
         void this.pushCommitDetails(msg.sha);
         break;
-      case "contextMenu":
-        void this.openCommitMenu(msg.sha, msg.x, msg.y);
+      case "selectCommits":
+        // Several commits (or none) — issue #32. No one commit is showing.
+        this.shown = undefined;
+        void this.pushCommitsSummary(selectedCommits(msg.shas));
         break;
+      case "contextMenu": {
+        // One commit's menu, or — with `shas` — the menu for a selection of
+        // several (issue #32). graphSelection decides which, for every door.
+        const t = menuTarget(msg);
+        void (t.kind === "many" ? this.openMultiMenu(t.shas, msg.x, msg.y) : this.openCommitMenu(msg.sha, msg.x, msg.y));
+        break;
+      }
       case "action":
         void this.openCommitMenu(msg.sha, -1, -1);
         break;
-      case "commitMenuAction":
-        void this.runCommitMenuAction(msg.sha, msg.id);
+      case "commitMenuAction": {
+        const t = menuTarget(msg);
+        void (t.kind === "many" ? this.runMultiMenuAction(t.shas, msg.id) : this.runCommitMenuAction(msg.sha, msg.id));
         break;
+      }
       case "openFile":
-        void this.doOpenFile(msg.sha, msg.path, !!msg.wip);
+        void this.doOpenFile(msg.sha, msg.path, !!msg.wip, msg.oldPath, msg.status);
         break;
       case "commitAction":
         void this.doCommitAction(msg.action, msg.sha);
@@ -390,7 +413,22 @@ export class CommitGraphPanel {
       this.walk = { refs: null, head: true };
       this.nextSkip = 0;
       this.hasMore = false;
-      this.postInit({ rows: [], head: "", totalColumns: 1, hasMore: false, refFilter: null }, []);
+      // Not "No commits yet": there is no repository to have any. And while
+      // discovery is still running, not "No repository open" either — the
+      // Changes view above the rail says "Looking for a repository…" at that
+      // moment, and settling fires onDidChange, which lands back here.
+      const discovering = this.repos.isDiscovering();
+      this.postInit(
+        {
+          rows: [],
+          head: "",
+          totalColumns: 1,
+          hasMore: false,
+          ...(discovering ? { discovering: true } : { noRepo: true }),
+          refFilter: null,
+        },
+        [],
+      );
       return;
     }
 
@@ -725,9 +763,10 @@ export class CommitGraphPanel {
         todo: built.todo,
         rewords: built.rewords,
       });
-    const outcome = ledger
-      ? await ledger.runWithUndo(active, `Reorder ${order.length} commits`, run)
-      : await run();
+    // The branches it carries go back with it on Undo: the envelope's scope
+    // records every local branch before the op and what it moved after
+    // (issue #32's sibling: Drop and Squash carry the same way).
+    const outcome = ledger ? await ledger.runWithUndo(active, `Reorder ${order.length} commits`, run) : await run();
 
     if (outcome.status === "done") {
       vscode.window.setStatusBarMessage("$(check) Reordered", 3000);
@@ -940,6 +979,67 @@ export class CommitGraphPanel {
   /** Bumped per menu request; see openCommitMenu. */
   private menuSeq = 0;
 
+  /**
+   * The menu for a selection of several commits (issue #32), at (x, y). What
+   * applies is asked of git; a later right-click wins, as for one commit.
+   */
+  private async openMultiMenu(shas: string[], x: number, y: number): Promise<void> {
+    const seq = ++this.menuSeq;
+    const active = this.repos.getActive();
+    if (!active) return;
+    const items = await multiCommitMenuItemsFor(active.ctx, shas);
+    if (seq !== this.menuSeq) return;
+    this.post({
+      type: "commitMenu",
+      sha: shas[0],
+      shas,
+      x,
+      y,
+      title: `${shas.length} commits selected`,
+      items,
+    });
+  }
+
+  /** Only the newest selection is answered, once it settles (host-bridge/settleLatest). */
+  private readonly summary = new SettleLatest();
+
+  /**
+   * The details pane's "N commits selected" summary (issue #32) asks what can
+   * be done to them: the same items as their right-click menu. Shift+Down held
+   * over twenty rows is twenty selections, and each would walk the branch
+   * three ways, so only the one it stops on is asked — the desktop's pane
+   * asks through the same SettleLatest.
+   */
+  private async pushCommitsSummary(shas: string[]): Promise<void> {
+    const active = this.repos.getActive();
+    if (!active || shas.length < 2) {
+      this.summary.cancel();
+      return;
+    }
+    const items = await this.summary.run(() => multiCommitMenuItemsFor(active.ctx, shas));
+    if (items) this.post({ type: "commitsSummary", shas, items });
+  }
+
+  /** Run an item of the several-commit menu or summary. */
+  private async runMultiMenuAction(shas: string[], id: string): Promise<void> {
+    const active = this.repos.getActive();
+    if (!active || !id) return;
+    const ledger = this.repos.getUndoLedger();
+    const undo = ledger
+      ? <T>(label: string, fn: () => Promise<T>, opts?: UndoOptions) => ledger.runWithUndo(active, label, fn, opts)
+      : undefined;
+    const changed = await runMultiCommitAction(
+      id,
+      active.ctx,
+      shas,
+      { compare: (base, head) => ComparePanel.show(this.repos, this.extensionUri, base, head) },
+      undo,
+    );
+    if (changed) {
+      this.scheduleRefresh();
+    }
+  }
+
   /** Run the action the user picked in the in-graph commit popover. */
   private async runCommitMenuAction(sha: string, id: string): Promise<void> {
     const active = this.repos.getActive();
@@ -987,6 +1087,9 @@ export class CommitGraphPanel {
 
   /** Public: select + reveal a commit and show its details (from another view). */
   reveal(sha: string): void {
+    // One commit now (issue #32): a pending "N commits selected" answer is for
+    // a selection the reveal replaces — the webview selects this one alone.
+    this.summary.cancel();
     // `ready` only means the webview booted — its first page of rows arrives
     // later, and revealing into an empty graph silently no-ops. Queue until
     // graphInit has actually landed (`initialized`), or a reveal issued during
@@ -1197,12 +1300,18 @@ export class CommitGraphPanel {
     const st = active.repo.state;
     const now = Math.floor(Date.now() / 1000);
     const toFiles = (changes: Change[] | undefined) =>
-      (changes ?? []).map((c) => ({
-        path: relativePath(active.root, c.uri.fsPath),
-        status: statusLetter(c.status),
-        additions: 0,
-        deletions: 0,
-      }));
+      (changes ?? []).map((c) => {
+        const path = relativePath(active.root, c.uri.fsPath);
+        // A staged rename's HEAD side is under its old name (openFile reads it there).
+        const oldPath = c.originalUri ? relativePath(active.root, c.originalUri.fsPath) : path;
+        return {
+          path,
+          ...(oldPath !== path ? { oldPath } : {}),
+          status: statusLetter(c.status),
+          additions: 0,
+          deletions: 0,
+        };
+      });
     const staged = toFiles(st.indexChanges);
     const unstaged = [
       ...toFiles(st.mergeChanges),
@@ -1239,24 +1348,37 @@ export class CommitGraphPanel {
     sha: string,
     path: string,
     wip: boolean,
+    oldPath?: string,
+    status?: string,
   ): Promise<void> {
     const active = this.repos.getActive();
     if (!active) {
       return;
     }
+    const fileName = path.split("/").pop() || path;
     if (wip) {
-      // Working-tree file: HEAD ↔ the live file on disk.
-      await openRevisionDiff(active.root, path, "HEAD");
+      // Working-tree file: HEAD ↔ the live file on disk — HEAD under the old
+      // name for a rename, and nothing on the right for a deletion (the file
+      // URI of a path that is not on disk is not an empty file).
+      await openSidesDiff(
+        active.root,
+        path,
+        {
+          left: status === "A" || status === "U" ? { rev: EMPTY_TREE } : { rev: "HEAD", path: oldPath || path },
+          right: status === "D" ? { rev: EMPTY_TREE } : { rev: undefined },
+        },
+        `${fileName} (HEAD ↔ Working Tree)`,
+      );
       return;
     }
     const record = this.records.get(sha);
     const parent = record?.parents[0] ?? EMPTY_TREE;
-    const fileName = path.split("/").pop() || path;
-    await openRevisionDiff(
+    // The parent side under the name the file had THERE: a rename commit's
+    // parent has no file at the new name, so it used to show as all-added.
+    await openSidesDiff(
       active.root,
       path,
-      parent,
-      sha,
+      commitChangeSides({ sha, parent, path, oldPath, status }),
       `${fileName} (${sha.slice(0, 7)})`,
     );
   }
@@ -1279,15 +1401,12 @@ export class CommitGraphPanel {
       return;
     }
     if (action === "open-remote") {
-      const remote = await active.ctx.process.run(["remote", "get-url", "origin"]);
-      const url = commitWebUrl(remote.stdout.trim(), sha);
-      if (!url) {
-        void vscode.window.showInformationMessage(
-          "GitStudio: origin isn't a recognised GitHub/GitLab/Bitbucket remote.",
-        );
+      const found = await commitWebUrlIn(active.ctx, sha);
+      if ("reason" in found) {
+        void vscode.window.showInformationMessage(`GitStudio: ${found.reason}`);
         return;
       }
-      await vscode.env.openExternal(vscode.Uri.parse(url));
+      await vscode.env.openExternal(vscode.Uri.parse(found.url));
       return;
     }
     // The visual Interactive Rebase workspace opens via its command (needs the

@@ -17,9 +17,9 @@
 import { execFile } from "node:child_process";
 import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
-import { parseGitHubRemote } from "./githubRemote";
+import { githubRepoOfRemote } from "./githubRemote";
 import { MAX_LOCAL_REPOS } from "../shared/repoGrouping";
-import type { LocalCopy, LocalRepoStatus } from "../shared/ipc";
+import type { LocalCopy, LocalRepoStatus, RepoTabStatus } from "../shared/ipc";
 
 /** Don't shell out to git hundreds of times for a huge folder. Shared, so the
  *  views that render the list can say when it is a prefix rather than all. */
@@ -61,8 +61,10 @@ function originOf(root: string): Promise<string | undefined> {
       { timeout: PROBE_TIMEOUT_MS },
       (err, stdout) => {
         if (err) return res(undefined);
-        const parsed = parseGitHubRemote(stdout.trim());
-        res(parsed ? `${parsed.owner}/${parsed.repo}` : undefined);
+        githubRepoOfRemote(stdout.trim()).then(
+          (parsed) => res(parsed ? `${parsed.owner}/${parsed.repo}` : undefined),
+          () => res(undefined),
+        );
       },
     );
   });
@@ -222,6 +224,32 @@ export async function localStatuses(
   probe.forEach((r, i) => statusCache.set(r, { at: t, value: answers[i] }));
   const out: Record<string, LocalRepoStatus | undefined> = {};
   for (const r of take) out[r] = statusCache.get(r)?.value;
+  return out;
+}
+
+/**
+ * What the repository tab row says about each open tab (issue #32): its
+ * change count, or that its folder is GONE. Gone is asked every time and
+ * never cached — it is one `stat`, and a folder put back must stop reading as
+ * gone at the next look — while the counts ride localStatuses' own TTL.
+ * A folder that is gone is never handed to git: there is nothing to count.
+ */
+export async function tabStatuses(
+  roots: readonly string[],
+  deps: {
+    isRepo?: (root: string) => Promise<boolean>;
+    statuses?: (roots: string[]) => Promise<Record<string, LocalRepoStatus | undefined>>;
+  } = {},
+): Promise<Record<string, RepoTabStatus>> {
+  const isRepo = deps.isRepo ?? isRepoDir;
+  const statuses = deps.statuses ?? ((r: string[]) => localStatuses(r));
+  const take = roots.slice(0, STATUS_ROOTS_CAP);
+  const present = await Promise.all(take.map((r) => isRepo(r).catch(() => false)));
+  const counts = await statuses(take.filter((_, i) => present[i]));
+  const out: Record<string, RepoTabStatus> = {};
+  take.forEach((r, i) => {
+    out[r] = present[i] ? { dirty: counts[r]?.dirty } : { gone: true };
+  });
   return out;
 }
 
@@ -405,12 +433,13 @@ export async function scanLocalCopies(input: ScanInput): Promise<LocalCopy[]> {
  *  through different symlinks. */
 export async function trashRefusalResolved(
   root: string,
-  o: { cloneDir: string; current?: string },
+  o: { cloneDir: string; current?: string; open?: readonly string[] },
 ): Promise<string | null> {
   const real = await realOrResolve(root);
   const refusal = trashRefusal(real, {
     cloneDir: await realOrResolve(o.cloneDir),
     current: o.current ? await realOrResolve(o.current) : undefined,
+    open: o.open ? await Promise.all(o.open.map((r) => realOrResolve(r))) : undefined,
   });
   if (refusal) return refusal;
   // The UI only ever offers rows that came from a scan, so this can't be hit
@@ -426,7 +455,14 @@ export async function trashRefusalResolved(
  *  Pure so the rule is testable and stated in exactly one place. */
 export function trashRefusal(
   root: string,
-  o: { cloneDir: string; current?: string },
+  o: {
+    cloneDir: string;
+    current?: string;
+    /** Every repository open in a tab (issue #32). A tab in the background is
+     *  as open as the one in front: its git context, its terminals and any
+     *  operation still running in it all live in that folder. */
+    open?: readonly string[];
+  },
 ): string | null {
   const r = resolve(root);
   if (!r || r === resolve(o.cloneDir)) {
@@ -434,6 +470,9 @@ export function trashRefusal(
   }
   if (o.current && resolve(o.current) === r) {
     return "That repository is open right now — switch to another one first.";
+  }
+  if (o.open?.some((t) => resolve(t) === r)) {
+    return "That repository is open in a tab — close its tab first.";
   }
   if (!isInside(o.cloneDir, r)) {
     return "GitStudio only deletes clones inside your clone folder. Remove this one from Finder if you meant to.";

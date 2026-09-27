@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { removeTempRepo } from "./tmpRepo";
@@ -327,6 +327,27 @@ test("undo puts the branch back on the original tip", async () => {
   }
 });
 
+test("undo after a drop that carried a branch puts it back too", async () => {
+  const r = repo();
+  try {
+    r.commit("base"); const a = r.commit("A"); const b = r.commit("B"); r.commit("C");
+    r.git("branch", "feature", b);
+    const plan = await planOk(r, a);
+    const out = await dropCommit(r.ctx.process, { sha: plan.sha, head: plan.head, carry: true }, run(r));
+    assert.equal(out.status, "done", JSON.stringify(out));
+    assert.deepEqual(out.carried, [{ branch: "feature", before: b, after: r.git("rev-parse", "feature") }]);
+    assert.deepEqual(await undoDrop(r.ctx.process, { before: out.before!, after: out.after!, carried: out.carried }), { ok: true });
+    assert.equal(r.git("rev-parse", "feature"), b, "feature is back on B");
+    assert.deepEqual(r.subjects(), ["C", "B", "A", "base"]);
+    // Not carried: nothing to put back, and the outcome says so by saying nothing.
+    const only = await dropCommit(r.ctx.process, { sha: plan.sha, head: plan.head, carry: false }, run(r));
+    assert.equal(only.carried, undefined);
+    assert.equal(r.git("rev-parse", "feature"), b, "left where it was");
+  } finally {
+    r.dispose();
+  }
+});
+
 test("undo after dropping the tip goes forward again, even onto a published parent", async () => {
   const r = repo();
   try {
@@ -352,6 +373,119 @@ test("undo refuses once the branch has moved on, and changes nothing", async () 
     assert.equal(back.ok, false);
     assert.equal(!back.ok && back.expected, true);
     assert.equal(r.git("rev-parse", "HEAD"), later);
+  } finally {
+    r.dispose();
+  }
+});
+
+test("undoDrop puts back the DROP's branch — a branch made at the new tip since is left alone", async () => {
+  const r = repo();
+  try {
+    r.commit("base");
+    const a = r.commit("A");
+    const b = r.commit("B");
+    r.git("branch", "side", b);
+    const c = r.commit("C");
+    const plan = await planDropCommit(r.ctx.process, a);
+    assert.ok(plan.ok);
+    if (!plan.ok) return;
+    const out = await dropCommit(r.ctx.process, { sha: plan.sha, head: plan.head, carry: true }, (p) => runRebasePlan(r.dir, p));
+    assert.equal(out.status, "done");
+    assert.equal(out.branch, "refs/heads/main");
+    assert.deepEqual(out.carried?.map((m) => [m.branch, m.before]), [["side", b]]);
+    const dropped = r.git("rev-parse", "main");
+    r.git("checkout", "-q", "-b", "topic");
+
+    const back = await undoDrop(r.ctx.process, { before: out.before!, after: out.after!, branch: out.branch, carried: out.carried });
+    assert.deepEqual(back, { ok: true });
+    assert.equal(r.git("rev-parse", "main"), c, "the dropped branch is back");
+    assert.equal(r.git("rev-parse", "side"), b, "and the one it carried");
+    assert.equal(r.git("rev-parse", "topic"), dropped, "topic, made since, untouched");
+    assert.equal(r.git("symbolic-ref", "HEAD"), "refs/heads/topic");
+  } finally {
+    r.dispose();
+  }
+});
+
+test("undoDrop refuses a carried branch that moved since, and changes nothing", async () => {
+  const r = repo();
+  try {
+    r.commit("base");
+    const a = r.commit("A");
+    r.commit("B");
+    r.git("branch", "side");
+    r.commit("C");
+    const plan = await planDropCommit(r.ctx.process, a);
+    if (!plan.ok) return assert.fail(plan.message);
+    const out = await dropCommit(r.ctx.process, { sha: plan.sha, head: plan.head, carry: true }, (p) => runRebasePlan(r.dir, p));
+    const main = r.git("rev-parse", "main");
+    r.git("update-ref", "refs/heads/side", r.git("commit-tree", `${main}^{tree}`, "-p", main, "-m", "on side since"));
+    const back = await undoDrop(r.ctx.process, { before: out.before!, after: out.after!, branch: out.branch, carried: out.carried });
+    assert.equal(back.ok, false);
+    assert.match(!back.ok ? back.message : "", /'side' has moved since/);
+    assert.equal(r.git("rev-parse", "main"), main, "main untouched too");
+  } finally {
+    r.dispose();
+  }
+});
+
+// A carried branch goes back through ONE path — refRestore's checks and
+// putRefBack — whether the drop ran on a branch or on a detached HEAD: the
+// same refusal for the same state, the same reflog entry.
+for (const where of ["on main", "on a detached HEAD"] as const) {
+  test(`undoDrop ${where}: a carried branch checked out in another worktree is refused in refRestore's words; put back, its reflog says so`, async () => {
+    const r = repo();
+    // Made in os.tmpdir()'s spelling; the refusal names it in the disk's own
+    // — as git does — with the system's separators: realpathSync.native
+    // (RUNNER~1 is runneradmin on a Windows runner; /var is /private/var on
+    // macOS).
+    const wt = mkdtempSync(join(tmpdir(), "gs-drop-wt-"));
+    try {
+      r.commit("base");
+      const a = r.commit("A");
+      const b = r.commit("B");
+      r.git("branch", "side", b);
+      const c = r.commit("C");
+      if (where === "on a detached HEAD") r.git("checkout", "-q", "--detach");
+      const plan = await planDropCommit(r.ctx.process, a);
+      if (!plan.ok) return assert.fail(plan.message);
+      const out = await dropCommit(r.ctx.process, { sha: plan.sha, head: plan.head, carry: true }, (p) => runRebasePlan(r.dir, p));
+      assert.equal(out.status, "done", JSON.stringify(out));
+      assert.equal(out.branch, where === "on main" ? "refs/heads/main" : null);
+      const side = r.git("rev-parse", "side");
+      assert.notEqual(side, b, "side was carried");
+      const req = { before: out.before!, after: out.after!, branch: out.branch, carried: out.carried };
+
+      r.git("worktree", "add", "-q", join(wt, "w"), "side");
+      const refused = await undoDrop(r.ctx.process, req);
+      assert.deepEqual(refused, {
+        ok: false,
+        expected: true,
+        message: `'side' is checked out in another worktree, at ${realpathSync.native(join(wt, "w"))}. Undo it there.`,
+      });
+      assert.equal(r.git("rev-parse", "HEAD"), out.after, "a refusal moves nothing — HEAD included");
+      assert.equal(r.git("rev-parse", "side"), side);
+
+      r.git("worktree", "remove", "--force", join(wt, "w"));
+      assert.deepEqual(await undoDrop(r.ctx.process, req), { ok: true });
+      assert.equal(r.git("rev-parse", "HEAD"), c);
+      assert.equal(r.git("rev-parse", "side"), b, "side back on B");
+      assert.equal(r.git("reflog", "-1", "--format=%gs", "refs/heads/side"), "GitStudio undo: drop commit");
+    } finally {
+      removeTempRepo(wt);
+      r.dispose();
+    }
+  });
+}
+
+test("undoDrop refuses a ref name it didn't hand out", async () => {
+  const r = repo();
+  try {
+    const a = r.commit("base");
+    const b = r.commit("B");
+    const back = await undoDrop(r.ctx.process, { before: a, after: b, branch: "--force" });
+    assert.equal(back.ok, false);
+    assert.equal(r.git("rev-parse", "HEAD"), b);
   } finally {
     r.dispose();
   }

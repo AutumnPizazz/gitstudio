@@ -7,7 +7,7 @@
 // shared by both hosts).
 
 import { readFile, readdir, writeFile, lstat, readlink } from "node:fs/promises";
-import { rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { continueRebase, skipRebase } from "@gitstudio/git-service/RebaseRunner";
 import type { RebaseOutcome } from "@gitstudio/git-service/RebaseRunner";
 import { textWriteSafe } from "@gitstudio/git-service/ConflictOps";
@@ -21,10 +21,10 @@ import {
 import { DEFAULT_MERGE_SETTINGS } from "@gitstudio/host-bridge/conflictsProtocol";
 import { stageOf } from "@gitstudio/engine/conflict/sides";
 import { ExpectedError } from "./expectedError";
-import { applyForDoor, checkoutOp, pullForDoor, type DoorApplied } from "./inTheWay";
+import { applyForDoor, checkoutOp, pullForDoor, stashGoneAnswer, type DoorApplied } from "./inTheWay";
 import { newBranchAtHead, type ApplyOp } from "@gitstudio/git-service/changesInTheWay";
 import { basename, extname, join, resolve, sep } from "node:path";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { computeGraphLayout } from "@gitstudio/engine/graph/layout";
 import type { GraphInputCommit } from "@gitstudio/engine/graph/layout";
 import { computeHunks, applySelectedChanges } from "@gitstudio/engine/staging/applyLineChanges";
@@ -32,13 +32,19 @@ import type { LineRange, Hunk } from "@gitstudio/engine/staging/applyLineChanges
 import { buildWireRows, wireRefs } from "@gitstudio/host-bridge/graphWire";
 import { commitBlockerMessage } from "@gitstudio/git-service/StagingProvider";
 import { stashBlockerMessage } from "@gitstudio/git-service/StashProvider";
-import { optionLikeCheckout, planRefCheckout } from "@gitstudio/git-service/checkoutRef";
+import { restoreStash, stashStack, type StashPlace } from "@gitstudio/git-service/stashRestore";
+import { optionLikeCheckout, planRefCheckout, refShortName } from "@gitstudio/git-service/checkoutRef";
+import { checkedOutElsewhere, checkedOutElsewhereMessage } from "@gitstudio/git-service/branchElsewhere";
 import { branchNameOf, remoteBranchOf } from "@gitstudio/git-service/BranchOps";
 import { headBranchName } from "@gitstudio/git-service/RefProvider";
 import { listUnstagedHunks, stageHunks } from "@gitstudio/git-service/hunkStaging";
 import { setBlockStaged } from "@gitstudio/git-service/blockStaging";
 import { unresolvedConflictsMessage } from "@gitstudio/git-service/ConflictProvider";
 import { stoppedIn } from "@gitstudio/git-service/stoppedOperation";
+import { applyManyArgs, mergesAmong, orderCommits } from "@gitstudio/git-service/multiCommit";
+import { headBranch } from "@gitstudio/git-service/refRestore";
+import { applyManyMessage } from "@gitstudio/engine/rebase/many";
+import { selectedCommits } from "@gitstudio/host-bridge/graphSelection";
 import {
   pullBlockedMessage,
   pullDetachedMessage,
@@ -46,6 +52,9 @@ import {
   pushUnseenMessage,
 } from "@gitstudio/git-service/SyncOps";
 import { GitProcess } from "@gitstudio/git-service/GitProcess";
+import { nativePath, sameFolder } from "@gitstudio/git-service/folderPath";
+import { sshHome } from "@gitstudio/git-service/sshAliases";
+import { worktreeChangedSinceAsked, worktreeRemovalRefusal } from "@gitstudio/host-bridge/worktreeRemoval";
 import type {
   CommitRecord,
   GitContext,
@@ -91,6 +100,8 @@ import type {
   SyncStatus,
   TreeEntry,
   WorktreeInfo,
+  WorktreeRemovalInfo,
+  WorktreeRemoveResult,
   CommitBranches,
   ConflictsSnapshot,
   JetBrainsIdeInfo,
@@ -212,9 +223,11 @@ function notABranch(what: string): CommitActionResult {
 }
 
 /** Is the repository a request was built in the one open now? A string from
- *  the renderer that is not a path at all is simply not the same one. */
+ *  the renderer that is not a path at all is simply not the same one; a path
+ *  is compared as a folder (git-service's folderPath), not as text — git's
+ *  C:/Users/runneradmin/… and C:\Users\RUNNER~1\… are one repository. */
 function sameRoot(a: unknown, b: string): boolean {
-  return typeof a === "string" && a.length > 0 && resolve(a) === resolve(b);
+  return typeof a === "string" && a.length > 0 && sameFolder(a, b);
 }
 
 /** Standard rejection for an unusable path reaching a mutation. */
@@ -307,22 +320,77 @@ function mustSucceed(result: { stdout: string; stderr?: string; code?: number },
   return result.stdout;
 }
 
+/**
+ * Does another repository tab of this window have the folder at `path` open
+ * (#32)? THE comparison: the worktree list marks a row with it (the renderer
+ * cannot resolve a path on disk, and compared git's spelling with the tab's as
+ * text), and a removal is refused by it — so the row's "open in a tab" and
+ * its Remove never disagree.
+ */
+function heldByAnotherTab(path: string, otherTabs: readonly string[]): boolean {
+  return otherTabs.some((root) => sameFolder(path, root));
+}
 
-export class GitBridge {
+/**
+ * What removing the worktree at `path` takes, as the renderer's one question
+ * needs it (git-service's removal): refused outright — the main worktree, this
+ * window's own, one another of its tabs has open (while its folder is there),
+ * one no longer listed — or the facts. Read fresh each time: for the question, and again when a remove
+ * was refused because it changed since.
+ */
+async function removalInfo(ctx: GitContext, path: string, otherTabs: readonly string[]): Promise<WorktreeRemovalInfo> {
+  const r = await ctx.worktrees.removal(path);
+  if (r.kind === "notListed" || r.kind === "main") {
+    return { kind: r.kind };
+  }
+  if (sameFolder(r.entry.path, ctx.root)) {
+    return { kind: "current" };
+  }
+  // Only while its folder is there: a gone worktree's tab has nothing to lose,
+  // and Forget is how that tab's worktree is let go.
+  if (r.kind === "present" && heldByAnotherTab(r.entry.path, otherTabs)) {
+    return { kind: "openInTab" };
+  }
+  return {
+    kind: r.kind,
+    branch: r.entry.branch,
+    head: r.entry.head,
+    locked: !!r.entry.locked,
+    lockReason: r.entry.lockReason,
+    ...(r.kind === "present" ? { changes: r.changes, operation: r.operation } : {}),
+  };
+}
+
+/** A worktree as the renderer names it: its branch, or "<sha> (detached)". */
+function worktreeLabelOf(e: { branch?: string; head: string; bare?: boolean }): string {
+  return e.branch ?? (e.bare ? "(bare)" : `${e.head.slice(0, 7)} (detached)`);
+}
+
+
+/**
+ * One repository's graph accumulator.
+ *
+ * ONE PER OPEN TAB (issue #32). It used to be fields on the bridge, which held
+ * because only one repository was ever open: with tabs, paging tab A after tab
+ * B had loaded would find B's commits in the accumulator, treat A's `skip: 200`
+ * as a fresh load, and hand back page 1 of a history the renderer believed it
+ * was 200 rows into.
+ */
+class GraphState {
   /** sha → record, accumulated as the graph pages stream in (for details). */
-  private records = new Map<string, CommitRecord>();
+  records = new Map<string, CommitRecord>();
   /** Every loaded input commit, so a page append relayouts the full DAG. */
-  private loaded: GraphInputCommit[] = [];
-  private refsBySha = new Map<string, GitRef[]>();
+  loaded: GraphInputCommit[] = [];
+  refsBySha = new Map<string, GitRef[]>();
   /** Every ref of the last loadRefs, for the picker and for pruning. */
-  private refs: GitRef[] = [];
+  refs: GitRef[] = [];
   /** False when that listing threw or found nothing — then `refs` is not the
    *  repository's list, and must not prune a stored selection (see below). */
-  private refsListed = false;
-  private refList: GraphRefEntry[] = [];
+  refsListed = false;
+  refList: GraphRefEntry[] = [];
   /** refListSignature(refList), computed once per listing — a page request
    *  compares against it (see graphPage). */
-  private refListSig = refListSignature([]);
+  refListSig = refListSignature([]);
   /**
    * The branch filter the accumulated pages were walked with (issue #30) —
    * pruned against the refs that existed at load time, null for everything.
@@ -330,17 +398,40 @@ export class GitBridge {
    * different history. Presets stay symbolic here ("Current branch" is
    * CURRENT_BRANCH), so a request is compared with what was asked for.
    */
-  private refFilter: GraphRefFilter = null;
+  refFilter: GraphRefFilter = null;
   /** What that filter walks for the accumulated pages — resolved against the
    *  fresh load's listing, HEAD only when detached (filterWalk). Every page,
    *  the chips and graph:reaches read this one value. */
-  private walk: FilterWalk = { refs: null, head: true };
-  private currentHeadSha = "";
-  private loadedRoot: string | undefined;
+  walk: FilterWalk = { refs: null, head: true };
+  currentHeadSha = "";
+  /** False until the first fresh load, so a page before it starts one. */
+  primed = false;
   /** Serializes graph:load so two pages never interleave in the accumulator. */
-  private graphChain: Promise<unknown> = Promise.resolve();
+  chain: Promise<unknown> = Promise.resolve();
   /** Bumped by a fresh load so queued stale pages discard themselves. */
-  private graphGen = 0;
+  gen = 0;
+}
+
+export class GitBridge {
+  /** Each open repository's graph accumulator, by root. See GraphState. */
+  private readonly graphs = new Map<string, GraphState>();
+
+  /** The accumulator for `root`, made on first use. Forgotten repositories'
+   *  states are few and small (a closed tab's is dropped by forgetGraph). */
+  private graphState(root: string): GraphState {
+    let g = this.graphs.get(root);
+    if (!g) {
+      g = new GraphState();
+      this.graphs.set(root, g);
+    }
+    return g;
+  }
+
+  /** Drop a closed tab's accumulator — its pages are the largest thing held here. */
+  forgetGraph(root: string): void {
+    this.graphs.delete(root);
+    this.mutationChains.delete(root);
+  }
   /**
    * JetBrains merge windows still open, by repo root + path, with the stop
    * (op.episode) they were opened for. Their LOCAL / REMOTE / BASE temp files
@@ -349,6 +440,12 @@ export class GitBridge {
    * see pruneIdeLaunches), and on quit (disposeIdeLaunches).
    */
   private readonly ideLaunches = new Map<string, { launch: JetBrainsLaunch; root: string; episode: string }>();
+  /**
+   * Where each stash this app dropped sat — its index and the entries above
+   * it then — by repo root + stash sha, so the drop's Undo (`stash:restore`)
+   * puts it back THERE rather than on top. Bounded: the undo stack is short.
+   */
+  private readonly droppedStashes = new Map<string, StashPlace>();
 
   constructor(
     private readonly repos: RepoStore,
@@ -389,16 +486,9 @@ export class GitBridge {
    *     arrived discard itself instead of appending pre-reload commits.
    */
   async graphLoad(opts: GraphLoadRequest): Promise<GraphPage> {
-    const run = this.graphChain.then(() => this.graphLoadInner(opts));
-    // Never let one failure poison the chain for every later page.
-    this.graphChain = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
-  }
-
-  private async graphLoadInner(opts: GraphLoadRequest): Promise<GraphPage> {
+    // The repository is fixed HERE, when the request arrives, and each one
+    // has its own chain and accumulator (GraphState) — two tabs paging at once
+    // never wait on, or write into, each other.
     const ctx = this.ctx();
     if (!ctx) {
       const none = refListSignature([]);
@@ -413,32 +503,42 @@ export class GitBridge {
         refListSig: none,
       };
     }
+    const g = this.graphState(ctx.root);
+    const run = g.chain.then(() => this.graphLoadInner(ctx, g, opts));
+    // Never let one failure poison the chain for every later page.
+    g.chain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
 
+  private async graphLoadInner(ctx: GitContext, g: GraphState, opts: GraphLoadRequest): Promise<GraphPage> {
     const maxCount = opts.maxCount ?? PAGE_SIZE;
     const skip = opts.skip ?? 0;
     // A request that SETS the filter (issue #30) is fresh whatever its skip
     // says: every page accumulated so far was walked under the old filter, and
     // appending a page of one history to another is the splice this chain
     // exists to prevent.
-    const setsFilter = opts.refs !== undefined && !sameRefFilter(opts.refs, this.refFilter);
-    const fresh = skip === 0 || ctx.root !== this.loadedRoot || setsFilter;
+    const setsFilter = opts.refs !== undefined && !sameRefFilter(opts.refs, g.refFilter);
+    const fresh = skip === 0 || !g.primed || setsFilter;
 
     if (fresh) {
       // Supersede anything queued behind us: those pages describe the history we
       // are about to throw away.
-      this.graphGen++;
-      this.records.clear();
-      this.loaded = [];
-      this.loadedRoot = ctx.root;
-      await this.loadRefs(ctx);
+      g.gen++;
+      g.records.clear();
+      g.loaded = [];
+      g.primed = true;
+      await this.loadRefs(ctx, g);
       // The filter: the request's, else the one remembered for this repo —
       // pruned against the refs that exist now (a remembered branch can be
       // gone), and remembered back when that changed anything.
       const wanted = opts.refs !== undefined ? opts.refs : (this.refFilters?.get(ctx.root) ?? null);
-      if (this.refsListed) {
-        this.refFilter = normalizeRefFilter(wanted, this.refs);
-        if (opts.refs !== undefined || !sameRefFilter(this.refFilter, wanted)) {
-          await this.refFilters?.set(ctx.root, this.refFilter);
+      if (g.refsListed) {
+        g.refFilter = normalizeRefFilter(wanted, g.refs);
+        if (opts.refs !== undefined || !sameRefFilter(g.refFilter, wanted)) {
+          await this.refFilters?.set(ctx.root, g.refFilter);
         }
       } else {
         // The listing threw or found nothing, so there is no list to prune
@@ -447,62 +547,62 @@ export class GitBridge {
         // selection is applied as it is (the walk's --ignore-missing takes a
         // gone ref) and the store keeps its value for a load that can prune.
         // Only a request that SETS the filter is remembered, as asked.
-        this.refFilter = wanted && wanted.length > 0 ? wanted : null;
+        g.refFilter = wanted && wanted.length > 0 ? wanted : null;
         if (opts.refs !== undefined) {
-          await this.refFilters?.set(ctx.root, this.refFilter);
+          await this.refFilters?.set(ctx.root, g.refFilter);
         }
       }
       // Resolved against the listing just read: a preset means the branch
       // HEAD is on NOW, and an attached HEAD is walked only when ticked.
-      this.walk = filterWalk(this.refFilter, this.refList, this.refs);
+      g.walk = filterWalk(g.refFilter, g.refList, g.refs);
     }
-    const gen = this.graphGen;
+    const gen = g.gen;
 
-    const page = await this.readPage(ctx, fresh ? 0 : skip, maxCount);
-    if (gen !== this.graphGen) {
+    const page = await this.readPage(ctx, g, fresh ? 0 : skip, maxCount);
+    if (gen !== g.gen) {
       // A fresh load landed while we were streaming. Appending now would splice
       // the old history into the new one.
       return {
         rows: [],
-        head: this.currentHeadSha,
+        head: g.currentHeadSha,
         totalColumns: 1,
         hasMore: false,
-        nextSkip: this.loaded.length,
-        ...this.filterFields(),
-        ...this.refListFor(opts),
+        nextSkip: g.loaded.length,
+        ...this.filterFields(g),
+        ...this.refListFor(g, opts),
       };
     }
-    const before = fresh ? 0 : this.loaded.length;
-    this.loaded = fresh ? page : this.loaded.concat(page);
+    const before = fresh ? 0 : g.loaded.length;
+    g.loaded = fresh ? page : g.loaded.concat(page);
     const hasMore = page.length === maxCount;
 
-    const layout = computeGraphLayout(this.loaded, { colorCount: 8 });
+    const layout = computeGraphLayout(g.loaded, { colorCount: 8 });
     const allRows = buildWireRows({
       rows: layout.rows,
-      records: this.records,
+      records: g.records,
       // Chips follow the filter: a ref the graph is not walked from draws no
       // chip — the current branch included, unless it is ticked.
       // commit:details keeps reading the full map — it describes the commit.
-      refsBySha: chipRefsUnderFilter(this.refsBySha, this.walk.refs),
+      refsBySha: chipRefsUnderFilter(g.refsBySha, g.walk.refs),
     });
 
     return {
       rows: allRows.slice(before),
-      head: this.currentHeadSha,
+      head: g.currentHeadSha,
       totalColumns: layout.totalColumns,
       hasMore,
-      nextSkip: this.loaded.length,
-      ...this.filterFields(),
-      ...this.refListFor(opts),
+      nextSkip: g.loaded.length,
+      ...this.filterFields(g),
+      ...this.refListFor(g, opts),
     };
   }
 
   /** What a page says about the filter: the full names its rows were walked
    *  from (the picker ticks these) and the preset they stand for, if any. */
-  private filterFields(): Pick<GraphPage, "refFilter" | "refPreset"> {
+  private filterFields(g: GraphState): Pick<GraphPage, "refFilter" | "refPreset"> {
     return {
-      refFilter: this.walk.refs,
-      ...(this.walk.preset ? { refPreset: this.walk.preset } : {}),
+      refFilter: g.walk.refs,
+      ...(g.walk.preset ? { refPreset: g.walk.preset } : {}),
     };
   }
 
@@ -514,10 +614,10 @@ export class GitBridge {
    * handed the graph element), so a reloaded renderer — which holds none —
    * always gets one, whatever this process sent before.
    */
-  private refListFor(opts: GraphLoadRequest): Pick<GraphPage, "refList" | "refListSig"> {
-    return opts.refListSig === this.refListSig
-      ? { refListSig: this.refListSig }
-      : { refList: this.refList, refListSig: this.refListSig };
+  private refListFor(g: GraphState, opts: GraphLoadRequest): Pick<GraphPage, "refList" | "refListSig"> {
+    return opts.refListSig === g.refListSig
+      ? { refListSig: g.refListSig }
+      : { refList: g.refList, refListSig: g.refListSig };
   }
 
   /**
@@ -527,8 +627,8 @@ export class GitBridge {
    */
   async graphReaches(sha: string): Promise<{ reached: boolean }> {
     const ctx = this.ctx();
-    const walk = this.walk;
-    if (!ctx || !walk.refs) {
+    const walk = ctx ? this.graphState(ctx.root).walk : undefined;
+    if (!ctx || !walk?.refs) {
       return { reached: true };
     }
     return { reached: await ctx.log.walkReaches(sha, walk.refs, { head: walk.head }) };
@@ -536,6 +636,7 @@ export class GitBridge {
 
   private async readPage(
     ctx: GitContext,
+    g: GraphState,
     skip: number,
     maxCount: number,
   ): Promise<GraphInputCommit[]> {
@@ -544,51 +645,51 @@ export class GitBridge {
       revRange: "--all",
       // The branch filter: every page of one load walks the same ticked set,
       // so skip-based paging stays consistent across the load.
-      refs: this.walk.refs ?? undefined,
-      head: this.walk.head,
+      refs: g.walk.refs ?? undefined,
+      head: g.walk.head,
       maxCount,
       skip,
     })) {
-      this.records.set(commit.sha, commit);
+      g.records.set(commit.sha, commit);
       page.push({ sha: commit.sha, parents: commit.parents });
     }
     return page;
   }
 
-  private async loadRefs(ctx: GitContext): Promise<void> {
-    this.refsBySha.clear();
-    this.currentHeadSha = "";
+  private async loadRefs(ctx: GitContext, g: GraphState): Promise<void> {
+    g.refsBySha.clear();
+    g.currentHeadSha = "";
     let refs: GitRef[] = [];
     try {
       refs = await ctx.refs.listRefs();
     } catch {
       refs = [];
     }
-    this.refs = refs;
-    this.refsListed = refs.length > 0;
-    this.refList = refEntries(refs);
-    this.refListSig = refListSignature(this.refList);
+    g.refs = refs;
+    g.refsListed = refs.length > 0;
+    g.refList = refEntries(refs);
+    g.refListSig = refListSignature(g.refList);
     for (const ref of refs) {
       if (ref.type === "stash") {
         continue;
       }
-      const list = this.refsBySha.get(ref.sha);
+      const list = g.refsBySha.get(ref.sha);
       if (list) {
         list.push(ref);
       } else {
-        this.refsBySha.set(ref.sha, [ref]);
+        g.refsBySha.set(ref.sha, [ref]);
       }
       if (ref.type === "head" && ref.isCurrent) {
-        this.currentHeadSha = ref.sha;
+        g.currentHeadSha = ref.sha;
       }
     }
-    if (!this.currentHeadSha) {
+    if (!g.currentHeadSha) {
       // No branch is current: HEAD is detached (or unborn). It still sits on
       // a commit, and that is what a page's `head` means — the graph's "you
       // are here" and its header's "Detached HEAD at …". The extension had
       // the same gap (its header read "no commits yet" over the history).
       try {
-        this.currentHeadSha = await ctx.refs.headCommit();
+        g.currentHeadSha = await ctx.refs.headCommit();
       } catch {
         /* no HEAD to point at */
       }
@@ -700,7 +801,8 @@ export class GitBridge {
     if (!ctx) {
       return undefined;
     }
-    let record = this.records.get(sha);
+    const g = this.graphState(ctx.root);
+    let record = g.records.get(sha);
     if (!record) {
       for await (const c of ctx.log.streamCommits({ revRange: sha, maxCount: 1 })) {
         record = c;
@@ -713,6 +815,16 @@ export class GitBridge {
     let files: CommitFileChange[];
     try {
       files = await ctx.commitDetails.getCommitFiles(sha, record.parents[0]);
+      // A stash made with -u keeps its new files in a third parent, which the
+      // first-parent diff leaves out: a stash of only new files read as an
+      // empty commit — easy to drop believing there was nothing in it. They
+      // are listed as added, and fileDiff reads them from there.
+      const untracked = record.parents.length === 3 ? await stashUntrackedParent(ctx, sha) : undefined;
+      if (untracked) {
+        const seen = new Set(files.map((f) => f.path));
+        const added = await ctx.commitDetails.getCommitFiles(untracked);
+        files = [...files, ...added.filter((f) => !seen.has(f.path))];
+      }
     } catch {
       files = [];
     }
@@ -721,8 +833,8 @@ export class GitBridge {
     // menu resolves them through the graph's ref list. A copy of that mapping
     // kept refs/remotes/origin/HEAD, which the graph draws no chip for and the
     // list leaves out — an "origin/HEAD" chip whose menu could never act.
-    const refs: WireRef[] = wireRefs(this.refsBySha.get(sha));
-    const hasRemote = [...this.refsBySha.values()].some((list) =>
+    const refs: WireRef[] = wireRefs(g.refsBySha.get(sha));
+    const hasRemote = [...g.refsBySha.values()].some((list) =>
       list.some((r) => r.type === "remote"),
     );
     return {
@@ -810,7 +922,7 @@ export class GitBridge {
    * version. Reuses StagingProvider.headContent / ConflictProvider.getHeadVersion
    * — the same content readers the extension's diff panel uses.
    */
-  async fileDiff(req: { path: string; sha?: string }): Promise<FileDiff | undefined> {
+  async fileDiff(req: { path: string; sha?: string; oldPath?: string }): Promise<FileDiff | undefined> {
     const ctx = this.ctx();
     if (!ctx) {
       return undefined;
@@ -818,12 +930,21 @@ export class GitBridge {
     const rel = req.path;
 
     if (req.sha) {
-      const right = await showAt(ctx, req.sha, rel);
+      let right = await showAt(ctx, req.sha, rel);
+      // A new file a -u stash holds is in its third parent (see commitDetails).
+      if (right.absent) {
+        const untracked = await stashUntrackedParent(ctx, req.sha);
+        if (untracked) right = await showAt(ctx, untracked, rel);
+      }
       const parent = await parentOf(ctx, req.sha);
-      const left = parent ? await showAt(ctx, parent, rel) : { text: "", absent: true };
+      // The parent side under the name the file had THERE. A commit that
+      // renamed the file has nothing at the new name in its parent, and
+      // reading it there showed the rename as a brand-new file.
+      const before = req.oldPath || rel;
+      const left = parent ? await showAt(ctx, parent, before) : { text: "", absent: true };
       return {
         path: rel,
-        leftLabel: parent ? `${parent.slice(0, 7)} ${rel}` : `(new) ${rel}`,
+        leftLabel: parent ? `${parent.slice(0, 7)} ${before}` : `(new) ${rel}`,
         rightLabel: `${req.sha.slice(0, 7)} ${rel}`,
         leftText: left.text,
         rightText: right.text,
@@ -1099,7 +1220,38 @@ export class GitBridge {
     if (!safeArg(req.sha)) return { ok: false, message: "That restore point is not usable." };
     const paths = req.paths.filter((p) => p);
     if (!paths.length) return { ok: false, expected: true, message: "Nothing to restore." };
+    // Put back only what the discard took. It left each path as the index has
+    // it; a path that differs from the index now was edited AGAIN since, and
+    // restoring the old changes over it threw the new ones away under a
+    // success toast. Say which instead, and change nothing. (A path already
+    // back as it was is fine either way.) Likewise a path whose STAGED copy
+    // has changed since — the index then is the snapshot's second parent.
+    // Three git calls for the lot, however many files the discard took.
+    const names = async (args: string[]): Promise<Set<string> | undefined> => {
+      const r = await ctx.process.run(["--literal-pathspecs", "diff", "--name-only", "-z", "--no-ext-diff", "--no-renames", ...args, "--", ...paths]);
+      return r.code === 0 ? new Set(r.stdout.split("\0").filter(Boolean)) : undefined;
+    };
+    const [edited, notAsTaken, restaged] = await Promise.all([
+      names([]),
+      names([req.sha]),
+      names(["--cached", `${req.sha}^2`]),
+    ]);
+    if (!edited || !notAsTaken || !restaged) {
+      return { ok: false, message: "Couldn't tell whether those files have changed since. Nothing was changed." };
+    }
+    const since = paths.filter((p) => (edited.has(p) && notAsTaken.has(p)) || restaged.has(p));
+    if (since.length) {
+      return {
+        ok: false,
+        expected: true,
+        message:
+          since.length === 1
+            ? `${since[0]} has changed since its changes were discarded, and bringing them back would overwrite that. Nothing was changed.`
+            : `${since.length} files have changed since their changes were discarded (${since.join(", ")}), and bringing them back would overwrite that. Nothing was changed.`,
+      };
+    }
     const r = await ctx.process.run([
+      "--literal-pathspecs",
       "restore",
       `--source=${req.sha}`,
       "--worktree",
@@ -1358,52 +1510,77 @@ export class GitBridge {
   /**
    * Apply / pop, through the one door for commit-applying commands: refused
    * over uncommitted work in the stash's way, they say which files and the
-   * renderer offers Stash & Retry. The request is the ref, or — sent again
-   * after Stash & Retry — `{ ref, stashFirst }`.
+   * renderer offers Stash & Retry. The request names the stash — by its sha,
+   * which the engine finds in the list just before git runs (a `stash@{n}`
+   * is a position the list renumbers while a question is up) — or, sent
+   * again after Stash & Retry, `{ ref, stashFirst }`.
    */
   async stashApply(req: string | { ref: string; stashFirst?: string }): Promise<CommitActionResult> {
     const { ref, stashFirst } = stashRequest(req);
     if (!safeArg(ref)) return UNSAFE_REF_RESULT;
-    return this.staged(async (ctx) =>
-      stagedFrom(await applyForDoor(ctx, { kind: "stash", stash: ref, pop: false }, stashFirst)),
-    );
+    // `index`: a stash that holds staged changes brings them back staged
+    // where git can (see applyForDoor). A plain apply unstaged them, and a pop
+    // then lost a staged version that differed from the file.
+    return this.staged(async (ctx) => {
+      const index = await ctx.stashes.holdsStaged(ref);
+      return stagedFrom(await applyForDoor(ctx, { kind: "stash", stash: ref, pop: false, index }, stashFirst));
+    });
   }
   async stashPop(req: string | { ref: string; stashFirst?: string }): Promise<CommitActionResult> {
     const { ref, stashFirst } = stashRequest(req);
     if (!safeArg(ref)) return UNSAFE_REF_RESULT;
-    return this.staged(async (ctx) =>
-      stagedFrom(await applyForDoor(ctx, { kind: "stash", stash: ref, pop: true }, stashFirst)),
-    );
+    return this.staged(async (ctx) => {
+      const index = await ctx.stashes.holdsStaged(ref);
+      return stagedFrom(await applyForDoor(ctx, { kind: "stash", stash: ref, pop: true, index }, stashFirst));
+    });
   }
   async stashDrop(ref: string): Promise<CommitActionResult> {
     if (!safeArg(ref)) return UNSAFE_REF_RESULT;
-    return this.staged(async (ctx) => ctx.stashes.drop(ref));
+    // By sha, a stash that has left the list drops nothing: the user's state,
+    // said, never filed.
+    return this.staged(async (ctx) => {
+      // Where it sits, read before it goes: the undo puts it back there. The
+      // list and the stash page name it by its sha; an older caller may still
+      // send its stash@{n}.
+      const stack = await stashStack(ctx.process);
+      const at = /^stash@\{(\d+)\}$/.exec(ref);
+      const index = at ? Number(at[1]) : stack.findIndex((s) => s.sha === ref);
+      const r = await ctx.stashes.drop(ref);
+      if (r.gone) return { ...stashGoneAnswer(), stderr: r.stderr };
+      if (r.ok && index >= 0 && stack[index]) {
+        const key = `${ctx.root}\0${stack[index].sha}`;
+        this.droppedStashes.delete(key);
+        this.droppedStashes.set(key, { index, above: stack.slice(0, index).map((s) => s.sha) });
+        while (this.droppedStashes.size > 50) {
+          this.droppedStashes.delete(this.droppedStashes.keys().next().value as string);
+        }
+      }
+      return r;
+    });
   }
   /**
    * Undo a drop: `git stash store` re-creates a stash ref pointing at a commit
    * that was never deleted — dropping only removed the reflog entry.
    *
-   * It lands on TOP of the stack, not back at its old index. `store` has no
-   * way to insert, and inventing one by re-writing the reflog to put it back
-   * where it was is the kind of cleverness that loses somebody's work.
+   * Back WHERE IT WAS, when this app dropped it and the entries above it are
+   * still the same ones (git-service's restoreStash lifts them off, stores it,
+   * and stores them back); on top otherwise. It used to land on top always, so
+   * undoing "Drop stash@{1}" left the list in a different order than before.
    */
   async stashRestore(req: { sha: string; message?: string }): Promise<CommitActionResult> {
     if (!safeArg(req.sha)) return UNSAFE_REF_RESULT;
     const ctx = this.ctx();
     if (!ctx) return { ok: false, changed: false, expected: true, message: "No repository is open." };
-    // Refuse a sha that is not a commit rather than letting `stash store` write
-    // a stash ref pointing at nothing.
-    const kind = await ctx.process.run(["cat-file", "-t", req.sha]);
-    if (kind.code !== 0 || kind.stdout.trim() !== "commit") {
-      return { ok: false, changed: false, expected: true, message: "That stash is no longer in the repository." };
-    }
-    const args = ["stash", "store"];
-    if (req.message) args.push("-m", req.message);
-    args.push(req.sha);
-    const r = await ctx.process.run(args);
-    return r.code === 0
-      ? { ok: true, changed: true }
-      : { ok: false, changed: false, expected: true, message: r.stderr.trim() || "Couldn't put the stash back." };
+    const key = `${ctx.root}\0${req.sha}`;
+    const place = this.droppedStashes.get(key);
+    return this.staged(async (c) => {
+      const r = await restoreStash(c.process, { sha: req.sha, message: req.message ?? "" }, place);
+      if (!r.ok) {
+        return { ok: false, changed: false, ...(r.expected ? { expected: true as const } : {}), message: r.message };
+      }
+      this.droppedStashes.delete(key);
+      return { ok: true, changed: !r.already };
+    });
   }
   /**
    * The changes inside one file that are not staged yet (#20), so the Changes
@@ -1521,15 +1698,27 @@ export class GitBridge {
       return [];
     }
     try {
-      return (await ctx.worktrees.list()).map((w) => ({
-        path: w.path,
-        head: w.head,
-        branch: w.branch,
-        bare: w.bare,
-        locked: w.locked,
-        prunable: w.prunable,
-        current: w.path === ctx.root,
-      }));
+      const otherTabs = this.otherTabRoots(ctx);
+      return (await ctx.worktrees.list()).map((w, i) => {
+        const current = sameFolder(w.path, ctx.root);
+        const missing = !w.bare && !existsSync(w.path);
+        return {
+          path: w.path,
+          shownPath: nativePath(w.path),
+          head: w.head,
+          branch: w.branch,
+          bare: w.bare,
+          locked: w.locked,
+          lockReason: w.lockReason,
+          prunable: w.prunable,
+          current,
+          // git lists the main worktree first.
+          main: i === 0,
+          missing,
+          // As its Remove decides it: only while its folder is there.
+          openInTab: !current && !missing && heldByAnotherTab(w.path, otherTabs),
+        };
+      });
     } catch {
       return [];
     }
@@ -1538,13 +1727,92 @@ export class GitBridge {
     if (!safeArg(ref)) return UNSAFE_REF_RESULT;
     return this.staged(async (ctx) => ctx.worktrees.add(path, ref, { newBranch }));
   }
-  async worktreeRemove(opts: { path: string; force?: boolean }): Promise<CommitActionResult> {
-    // `git worktree remove` builds its argv as ["worktree", "remove", path]
-    // with no `--`, so a path beginning with "-" would reach git as an option.
-    // The paths come from git's own worktree list today, but this is the same
-    // guard every other ref-taking mutation on this bridge already applies.
+  /**
+   * What removing the worktree at `path` takes, read before the renderer asks
+   * anything: the main worktree and the one this window has open are refused
+   * outright; otherwise the facts its one question names — a lock's reason,
+   * the uncommitted files that would be lost. It used to ask "Any uncommitted
+   * work goes with it", run a plain remove, and show git's refusal: a dirty
+   * worktree was never removed, and a locked one could not be.
+   */
+  async worktreeRemoval(req: { path: string }): Promise<WorktreeRemovalInfo> {
+    const ctx = this.ctx();
+    if (!ctx) {
+      return { kind: "notListed" };
+    }
+    return removalInfo(ctx, req.path, this.otherTabRoots(ctx));
+  }
+
+  /**
+   * The roots the window's OTHER repository tabs have open (#32). "This
+   * window's own worktree" used to be one folder; with tabs, a worktree of
+   * this repository can be open in the tab beside it, and removing it would
+   * delete that tab's folder from under it.
+   */
+  private otherTabRoots(ctx: GitContext): string[] {
+    return this.repos
+      .state()
+      .tabs.map((t) => t.root)
+      .filter((root) => !sameFolder(root, ctx.root));
+  }
+
+  /**
+   * Remove a worktree as the person agreed — and nothing it holds that the
+   * question did not name. A change made while the question was open (an
+   * agent still at work in it) runs nothing: clean when asked, git refuses
+   * the remove without --force; dirty when asked, removeAsAgreed finds a path
+   * `listed` never had. Either way the answer is `changedSince` with what it
+   * holds NOW, and `expected` — the renderer asks again from those facts, as
+   * the extension does. It used to hand git's refusal ("use --force to delete
+   * it") to a red toast and the crash reporter, or, dirty when asked, delete
+   * the new file with the rest.
+   */
+  async worktreeRemove(opts: {
+    path: string;
+    discardChanges?: boolean;
+    listed?: string[];
+    pastLock?: boolean;
+  }): Promise<WorktreeRemoveResult> {
+    // The provider passes the path after `--` now; the guard stays, as on
+    // every other mutation here that takes a renderer string.
     if (!safeArg(opts.path)) return UNSAFE_REF_RESULT;
-    return this.staged(async (ctx) => ctx.worktrees.remove(opts.path, { force: opts.force }));
+    let changedSince: WorktreeRemovalInfo | undefined;
+    const r = await this.staged(async (ctx) => {
+      // Never the window's own worktree, whatever the renderer sent — nor
+      // one another of its tabs has open.
+      if (sameFolder(opts.path, ctx.root)) {
+        return { ok: false, expected: true, message: worktreeRemovalRefusal("current", "that worktree", "tab") };
+      }
+      // One whose folder is gone deletes nothing from under its tab: forgetting it goes on.
+      if (existsSync(opts.path) && heldByAnotherTab(opts.path, this.otherTabRoots(ctx))) {
+        return { ok: false, expected: true, message: worktreeRemovalRefusal("openInTab", "That worktree") };
+      }
+      // The lock's reason, to put back if git refuses (see removeAsAgreed).
+      const entry = (await ctx.worktrees.list()).find((e) => sameFolder(e.path, opts.path));
+      const label = entry ? worktreeLabelOf(entry) : "the worktree";
+      const done = await ctx.worktrees.removeAsAgreed(opts.path, {
+        discardChanges: opts.discardChanges ? { listed: opts.listed } : undefined,
+        pastLock: opts.pastLock ? { reason: entry?.lockReason } : undefined,
+      });
+      if (done.ok) {
+        return done;
+      }
+      const now = await removalInfo(ctx, opts.path, this.otherTabRoots(ctx));
+      const dirtyNow = now.kind === "present" && (now.changes === undefined || now.changes.length > 0);
+      if (done.changedSince || (!opts.discardChanges && dirtyNow)) {
+        changedSince = now;
+        return { ok: false, expected: true, message: worktreeChangedSinceAsked(label) };
+      }
+      // Anything else git refuses a remove over is the repository's state
+      // (a submodule in it, a lock put back in the meantime), said by git.
+      const verb = now.kind === "missing" ? "forget" : "remove";
+      return {
+        ok: false,
+        expected: true,
+        message: `Couldn't ${verb} worktree ${label}: ${done.stderr.trim() || "git worktree remove failed."}`,
+      };
+    });
+    return changedSince ? { ...r, changedSince } : r;
   }
 
   // ── Compare (base…head) ───────────────────────────────────────────────────────
@@ -1633,10 +1901,13 @@ export class GitBridge {
     const leftPath = req.leftPath && safeArg(req.leftPath) ? req.leftPath : req.path;
     const left = await showAt(ctx, leftRef, leftPath);
     const right = await showAt(ctx, req.head, req.path);
+    // A side that is a commit (Compare these two commits, issue #32) by its
+    // short sha, as the pickers above name it; a ref by its name.
+    const side = (ref: string): string => (/^[0-9a-f]{40,64}$/i.test(ref) ? ref.slice(0, 7) : ref);
     return {
       path: req.path,
-      leftLabel: `${threeDot ? req.base + " (merge-base)" : req.base} ${leftPath}`,
-      rightLabel: `${req.head} ${req.path}`,
+      leftLabel: `${threeDot ? side(req.base) + " (merge-base)" : side(req.base)} ${leftPath}`,
+      rightLabel: `${side(req.head)} ${req.path}`,
       leftText: left.text,
       rightText: right.text,
       conflicted: false,
@@ -1882,10 +2153,11 @@ export class GitBridge {
     }
   }
 
-  /** List the local SSH public keys under ~/.ssh (read-only). */
+  /** List the local SSH public keys under ~/.ssh (read-only) — the folder
+   *  git's ssh reads (sshHome: %HOME% on Windows when it is set). */
   async sshKeys(): Promise<SshKey[]> {
     try {
-      const dir = join(homedir(), ".ssh");
+      const dir = join(sshHome(), ".ssh");
       const files = await readdir(dir);
       const out: SshKey[] = [];
       for (const f of files) {
@@ -2539,6 +2811,17 @@ export class GitBridge {
     let was: string | undefined;
     let upstream: string | undefined;
     if (ctx) {
+      // Another worktree has it checked out: git refuses the delete, in its
+      // own words. Say where instead.
+      const elsewhere = await checkedOutElsewhere(ctx.process, req.fullName);
+      if (elsewhere) {
+        return {
+          ok: false,
+          changed: false,
+          expected: true,
+          message: checkedOutElsewhereMessage(name, elsewhere, "delete", !existsSync(elsewhere)),
+        };
+      }
       const tip = await ctx.process.run(["rev-parse", "--verify", req.fullName]);
       if (tip.code === 0) was = tip.stdout.trim() || undefined;
       const up = await ctx.branches.upstreamOf(name);
@@ -2623,6 +2906,17 @@ export class GitBridge {
       if (!plan) {
         return UNSAFE_REF_RESULT;
       }
+      // The branch it lands on is checked out in another worktree: git
+      // refuses ("already used by worktree at …"). Say where instead.
+      const elsewhere = plan.branch ? await checkedOutElsewhere(ctx.process, plan.branch) : undefined;
+      if (plan.branch && elsewhere) {
+        return {
+          ok: false,
+          changed: false,
+          expected: true,
+          message: checkedOutElsewhereMessage(refShortName(plan.branch), elsewhere, "checkout", !existsSync(elsewhere)),
+        };
+      }
       // Through the one door for commit-applying commands: a switch refused
       // over uncommitted work in its way answers which files, `expected`, and
       // the renderer offers Stash & Retry.
@@ -2664,7 +2958,13 @@ export class GitBridge {
    * `index.lock`, or leave a half-applied state. Every mutation runs through this
    * single chain; reads stay concurrent.
    */
-  private mutationChain: Promise<unknown> = Promise.resolve();
+  /**
+   * One chain PER REPOSITORY (issue #32). The index a mutation protects belongs
+   * to one repository, and with tabs a single chain meant a thirty-second push
+   * in one tab held every commit, stage and checkout in every other tab behind
+   * it, for no reason git has.
+   */
+  private readonly mutationChains = new Map<string, Promise<unknown>>();
   private serialize<T>(op: () => Promise<T>): Promise<T> {
     // Every mutation can move git's state, so the cached conflict state goes —
     // both when it starts and when it ends (a read that raced the mutation
@@ -2677,13 +2977,18 @@ export class GitBridge {
         this.invalidateConflictState();
       }
     };
-    const result = this.mutationChain.then(run, run);
+    const key = this.ctx()?.root ?? "";
+    const chain = this.mutationChains.get(key) ?? Promise.resolve();
+    const result = chain.then(run, run);
     // Keep the chain alive whatever this op does; swallow on the chain copy so a
     // failed mutation can't surface as an unhandled rejection (the caller still
     // receives the real outcome via `result`).
-    this.mutationChain = result.then(
-      () => undefined,
-      () => undefined,
+    this.mutationChains.set(
+      key,
+      result.then(
+        () => undefined,
+        () => undefined,
+      ),
     );
     return result;
   }
@@ -2722,6 +3027,7 @@ export class GitBridge {
       /** Carried through untouched — see applyForDoor. */
       inTheWay?: CommitActionResult["inTheWay"];
       stashNote?: string;
+      stashKept?: true;
     }>,
   ): Promise<CommitActionResult> {
     const ctx = this.ctx();
@@ -2733,7 +3039,12 @@ export class GitBridge {
         const r = await op(ctx);
         const ok = r.ok ?? r.code === 0;
         if (ok) {
-          return { ok, changed: true, ...(r.stashNote ? { stashNote: r.stashNote } : {}) };
+          return {
+            ok,
+            changed: true,
+            ...(r.stashNote ? { stashNote: r.stashNote } : {}),
+            ...(r.stashKept ? { stashKept: true as const } : {}),
+          };
         }
         const stderr = r.stderr?.trim() ?? "";
         const stdout = r.stdout?.trim() ?? "";
@@ -2803,6 +3114,10 @@ export class GitBridge {
     if (req.action === "checkout-ref") {
       return this.checkoutRef(ctx, req);
     }
+    // Several commits in one cherry-pick or revert (issue #32).
+    if ((req.action === "cherry-pick" || req.action === "revert") && Array.isArray(req.shas) && req.shas.length > 1) {
+      return this.applyMany(ctx, req.action, req);
+    }
     const args = actionArgs(req);
     if (!args) {
       // copy-sha is handled entirely in the renderer; nothing to run here.
@@ -2849,6 +3164,86 @@ export class GitBridge {
           };
         }
         return { ok: true, changed: true, ...withNote };
+      } catch (err) {
+        return { ok: false, changed: false, message: String(err) };
+      }
+    });
+  }
+
+  /**
+   * Cherry-pick or revert SEVERAL commits (issue #32): one git command over
+   * all of them, in the order git says — oldest first for a pick, newest
+   * first for a revert — through the one door for commit-applying commands,
+   * which asks about uncommitted changes in the way of ANY of them before git
+   * starts. A merge among them is refused (it needs a side chosen, one at a
+   * time). A run git stopped part-way (a conflict, an emptied commit) answers
+   * `stopped` for Changes' Continue / Skip / Abort; one that finished answers
+   * the two tips its Undo moves between.
+   */
+  private async applyMany(
+    ctx: GitContext,
+    verb: "cherry-pick" | "revert",
+    req: CommitActionRequest,
+  ): Promise<CommitActionResult> {
+    const shas = selectedCommits(req.shas);
+    if (shas.length < 2) return UNSAFE_REF_RESULT;
+    return this.serialize(async () => {
+      try {
+        const [merges, ordered] = await Promise.all([
+          mergesAmong(ctx.process, shas),
+          orderCommits(ctx.process, shas, verb === "cherry-pick" ? "oldest-first" : "newest-first"),
+        ]);
+        if (!merges || !ordered) {
+          return {
+            ok: false,
+            changed: false,
+            expected: true,
+            message: "Those commits could not be read any more — refresh the graph and try again.",
+          };
+        }
+        if (merges.length > 0) {
+          return {
+            ok: false,
+            changed: false,
+            expected: true,
+            message: `${merges[0].slice(0, 7)} is a merge commit — ${verb} it on its own, where you can choose which side to keep.`,
+          };
+        }
+        const head = async (): Promise<string> =>
+          (await ctx.process.run(["rev-parse", "--verify", "--quiet", "HEAD"])).stdout.trim();
+        const before = await head();
+        // The branch the run moves, by full name (null: HEAD detached) — its
+        // Undo puts THAT branch back, not whichever HEAD is on by then: a
+        // branch made and checked out at the new tip shares HEAD's commit.
+        const branch = await headBranch(ctx.process);
+        const op: ApplyOp = { kind: verb, commit: ordered[0], commits: ordered, args: applyManyArgs(verb, ordered) };
+        const applied = await applyForDoor(ctx, op, req.stashFirst);
+        if ("answer" in applied) return applied.answer;
+        const withNote = applied.stashNote ? { stashNote: applied.stashNote } : {};
+        const { code, stdout, stderr } = applied.result;
+        if (code === 0) {
+          const after = await head();
+          return { ok: true, changed: true, ...(before && after ? { before, after, branch } : {}), ...withNote };
+        }
+        const stop = await stoppedIn(ctx.process);
+        if (stop?.operation === verb) {
+          // Neutral: nothing failed. The run waits on the user in Changes.
+          return {
+            ok: false,
+            changed: true,
+            expected: true,
+            paused: true,
+            message: applyManyMessage(verb, ordered.length, "stopped"),
+            ...withNote,
+          };
+        }
+        return {
+          ok: false,
+          changed: false,
+          message: stderr.trim() || stdout.trim() || "The operation failed.",
+          ...(declinedOnStdout(stdout.trim(), stderr.trim()) ? { expected: true } : {}),
+          ...withNote,
+        };
       } catch (err) {
         return { ok: false, changed: false, message: String(err) };
       }
@@ -3884,13 +4279,20 @@ function stagedFrom(applied: DoorApplied): {
   expected?: boolean;
   inTheWay?: CommitActionResult["inTheWay"];
   stashNote?: string;
+  stashKept?: true;
 } {
   if ("answer" in applied) return applied.answer;
   const { code, stdout, stderr } = applied.result;
-  return { code, stdout, stderr, ...(applied.stashNote ? { stashNote: applied.stashNote } : {}) };
+  return {
+    code,
+    stdout,
+    stderr,
+    ...(applied.stashNote ? { stashNote: applied.stashNote } : {}),
+    ...(applied.stashKept ? { stashKept: true as const } : {}),
+  };
 }
 
-/** stash:apply / stash:pop take the ref, or `{ ref, stashFirst }` when sent again after Stash & Retry. */
+/** stash:apply / stash:pop take the stash (its sha, or a ref), or `{ ref, stashFirst }` when sent again after Stash & Retry. */
 function stashRequest(req: unknown): { ref: unknown; stashFirst?: unknown } {
   if (typeof req === "string") return { ref: req };
   if (req && typeof req === "object") {
@@ -4065,6 +4467,18 @@ export function parseLsTree(stdout: string): TreeEntry[] {
     out.push({ name, path, type: rawType, ...(size !== undefined ? { size } : {}) });
   }
   return out;
+}
+
+/**
+ * The commit holding the untracked files of a stash made with -u — its third
+ * parent — when `sha` is a stash in the list and has one. Only a listed stash:
+ * an octopus merge has a third parent too, and it is no stash's new files.
+ */
+async function stashUntrackedParent(ctx: GitContext, sha: string): Promise<string | undefined> {
+  if (!(await ctx.stashes.find(sha))) return undefined;
+  const r = await ctx.process.run(["rev-parse", "--verify", "--quiet", `${sha}^3`]);
+  const third = r.stdout.trim();
+  return r.code === 0 && third.length > 0 ? third : undefined;
 }
 
 async function parentOf(ctx: GitContext, sha: string): Promise<string | undefined> {

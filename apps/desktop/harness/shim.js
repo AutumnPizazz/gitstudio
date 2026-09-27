@@ -59,6 +59,11 @@
       // in, the ticks that ARE the staging model in that mode were unreachable
       // from the harness and never looked at.
       stagingModel: params.get("staging") === "checkboxes" ? "checkboxes" : "split",
+      // ?tabviews=1: the last session left gistudio.dev's tab on Branches
+      // (#32) — each restored tab comes back on its own view.
+      ...(params.get("tabviews")
+        ? { tabViews: { "/Users/anton/Developer/GitStudioHQ/gistudio.dev": "branches" } }
+        : {}),
     }),
   );
 
@@ -681,6 +686,10 @@
   const resetState = { plans: [], resets: [], undos: [], was: new Map() };
   window.__gsResets = resetState;
 
+  /** Worktree removal: what was asked about, and what was removed, as sent. */
+  const worktreeState = { removals: [], removes: [] };
+  window.__gsWorktrees = worktreeState;
+
   const pullState = {
     /** The first pull fetched: the remote is further ahead than the badge said. */
     fetched: false,
@@ -693,14 +702,113 @@
     },
   };
 
+  // `sync:fetch` had no fixture: it answered the shim's generic `{ ok: true }`
+  // at once, so no check could see a Fetch run IN PLACE (the switcher's and
+  // the Branches list's menus keep it open, spinning) or what it found. It
+  // still answers at once; ?fetchfinds=1 makes it take a moment and find two
+  // new commits on origin/redesign/issues-detail, so the branch reads
+  // "behind 2" afterwards.
+  const fetchState = { fetches: 0, found: false };
+  // ── The open tabs (issue #32) ────────────────────────────────────────────
+  //
+  // `?tabs=N` opens the first N of these (default 1: gitstudio alone, as every
+  // scene before tabs expected); `?active=K` puts the K-th (1-based) in front.
+  // ?norepo=1 opens none. Every tab but gitstudio answers `head:get` with its
+  // OWN branch, so a check can see which repository an answer was about.
+  const TAB_FIXTURES = [
+    { root: "/Users/anton/Developer/GitStudioHQ/gitstudio", name: "gitstudio", branch: "main", dirty: 6 },
+    { root: "/Users/anton/Developer/GitStudioHQ/gistudio.dev", name: "gistudio.dev", branch: "site/pricing", dirty: 3 },
+    { root: "/Users/anton/Code/webapp", name: "webapp", branch: "feature/login", dirty: 0 },
+    { root: "/Users/anton/Code/api-server", name: "api-server", branch: "develop", dirty: 12 },
+    { root: "/Users/anton/Code/design-system", name: "design-system", branch: "main", dirty: 0 },
+    { root: "/Users/anton/Code/infrastructure-terraform-modules", name: "infrastructure-terraform-modules", branch: "main", dirty: 1 },
+    { root: "/Users/anton/Code/mobile", name: "mobile", branch: "release/2.4", dirty: 0 },
+    { root: "/Users/anton/Code/docs", name: "docs", branch: "main", dirty: 2 },
+    { root: "/Users/anton/Code/data-pipeline", name: "data-pipeline", branch: "main", dirty: 0 },
+    { root: "/Users/anton/Code/sandbox", name: "sandbox", branch: "main", dirty: 0 },
+  ];
+  const tabCount = params.get("norepo") ? 0 : Math.max(1, Math.min(TAB_FIXTURES.length, Number(params.get("tabs")) || 1));
+  const tabState = {
+    tabs: TAB_FIXTURES.slice(0, tabCount).map((t) => ({ root: t.root, name: t.name })),
+    active: undefined,
+  };
+  // ?wttab=1: the repository's worktree gitstudio-wave2 is open in a tab of
+  // its own too, behind the repository's. With ?winpaths=1 the tab's root is
+  // the Windows spelling a tab has (C:\Users\…, realpathSync.native) while
+  // git's worktree list says C:/Users/… — one folder, as main compares it.
+  if (params.get("wttab")) {
+    tabState.tabs.push({
+      root: params.get("winpaths") ? "C:\\Users\\anton\\Developer\\GitStudioHQ\\gitstudio-wave2" : "/Users/anton/Developer/GitStudioHQ/gitstudio-wave2",
+      name: "gitstudio-wave2",
+    });
+  }
+  /** main's folder comparison (git-service's folderKey) without a disk: the
+   *  separators unified, no trailing one, case folded (macOS and Windows). */
+  const folderKeyLikeMain = (p) => String(p).replace(/\\/g, "/").replace(/(?<=[^/:])\/+$/, "").toLowerCase();
+  /** gitBridge's heldByAnotherTab: the ONE comparison the worktree list's
+   *  openInTab and a removal's refusal both make. */
+  window.__gsHeldByAnotherTab = (path) =>
+    tabState.tabs.some((t) => t.root !== tabState.active && folderKeyLikeMain(t.root) === folderKeyLikeMain(path));
+  tabState.active = tabState.tabs[Math.max(0, (Number(params.get("active")) || 1) - 1)]?.root ?? tabState.tabs[0]?.root;
+  /** Every `repo:tabStatus` request's roots, in order. */
+  const tabStatusCalls = [];
+  window.__gsTabStatusCalls = tabStatusCalls;
+  const tabName = (root) => String(root).split("/").filter(Boolean).pop();
+  // ?gone=webapp: that tab's folder is gone (row 14) — moved or deleted while
+  // it sat in the background. The row's status says so, and every git call
+  // for it fails the way git does with no folder to run in. A check puts the
+  // folder back with `window.__gsGone.delete("webapp")`.
+  const goneTabs = new Set((params.get("gone") || "").split(",").filter(Boolean));
+  window.__gsGone = goneTabs;
+  const emitTabs = () => window.__gsEmit("repo:tabs", { tabs: tabState.tabs.slice(), active: tabState.active });
+  /** ?latetabs=1: the first repo:tabs read has been answered (see its handler). */
+  let lateTabsAnswered = false;
+  window.__gsTabs = {
+    state: () => ({ tabs: tabState.tabs.slice(), active: tabState.active }),
+    /** main's openTab: switch to a tab it has, else add one (10 at most). */
+    open(root) {
+      const had = tabState.tabs.find((t) => t.root === root);
+      if (!had && tabState.tabs.length >= 10) {
+        window.__gsEmit("app:notice", { kind: "info", message: "GitStudio keeps up to 10 repositories open. Close a tab to open another." });
+        return undefined;
+      }
+      if (!had) tabState.tabs.push({ root, name: tabName(root) });
+      tabState.active = root;
+      emitTabs();
+      return { root, name: tabName(root) };
+    },
+    activate(root) {
+      if (!tabState.tabs.some((t) => t.root === root)) return false;
+      tabState.active = root;
+      emitTabs();
+      return true;
+    },
+    /** main's closeTab: the right neighbour takes over, else the left. */
+    close(root) {
+      const i = tabState.tabs.findIndex((t) => t.root === root);
+      if (i < 0) return false;
+      tabState.tabs.splice(i, 1);
+      if (tabState.active === root) tabState.active = (tabState.tabs[i] || tabState.tabs[i - 1])?.root;
+      emitTabs();
+      return true;
+    },
+    move(root, index) {
+      const i = tabState.tabs.findIndex((t) => t.root === root);
+      if (i < 0 || typeof index !== "number") return false;
+      const [t] = tabState.tabs.splice(i, 1);
+      tabState.tabs.splice(Math.max(0, Math.min(tabState.tabs.length, index)), 0, t);
+      emitTabs();
+      return true;
+    },
+    fixtures: TAB_FIXTURES,
+  };
+
   const fixtures = {
     // ?norepo=1 → NO repository open, which is the welcome screen: the first
     // thing anyone sees, the only screen shown after closing a repo, and
     // unreachable in this harness until now — which is why nothing had ever
-    // checked it.
-    "repo:current": params.get("norepo")
-      ? undefined
-      : { root: "/Users/anton/Developer/GitStudioHQ/gitstudio", name: "gitstudio" },
+    // checked it. (The tab in front — see __gsTabs; kept for its readers.)
+    "repo:current": tabState.active ? { root: tabState.active, name: tabName(tabState.active) } : undefined,
     "repo:recent": [
       { root: "/Users/anton/Developer/GitStudioHQ/gitstudio", name: "gitstudio" },
       { root: "/Users/anton/Developer/GitStudioHQ/gistudio.dev", name: "gistudio.dev" },
@@ -746,10 +854,19 @@
     // More than one, so the Worktrees segment exists at all — the four
     // worktree channels have been in the IPC contract since it was written
     // with no caller in any view, and no fixture either.
+    // The main worktree says so; hotfix's folder is gone; agent is locked
+    // by a Claude agent with uncommitted work (see worktree:removal).
     "worktree:list": [
-      { path: "/Users/anton/Developer/GitStudioHQ/gitstudio", head: "9f8e7d6aa11", branch: "main", current: true },
+      { path: "/Users/anton/Developer/GitStudioHQ/gitstudio", head: "9f8e7d6aa11", branch: "main", current: true, main: true },
       { path: "/Users/anton/Developer/GitStudioHQ/gitstudio-wave2", head: "a1b2c3d4e5f", branch: "redesign/issues-detail" },
-      { path: "/Users/anton/Developer/GitStudioHQ/gitstudio-hotfix", head: "77aa88b9c0d", branch: "fix/log-stream", prunable: true },
+      { path: "/Users/anton/Developer/GitStudioHQ/gitstudio-hotfix", head: "77aa88b9c0d", branch: "fix/log-stream", prunable: true, missing: true },
+      {
+        path: "/Users/anton/Developer/GitStudioHQ/gitstudio-agent",
+        head: "5e6f7a8b9c0",
+        branch: "agent/wave3",
+        locked: true,
+        lockReason: "claude agent agent-a2c9ae27 (pid 73264)",
+      },
     ],
     // NOTE: `branches:list` lives in `dynamic` — deleting one replaces the
     // array, and a value captured here would keep answering with the old list.
@@ -804,6 +921,11 @@
       // its Continue / Skip / Abort, instead of the planner.
       inProgress: params.get("rebasing") === "1",
       baseCommit: { shortSha: "9f8e7d6", subject: "release: extension 1.11.1" },
+      // `?rbnote=1`: the host's own note (rebaseBridge), the persistent line
+      // the banner keeps above Start rebase.
+      ...(params.get("rbnote") === "1"
+        ? { message: "A merge commit in this range isn't listed — a rebase replays the merged-in commits one by one and the merge itself disappears." }
+        : {}),
       // NEWEST FIRST, the order `loadCommits` returns (`git log --topo-order`,
       // no --reverse) and the order the hint bar promises. Listed oldest-first
       // this fixture put every fold target on the wrong side: a `fixup!` row
@@ -811,7 +933,22 @@
       // the "oldest commit has nothing below it" guard fired on the NEWEST
       // commit — while the screenshot ran 20h → 2h downward under a hint
       // reading "Newest first".
-      commits: [
+      // `?rbmany=1`: twelve commits — the "e.g. 10 commits" of issue #32,
+      // where setting each row's action one at a time is the chore.
+      commits: params.get("rbmany") === "1" ? [
+        { sha: "c1a1000000000000000000000000000000000001", shortSha: "c1a1000", author: "Anton Arnaudov", subject: "fixup! staging: keep the selection across a refresh", rel: "1h ago" },
+        { sha: "c1a1000000000000000000000000000000000002", shortSha: "c1a1001", author: "Anton Arnaudov", subject: "fixup! staging: keep the selection across a refresh", rel: "2h ago" },
+        { sha: "c1a1000000000000000000000000000000000003", shortSha: "c1a1002", author: "Anton Arnaudov", subject: "fixup! staging: keep the selection across a refresh", rel: "3h ago" },
+        { sha: "c1a1000000000000000000000000000000000004", shortSha: "c1a1003", author: "Sora Ohta", subject: "staging: keep the selection across a refresh", rel: "5h ago" },
+        { sha: "c1a1000000000000000000000000000000000005", shortSha: "c1a1004", author: "Anton Arnaudov", subject: "wip", rel: "6h ago" },
+        { sha: "c1a1000000000000000000000000000000000006", shortSha: "c1a1005", author: "Anton Arnaudov", subject: "wip", rel: "7h ago" },
+        { sha: "c1a1000000000000000000000000000000000007", shortSha: "c1a1006", author: "Mira Holt", subject: "changes: stage the lines a selection touches", rel: "9h ago" },
+        { sha: "c1a1000000000000000000000000000000000008", shortSha: "c1a1007", author: "Mira Holt", subject: "changes: a row per hunk", rel: "11h ago" },
+        { sha: "c1a1000000000000000000000000000000000009", shortSha: "c1a1008", author: "Anton Arnaudov", subject: "typo", rel: "14h ago" },
+        { sha: "c1a1000000000000000000000000000000000010", shortSha: "c1a1009", author: "Anton Arnaudov", subject: "engine: split a hunk on a selection boundary", rel: "18h ago" },
+        { sha: "c1a1000000000000000000000000000000000011", shortSha: "c1a100a", author: "Mira Holt", subject: "engine: hunk splitting groundwork", rel: "20h ago" },
+        { sha: "c1a1000000000000000000000000000000000012", shortSha: "c1a100b", author: "Sora Ohta", subject: "docs: the staging model", rel: "1d ago" },
+      ] : [
         { sha: "5485767869c930415263", shortSha: "5485767", author: "Anton Arnaudov", subject: "wip: notes to self", rel: "2h ago" },
         { sha: "45968797c9d041526374", shortSha: "4596879", author: "Sora Ohta", subject: "changes: stage the lines a selection touches", rel: "9h ago" },
         { sha: "36a7b8c9d0e152637485", shortSha: "36a7b8c", author: "Anton Arnaudov", subject: "fixup! engine: split a hunk on a selection boundary", rel: "16h ago" },
@@ -933,6 +1070,31 @@
     "ssh:keys": [],
     // (the real fixture is above — an empty array here shadowed it)
   };
+
+  // ?winpaths=1 → the worktrees as main lists them on Windows: `path` is
+  // git's own spelling (C:/Users/…), the one sent back, and `shownPath` the
+  // system's (C:\Users\…), the one a person reads — main's nativePath.
+  if (params.get("winpaths")) {
+    fixtures["worktree:list"] = fixtures["worktree:list"].map((w) => ({
+      ...w,
+      path: `C:${w.path}`,
+      shownPath: `C:${w.path}`.replace(/\//g, "\\"),
+    }));
+  }
+
+  // ?fewrefs=1 → a small repository: two branches, one remote, no tags. The
+  // switcher turned its filter on only above nine rows, so here it had none
+  // and typed letters did nothing (#32 review).
+  if (params.get("fewrefs")) {
+    const keep = new Set(["main", "feat/line-staging"]);
+    branches = branches.filter((b) => keep.has(b.name));
+    fixtures["refs:list"] = fixtures["refs:list"].filter(
+      (r) =>
+        (r.type === "head" && keep.has(r.name)) ||
+        r.fullName === "refs/remotes/origin/HEAD" ||
+        r.fullName === "refs/remotes/origin/main",
+    );
+  }
 
   // ?collide=1 (see the branches above): the refs git lists beside them, under
   // the short names git gives them — the tags "main" and "release", the
@@ -1417,6 +1579,8 @@
       : done;
   }
 
+  /** The Assistant's saved agent choices (ai:settings / ai:setAgentConfig). */
+  const agentConfig = { permission: "write", thinking: "medium", modelId: "claude-opus-5" };
   const dynamic = {
     // A READ that the fallback used to answer with a mutation shape. Present so
     // the AI-gating path is exercised instead of silently failing open.
@@ -1599,9 +1763,15 @@
             enabled: true,
             connections: [{ id: "c1", label: "Claude (BYOK)", usable: true }],
             defaultId: "c1",
-            agent: { permission: "write", thinking: "medium", modelId: "claude-opus-5" },
+            agent: { ...agentConfig },
           }
         : { enabled: false, connections: [], defaultId: null },
+    // main's AiBridge.setAgentConfig: the agent's saved choices, merged, and
+    // the settings view they make.
+    "ai:setAgentConfig": (patch) => {
+      Object.assign(agentConfig, patch || {});
+      return dynamic["ai:settings"]();
+    },
     "ai:models": () =>
       params.get("ai")
         ? [
@@ -1713,21 +1883,66 @@
       homepage: "https://gistudio.dev",
     }),
     // Opening a repository you already have. Like a clone, main emits
-    // repo:changed from inside the handler, so the shell has rebuilt by the
-    // time the invoke resolves.
+    // repo:tabs from inside the handler, so the shell has switched by the time
+    // the invoke resolves. A repository that already has a tab is switched
+    // to, not opened twice (issue #32).
     "repo:openPath": (root) => {
-      const name = String(root).split("/").filter(Boolean).pop();
-      window.__gsEmit("repo:changed", { root, name });
-      return { root, name, branch: "main" };
+      const info = window.__gsTabs.open(String(root));
+      return info ? { ...info, branch: "main" } : undefined;
     },
-    // The clone the browse page starts. Main emits repo:changed from INSIDE the
+    // The clone the browse page starts. Main emits repo:tabs from INSIDE the
     // handler, before the invoke resolves — mirror that, or the renderer's
     // landing hook is never exercised and a check passes over the bug.
+    // ?clonems=N is a clone that takes N ms, in main's order: the clone runs
+    // (the progress card comes up after 250 ms), THEN the tab opens and is
+    // announced, THEN the invoke answers — with the card still up. `?slow=`
+    // only delays the answer, after a tab announced at the START.
     "ghrepo:open": ({ fullName }) => {
       const name = String(fullName).split("/")[1];
       const root = `/Users/demo/GitStudio/${name}`;
-      window.__gsEmit("repo:changed", { root, name });
-      return { ok: true, root, cloned: true };
+      const open = () => {
+        window.__gsTabs.open(root);
+        return { ok: true, root, cloned: true };
+      };
+      const ms = Number(params.get("clonems")) || 0;
+      return ms ? late(ms).then(open) : open();
+    },
+    // Opening another worktree is main's openRepoPath, like any open: a tab of
+    // its own (or the one it has), announced before the invoke answers.
+    // Every tab taken: main has said so (app:notice), and answers { said }.
+    "worktree:open": (path) => {
+      const info = window.__gsTabs.open(String(path));
+      return info ? { ...info } : window.__gsTabs.state().tabs.length >= 10 ? { said: true } : undefined;
+    },
+    // ── Repositories as tabs (issue #32) — main's RepoStore, in miniature ──
+    // ?latetabs=1 is main's boot order. The window asks which tabs are open
+    // while it loads; main answers once the launch restore has finished
+    // (RepoStore.settledState) — and the restore ANNOUNCES the tabs (a
+    // `repo:tabs` event) before that answer arrives. Answering at once, as
+    // this did, hid the order that mattered.
+    "repo:tabs": () => {
+      if (params.get("latetabs") && !lateTabsAnswered) {
+        lateTabsAnswered = true;
+        setTimeout(() => emitTabs(), 60);
+        return late(300).then(() => window.__gsTabs.state());
+      }
+      return window.__gsTabs.state();
+    },
+    "repo:activate": (root) => window.__gsTabs.activate(String(root)),
+    "repo:closeTab": (root) => window.__gsTabs.close(String(root)),
+    "repo:moveTab": (req) => window.__gsTabs.move(req && req.root, req && req.index),
+    // The tab row's ●N. Every fixture tab has its own count, so a check can
+    // tell one tab's mark from another's; ?tabsclean=1 makes them all clean.
+    "repo:tabStatus": (roots) => {
+      tabStatusCalls.push((roots || []).slice());
+      return Object.fromEntries(
+        (roots || []).map((r) => {
+          if (goneTabs.has(tabName(r))) return [r, { gone: true }];
+          const t = TAB_FIXTURES.find((x) => x.root === r);
+          const dirty = params.get("tabsclean") ? 0 : t ? t.dirty : 0;
+          return [r, { branch: t ? t.branch : "main", dirty, ahead: 0, behind: 0 }];
+        }),
+      );
     },
     // E4: entity pages — remote tree/file/readme at a ref, branches, paths.
     "ghrepo:commits": ifEmpty(({ ref }) =>
@@ -1938,8 +2153,18 @@
                 ahead: pullState.done ? 3 : 2,
                 behind: pullState.done ? 0 : pullState.behind(),
               }
-            : b,
+            : fetchState.found && b.name === "redesign/issues-detail"
+              ? { ...b, behind: b.behind + 2 }
+              : b,
         ),
+    "sync:fetch": () => {
+      fetchState.fetches++;
+      if (!params.get("fetchfinds")) return { ok: true };
+      return late(400).then(() => {
+        fetchState.found = true;
+        return { ok: true };
+      });
+    },
     // The per-branch log walk's answer. feat/line-staging is the interesting
     // one: created by one person, carried by three — a number-only "last
     // commit by" could never say that.
@@ -1973,6 +2198,53 @@
         ],
       },
     }),
+    // What removing a worktree takes, answered the way the bridge's
+    // worktreeRemoval does from the worktree:list fixture: main and this
+    // window's own are refused; the agent's worktree is stopped in a merge,
+    // with two uncommitted files.
+    "worktree:removal": (req) => {
+      worktreeState.removals.push(req);
+      const w = (fixtures["worktree:list"] || []).find((x) => x.path === (req && req.path));
+      if (!w) return { kind: "notListed" };
+      if (w.main) return { kind: "main" };
+      if (w.current) return { kind: "current" };
+      // As main: another tab has it open (and its folder is there).
+      if (!w.missing && window.__gsHeldByAnotherTab(w.path)) return { kind: "openInTab" };
+      const facts = { branch: w.branch, head: w.head, locked: !!w.locked, lockReason: w.lockReason };
+      if (w.missing) return { kind: "missing", ...facts };
+      const agent = w.branch === "agent/wave3";
+      const changes = agent ? ["src/agent-notes.md", "tmp/scratch.txt"] : [];
+      return { kind: "present", ...facts, changes, ...(agent ? { operation: "merge" } : {}) };
+    },
+    // Removed as sent; the row leaves the list, as git's would.
+    // ?wtchanged=1: the agent wrote a file while the question was open, so
+    // the first remove of its worktree runs nothing and answers what it holds
+    // now — as gitBridge's worktreeRemove does — and the renderer asks again.
+    "worktree:remove": (req) => {
+      worktreeState.removes.push(req);
+      if (params.get("wtchanged") && !worktreeState.changedOnce && /gitstudio-agent$/.test((req && req.path) || "")) {
+        worktreeState.changedOnce = true;
+        return {
+          ok: false,
+          changed: false,
+          expected: true,
+          message: "agent/wave3 has uncommitted changes it didn't have when you were asked, so nothing was removed. Remove it again to see what it holds now.",
+          changedSince: {
+            kind: "present",
+            branch: "agent/wave3",
+            head: "5e6f7a8b9c0",
+            locked: true,
+            lockReason: "claude agent agent-a2c9ae27 (pid 73264)",
+            changes: ["src/agent-notes.md", "tmp/scratch.txt", "src/agent-output.ts"],
+            operation: "merge",
+          },
+        };
+      }
+      const list = fixtures["worktree:list"] || [];
+      const at = list.findIndex((x) => x.path === (req && req.path));
+      if (at >= 0) list.splice(at, 1);
+      return { ok: true, changed: true };
+    },
     // Reset to upstream (#32), answered the way main/branchReset.ts answers:
     // the plan FETCHES first (so the watcher reports a moved ref 250 ms later,
     // while the question is on screen), refuses a branch with no upstream, one
@@ -2089,7 +2361,21 @@
     // Apply / pop from the stash list or a stash's page: the ref, or — sent
     // again after Stash & Retry — `{ ref, stashFirst }`.
     "stash:apply": (req) => throughTheDoor(req, "stash", () => ({ ok: true, changed: true })),
-    "stash:pop": (req) => throughTheDoor(req, "stash", () => ({ ok: true, changed: true })),
+    // ?stashkept=1 → the Pop git could not restore the staging of: main
+    // applied it and KEPT it (applyForDoor), and says why in the note.
+    "stash:pop": (req) =>
+      throughTheDoor(req, "stash", () =>
+        params.get("stashkept")
+          ? {
+              ok: true,
+              changed: true,
+              stashKept: true,
+              stashNote:
+                "The stash's staged changes came back unstaged — git couldn't stage them again here — so it was " +
+                "applied, not popped: it stays in the list, still holding them as they were staged.",
+            }
+          : { ok: true, changed: true },
+      ),
     // A pull request fetched and checked out: the number, or `{ number, stashFirst }`.
     "pr:checkout": (req) => throughTheDoor(req, "checkout", () => ({ ok: true, changed: true })),
     // A rename carries the tracking over UNCHANGED, exactly as `git branch -m`
@@ -2170,11 +2456,20 @@
     // Stash drop, and the restore that undoes it. Mutating, for the same
     // reason the discard fixtures are.
     "stash:list": () => stashes,
+    // By sha (what the list and the stash page send), or a ref, as main
+    // takes it; a stash that has left the list is the user's state.
     "stash:drop": (ref) => {
-      const hit = stashes.find((s) => s.ref === ref);
-      if (!hit) return { ok: false, changed: false, message: "no such stash" };
+      const hit = stashes.find((s) => s.sha === ref || s.ref === ref);
+      if (!hit) {
+        return {
+          ok: false,
+          changed: false,
+          expected: true,
+          message: "That stash is no longer in the list, so nothing was changed.",
+        };
+      }
       dropped.set(hit.sha, hit);
-      stashes = stashes.filter((s) => s.ref !== ref);
+      stashes = stashes.filter((s) => s.sha !== hit.sha);
       return { ok: true, changed: true };
     },
     "stash:restore": ({ sha }) => {
@@ -2650,6 +2945,13 @@
     "tsconfig.json": '{\n  "compilerOptions": {\n    "target": "ES2022",\n    "strict": true\n  }\n}\n',
     "apps/desktop/esbuild.js": 'const esbuild = require("esbuild");\n\nesbuild.build({ entryPoints: ["src/main/main.ts"] });\n',
   };
+  // worktree:list as main answers it: each row says whether another tab has
+  // it open (gitBridge's heldByAnotherTab), asked afresh on every read.
+  dynamic["worktree:list"] = () =>
+    (fixtures["worktree:list"] || []).map((w) => ({
+      ...w,
+      openInTab: !w.current && !w.missing && window.__gsHeldByAnotherTab(w.path),
+    }));
   dynamic["repo:tree"] = (req) => TREE[(req && req.path) || ""] || [];
   dynamic["repo:file"] = (req) => {
     const path = (req && req.path) || "";
@@ -2795,6 +3097,57 @@
   // tick would have answered the same ten rows and a check could pass over a
   // dead filter.
   const graphBase = fixtures["graph:load"];
+  // ?stack=1 (issue #32's multi-select scenes): three LOCAL commits on main,
+  // not pushed yet, above the released tip — the history a squash or a drop of
+  // several commits is for. main moves up to the newest; origin/main and the
+  // release tag stay on 9f8e7d6.
+  const STACK = [
+    { sha: "3c0ffee1a2b3c4d5e6f7", subject: "graph: keep the anchor where Shift-click started", h: 0.2 },
+    { sha: "2c0ffee1a2b3c4d5e6f7", subject: "wip", h: 0.5 },
+    { sha: "1c0ffee1a2b3c4d5e6f7", subject: "graph: select several commits with Cmd and Shift", h: 0.8, author: "Mira Holt" },
+  ];
+  if (params.get("stack")) {
+    const tip = graphBase.rows[0];
+    const main = tip.refs.find((r) => r.kind === "currentHead");
+    tip.refs = tip.refs.filter((r) => r.kind !== "currentHead");
+    const stackRows = STACK.map((s, i) => ({
+      ...tip,
+      sha: s.sha,
+      shortSha: s.sha.slice(0, 7),
+      subject: s.subject,
+      author: s.author || "Anton Arnaudov",
+      authorDate: Math.floor(Date.now() / 1000) - Math.round(s.h * 3600),
+      refs: i === 0 && main ? [main] : [],
+      isMerge: false,
+    }));
+    graphBase.rows = [...stackRows, ...graphBase.rows];
+    graphBase.head = STACK[0].sha;
+  }
+  // …and their details, so one of them selected ALONE shows it. Without these
+  // commit:details answered undefined — "Couldn't load this commit" — and a
+  // check that the pane was "that commit's again" passed on the error card.
+  // Rows carry 20-char prefixes of the details' 40-char shas, as everywhere.
+  const stackFull = (sha) => `${sha}8091a2b3c4d5e6f70819`;
+  STACK.forEach((s, i) => {
+    const when = Math.floor(Date.now() / 1000) - Math.round(s.h * 3600);
+    commits[s.sha.slice(0, 8)] = {
+      kind: "commit",
+      sha: stackFull(s.sha),
+      shortSha: s.sha.slice(0, 7),
+      parents: [i + 1 < STACK.length ? stackFull(STACK[i + 1].sha) : "9f8e7d6c5b4a392817068091a2b3c4d5e6f70819"],
+      author: s.author || me,
+      authorEmail: s.author ? "mira@gitstudio.dev" : "anton@gitstudio.dev",
+      authorDate: when,
+      committer: s.author || me,
+      committerEmail: s.author ? "mira@gitstudio.dev" : "anton@gitstudio.dev",
+      committerDate: when,
+      subject: s.subject,
+      body: "",
+      refs: [],
+      files: commitFiles([["M", "packages/webview-ui/src/graph/multiSelect.ts", 12 + i, 3]]),
+      hasRemote: false,
+    };
+  });
   /** sha → the refs that ALONE reach it; every other row is on main's line. */
   const reachOnly = { "77aa88b9c0d1e2f3a4b5": ["refs/remotes/origin/chore/dependabot-bump"] };
   const mainLine = new Set(graphBase.rows.map((r) => r.sha).filter((sha) => !reachOnly[sha]));
@@ -3147,8 +3500,101 @@
   dynamic["commit:drop"] = (req) =>
     params.get("dropconflict")
       ? { status: "stopped", reason: "conflict", message: "could not apply 9f8e7d6", before: req.head }
-      : { status: "done", before: req.head, after: DROP_AFTER };
+      : // As main answers: the branch it rewrote, which its Undo sends back.
+        { status: "done", before: req.head, after: DROP_AFTER, branch: "refs/heads/main" };
   dynamic["commit:undoDrop"] = () => ({ ok: true, changed: true });
+
+  // ── Several commits at once (issue #32) ────────────────────────────────────
+  // What main answers for a selection, from the same history: HEAD's
+  // first-parent line from the tip down to the merge is what can be
+  // rewritten — the ?stack=1 commits and the released 9f8e7d6 above the merge
+  // (published: origin/main is on it). Squash needs them contiguous on that
+  // line; a merge among them leaves Cherry-pick and Revert out. Switches:
+  //   ?dropblocked=1   the preflight finds uncommitted changes
+  //   ?dropcarry=1     a branch points at a rewritten commit (the either/or)
+  //   ?dropconflict=1  the rewrite stops on a conflict
+  //   ?pickpaused=1    a cherry-pick / revert of several stops on a conflict
+  const MERGE = "a1b2c3d4e5f60718293a";
+  const rewritable = () => {
+    const rows = graphBase.rows;
+    const at = rows.findIndex((r) => r.sha === MERGE);
+    return rows.slice(0, at < 0 ? rows.length : at).map((r) => r.sha);
+  };
+  const rowOf = (sha) => graphBase.rows.find((r) => r.sha === sha);
+  const manyOf = (shas) => {
+    const line = rewritable();
+    const inLine = (shas || []).every((s) => line.includes(s));
+    const idx = (shas || []).map((s) => line.indexOf(s)).sort((a, b) => a - b);
+    const contiguous = inLine && idx.every((v, i) => i === 0 || v === idx[i - 1] + 1);
+    return { line, inLine, contiguous, idx };
+  };
+  dynamic["commits:menu"] = (req) => {
+    const shas = (req && req.shas) || [];
+    const m = manyOf(shas);
+    return {
+      apply: shas.length > 1 && !shas.includes(MERGE),
+      drop: shas.length > 1 && m.inLine && m.idx.length < m.line.length,
+      squash: shas.length > 1 && m.contiguous,
+    };
+  };
+  dynamic["commits:plan"] = (req) => {
+    const verb = req && req.verb === "squash" ? "squash" : "drop";
+    const shas = (req && req.shas) || [];
+    const m = manyOf(shas);
+    if (!m.inLine || (verb === "squash" && !m.contiguous)) {
+      return {
+        ok: false,
+        expected: true,
+        reason: m.inLine ? "not-contiguous" : "past-merge",
+        message: m.inLine
+          ? "Only commits next to each other on the branch can be squashed — there are other commits between the ones you selected."
+          : "There's a merge between those commits and the tip of the branch — replaying the commits after them would flatten the merge.",
+      };
+    }
+    const ordered = m.idx.map((i) => m.line[i]);
+    const oldest = m.idx[m.idx.length - 1];
+    const rows = ordered.map(rowOf);
+    return {
+      ok: true,
+      verb,
+      shas: ordered,
+      commits: rows.map((r) => ({ shortSha: r.shortSha, subject: r.subject })),
+      head: graphBase.head,
+      branch: "main",
+      replayed: oldest + 1 - ordered.length,
+      published: ordered.includes(DROP_TIP),
+      carryable: params.get("dropcarry") ? ["release/1.11"] : [],
+      ...(verb === "squash" ? { message: rows.slice().reverse().map((r) => r.subject).join("\n\n") } : {}),
+      ...(req && req.preflight && params.get("dropblocked")
+        ? { blocked: `You have uncommitted changes. Commit or stash them, then ${verb} the commits.` }
+        : {}),
+    };
+  };
+  dynamic["commits:rewrite"] = (req) =>
+    params.get("dropconflict")
+      ? { status: "stopped", reason: "conflict", message: "could not apply", before: req.head }
+      : { status: "done", before: req.head, after: "d0d0d0d0d0d0d0d0d0d0", branch: "refs/heads/main" };
+  dynamic["commits:undo"] = () => ({ ok: true, changed: true });
+  {
+    // commit:action with `shas` — Cherry-pick / Revert of several — answers
+    // the two tips its Undo moves between, or pauses for the conflict flow.
+    const one = dynamic["commit:action"];
+    dynamic["commit:action"] = (req) => {
+      if (req && Array.isArray(req.shas) && req.shas.length > 1 && (req.action === "cherry-pick" || req.action === "revert")) {
+        if (params.get("pickpaused")) {
+          return {
+            ok: false,
+            changed: true,
+            expected: true,
+            paused: true,
+            message: `${req.action === "cherry-pick" ? "Cherry-picking" : "Reverting"} ${req.shas.length} commits stopped on a commit that needs you — resolve any conflicts and continue, skip that commit, or abort to put the branch back as it was.`,
+          };
+        }
+        return { ok: true, changed: true, before: graphBase.head, after: "d1d1d1d1d1d1d1d1d1d1", branch: "refs/heads/main" };
+      }
+      return one(req);
+    };
+  }
   const IDE = { id: "webstorm", name: "WebStorm", command: "/Applications/WebStorm.app/Contents/MacOS/webstorm" };
   dynamic["jetbrains:detect"] = () => (params.get("noide") === "1" ? undefined : IDE);
   dynamic["jetbrains:merge"] = (req) => {
@@ -3329,6 +3775,9 @@
   // `?slow=github:repos:1500,b:300` answers those channels that many ms late,
   // resolved or rejected alike. A view that paints whatever answer arrives last
   // (Repositories' two sides, #32) only shows its race with a slow channel.
+  // `channel@tab:ms` slows that channel for ONE repository tab only (by its
+  // folder name), and `*@tab:ms` every channel of that tab: the race between
+  // tabs (#32) is one tab's answer landing after you have moved to another.
   const slow = new Map(
     (params.get("slow") || "")
       .split(",")
@@ -3340,11 +3789,39 @@
   );
   const late = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  function answerInvoke(channel, payload) {
-    invoked.push({ channel, payload });
+  function answerInvoke(channel, payload, scope) {
+    // `scope` is the preload's third argument (issue #32): which tab asked.
+    // Recorded, so a check can assert what a call was FOR, not only that it
+    // was made.
+    const root = scope && typeof scope === "object" ? scope.root : undefined;
+    invoked.push({ channel, payload, root, scoped: !!scope });
     calls[channel] = (calls[channel] || 0) + 1;
     if (failing.has(channel)) {
       return Promise.reject(new Error(`${channel} failed (harness ?fail=)`));
+    }
+    // A gone tab's folder: git has nowhere to run (the tab row's own calls
+    // are main's bookkeeping, and still answer). In the app git fails at
+    // SPAWN — Node's "spawn git ENOENT", git never runs to say anything — and
+    // main says it plainly (repoNotice.ts missingFolderError). This used to
+    // invent a git-style "fatal: cannot change to …" the app never produces.
+    if (root && goneTabs.has(tabName(root)) && !String(channel).startsWith("repo:")) {
+      return Promise.reject(new Error(`The folder ${root} is not there any more — it was moved or deleted.`));
+    }
+    // Per-repository answers. Every tab fixture but gitstudio has its own
+    // branch, which is what the tab checks read to tell whose answer landed.
+    const tabFixture = root ? TAB_FIXTURES.find((t) => t.root === root) : undefined;
+    if (channel === "head:get" && tabFixture && tabFixture.name !== "gitstudio") {
+      return Promise.resolve({ detached: false, branch: tabFixture.branch, sha: "5a4b3c2" });
+    }
+    if (channel === "repo:current") {
+      const r = scope ? root : tabState.active;
+      return Promise.resolve(r && tabState.tabs.some((t) => t.root === r) ? { root: r, name: tabName(r) } : undefined);
+    }
+    // repo:close closes the tab the call came FROM — never "whichever is in front".
+    if (channel === "repo:close") {
+      const r = scope ? root : tabState.active;
+      if (r) window.__gsTabs.close(r);
+      return Promise.resolve(undefined);
     }
     if (channel in dynamic) {
       try { return Promise.resolve(dynamic[channel](payload)); } catch (e) { return Promise.reject(e); }
@@ -3385,9 +3862,11 @@
   }
 
   window.gitstudio = {
-    invoke(channel, payload) {
-      const answer = answerInvoke(channel, payload);
-      const ms = slow.get(channel);
+    invoke(channel, payload, scope) {
+      const answer = answerInvoke(channel, payload, scope);
+      const tab = scope && scope.root ? tabName(scope.root) : undefined;
+      const ms =
+        (tab && (slow.get(`${channel}@${tab}`) || slow.get(`*@${tab}`))) || slow.get(channel);
       if (!ms) return answer;
       return answer.then(
         (v) => late(ms).then(() => v),
@@ -3483,6 +3962,19 @@
         const sel = decodeURIComponent(step.slice(6));
         const elx = await until(() => q(sel));
         elx.click();
+      } else if (step.startsWith("shiftclick:") || step.startsWith("modclick:")) {
+        // A click with Shift, or with the platform's add-to-selection key
+        // (⌘ on a Mac, Ctrl elsewhere) — how a list is multi-selected.
+        const shift = step.startsWith("shiftclick:");
+        const sel = decodeURIComponent(step.slice(shift ? 11 : 9));
+        const elx = await until(() => q(sel));
+        const mac = navigator.platform.toLowerCase().includes("mac");
+        elx.dispatchEvent(
+          new MouseEvent("click", {
+            bubbles: true, cancelable: true,
+            shiftKey: shift, metaKey: !shift && mac, ctrlKey: !shift && !mac,
+          }),
+        );
       } else if (step.startsWith("rclick:")) {
         // A right-click, for the graph row's commit menu: `contextmenu` at a
         // point inside the match, composed so it leaves the shadow root.
@@ -3494,6 +3986,15 @@
             bubbles: true, composed: true, cancelable: true,
             clientX: Math.round(r.left + Math.min(240, r.width / 2)), clientY: Math.round(r.top + r.height / 2),
           }),
+        );
+      } else if (step.startsWith("mclick:") || step.startsWith("sclick:")) {
+        // A Cmd-click (mclick) or a Shift-click (sclick) — the graph's
+        // multi-select (issue #32). Composed, so it leaves the shadow root.
+        const sel = decodeURIComponent(step.slice(7));
+        const elx = await until(() => q(sel));
+        const shift = step.startsWith("sclick:");
+        elx.dispatchEvent(
+          new MouseEvent("click", { bubbles: true, composed: true, cancelable: true, metaKey: !shift, shiftKey: shift }),
         );
       } else if (step.startsWith("scroll:")) {
         const sel = decodeURIComponent(step.slice(7));
@@ -3535,14 +4036,26 @@
       } else if (step === "esc") {
         document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
       } else if (step.startsWith("key:")) {
-        const key = decodeURIComponent(step.slice(4));
+        // `key:Shift+ArrowDown`, `key:Alt+ArrowUp`: modifiers before the key,
+        // each followed by "+". A lone "+" is the key itself.
+        let key = decodeURIComponent(step.slice(4));
+        const mods = { shiftKey: false, altKey: false, metaKey: false, ctrlKey: false };
+        for (let m; (m = /^(Shift|Alt|Meta|Ctrl)\+(?=.)/.exec(key)); key = key.slice(m[0].length)) {
+          mods[{ Shift: "shiftKey", Alt: "altKey", Meta: "metaKey", Ctrl: "ctrlKey" }[m[1]]] = true;
+        }
         // Dispatch on the FOCUSED element when there is one: a real keypress
         // goes to what has focus and bubbles up, which is what handlers on an
         // input (Enter-to-search) actually listen for.
         const target = document.activeElement && document.activeElement !== document.body
           ? document.activeElement
           : window;
-        target.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+        target.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...mods }));
+      } else if (step.startsWith("wait:")) {
+        // Hold the scene. shot.sh captures when its virtual-time budget runs
+        // out, long after the last step — so a state that lasts only a few
+        // seconds (a banner's flash) is caught by waiting BEFORE the step
+        // that raises it.
+        await wait(Number(step.slice(5)) || 0);
       }
       await wait(350);
     }

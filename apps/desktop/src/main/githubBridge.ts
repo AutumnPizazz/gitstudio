@@ -7,6 +7,7 @@
 
 import { app } from "electron";
 import { githubStatus } from "./githubStatus";
+import { existsSync } from "node:fs";
 import { unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { SecretStore } from "@gitstudio/secret-store/secretStore";
@@ -17,12 +18,20 @@ import { GitHubClient } from "./githubClient";
 import { requestDeviceCode, pollForToken } from "./githubAuth";
 import type { RepoStore } from "./repoStore";
 import { ExpectedError } from "./expectedError";
-import { parseGitHubRemote } from "./githubRemote";
+import { githubRepoOfRemote } from "./githubRemote";
 
 // Re-exported so existing importers (and their tests) keep their seam.
 export { parseGitHubRemote } from "./githubRemote";
 import { errorFields } from "./githubErrors";
 import { applyForDoor, checkoutOp } from "./inTheWay";
+import { checkedOutElsewhere, checkedOutElsewhereMessage } from "@gitstudio/git-service/branchElsewhere";
+import type { ApplyOp } from "@gitstudio/git-service/changesInTheWay";
+import {
+  divergedMessage,
+  fetchPrHead,
+  movePrBranch,
+  planPrHead,
+} from "@gitstudio/git-service/prCheckout";
 import type {
   CheckRun,
   CommitActionResult,
@@ -60,6 +69,8 @@ export class GitHubBridge {
   }
   private ownerRepoRoot: string | undefined;
   private cachedOwnerRepo: { owner: string; repo: string } | undefined;
+  /** The remote `cachedOwnerRepo` was read from: a PR's head is fetched there. */
+  private cachedRemoteName: string | undefined;
   /** Lazily built: `app.getPath` is only valid once Electron is ready. */
   private store: SecretStore | undefined;
 
@@ -109,10 +120,14 @@ export class GitHubBridge {
     if (this.ownerRepoRoot === ctx.root && this.cachedOwnerRepo) {
       return this.cachedOwnerRepo;
     }
+    let from: string | undefined;
     const tryRemote = async (name: string): Promise<{ owner: string; repo: string } | undefined> => {
       try {
         const r = await ctx.process.run(["remote", "get-url", name]);
-        return r.code === 0 ? parseGitHubRemote(r.stdout.trim()) : undefined;
+        // Through ~/.ssh/config's aliases too, as the extension reads it.
+        const got = r.code === 0 ? await githubRepoOfRemote(r.stdout.trim()) : undefined;
+        if (got) from = name;
+        return got;
       } catch {
         return undefined;
       }
@@ -132,6 +147,7 @@ export class GitHubBridge {
     }
     this.ownerRepoRoot = ctx.root;
     this.cachedOwnerRepo = hit;
+    this.cachedRemoteName = hit ? from : undefined;
     return hit;
   }
 
@@ -395,16 +411,76 @@ export class GitHubBridge {
       return { ok: false, changed: false, message: "That isn't a pull request number." };
     }
     try {
-      const f = await ctx.process.run(["fetch", "origin", `pull/${n}/head:pr/${n}`]);
-      if (f.code !== 0) {
-        return { ok: false, changed: false, message: f.stderr.trim() };
+      // pr/<n> is checked out in another worktree: said where, before
+      // anything runs (no fetch) — as the extension's checkoutPr and this
+      // app's branch checkout do, in the same words.
+      const where = await checkedOutElsewhere(ctx.process, `refs/heads/pr/${n}`);
+      if (where) {
+        return {
+          ok: false,
+          changed: false,
+          expected: true,
+          message: checkedOutElsewhereMessage(`pr/${n}`, where, "checkout", !existsSync(where)),
+        };
+      }
+      // The PR head is fetched on its own, and what that means for the pr/<n>
+      // already here is decided by git-service's planPrHead — the extension's
+      // rule too. `git fetch origin pull/<n>/head:pr/<n>` was refused while
+      // pr/<n> was checked out, and after any force-push to the PR.
+      // From the remote the pull requests are read from (origin, then
+      // upstream, then the rest — resolveOwnerRepo), as the extension fetches
+      // from its ctx.remoteName: "origin" by name asked a non-GitHub mirror.
+      const remote = (await this.resolveOwnerRepo()) ? this.cachedRemoteName : undefined;
+      const fetched = await fetchPrHead(ctx.process, remote ?? "origin", n as number);
+      if ("error" in fetched) {
+        return { ok: false, changed: false, message: fetched.error };
+      }
+      const plan = await planPrHead(ctx.process, n as number, fetched.sha);
+      let op: ApplyOp;
+      switch (plan.kind) {
+        case "elsewhere":
+          // Checked out elsewhere since the look above: the same words.
+          return {
+            ok: false,
+            changed: false,
+            expected: true,
+            message: plan.worktree
+              ? checkedOutElsewhereMessage(plan.local, plan.worktree, "checkout", !existsSync(plan.worktree))
+              : `${plan.local} is checked out in another worktree. Switch to it there.`,
+          };
+        case "diverged":
+          // Nothing is moved over commits the PR doesn't have.
+          return {
+            ok: false,
+            changed: false,
+            expected: true,
+            message: `${divergedMessage(n as number, plan)} It was left as it is: check it out from Branches as it is, or rename or delete ${plan.local}, then Check Out again to get the pull request's version.`,
+          };
+        case "current":
+          if (plan.checkedOut) return { ok: true, changed: false };
+          op = checkoutOp(["checkout", plan.local]);
+          break;
+        case "fast-forward":
+          if (plan.checkedOut) {
+            op = { kind: "merge", target: plan.sha, args: ["merge", "--ff-only", plan.sha] };
+          } else {
+            const moved = await movePrBranch(ctx.process, plan);
+            if (moved.code !== 0) {
+              return { ok: false, changed: false, message: moved.stderr.trim() };
+            }
+            op = checkoutOp(["checkout", plan.local]);
+          }
+          break;
+        case "create":
+          op = checkoutOp(["checkout", "-b", plan.local, plan.sha]);
+          break;
       }
       // Through the one door for commit-applying commands (main/inTheWay.ts):
       // a switch refused over uncommitted work in its way said which files and
       // offered nothing — git's "would be overwritten by checkout", in red, and
       // filed. It answers which files now, `expected`, and the renderer offers
       // Stash & Retry.
-      const applied = await applyForDoor(ctx, checkoutOp(["checkout", `pr/${n}`]), stashFirst);
+      const applied = await applyForDoor(ctx, op, stashFirst);
       if ("answer" in applied) return applied.answer;
       const c = applied.result;
       const withNote = applied.stashNote ? { stashNote: applied.stashNote } : {};

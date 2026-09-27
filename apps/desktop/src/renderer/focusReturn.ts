@@ -30,8 +30,27 @@ const ARM_MS = 2500;
 /** Rows carry `data-num`; that is the identity we remember. */
 const ROW_SELECTOR = "[data-num]";
 
-/** view id → the `data-num` of the row focus was last on in that view. */
-const lastRow = new Map<string, string>();
+/** view id → the `data-num` of the row focus was last on in that view — for
+ *  the tab in front. Each repository tab keeps its own (issue #32): issue #31
+ *  in one repository is not issue #31 in another. */
+let lastRow = new Map<string, string>();
+const rowsByTab = new Map<number, Map<string, string>>();
+
+/** The tab in front changed: remember rows for, and return focus within, it. */
+export function setFocusTab(session: number): void {
+  let rows = rowsByTab.get(session);
+  if (!rows) {
+    rows = new Map();
+    rowsByTab.set(session, rows);
+  }
+  lastRow = rows;
+  armed = undefined;
+}
+
+/** A tab closed: forget its rows. */
+export function dropFocusTab(session: number): void {
+  rowsByTab.delete(session);
+}
 
 let scope = "";
 let armed: { view: string; num: string; until: number } | undefined;
@@ -101,6 +120,19 @@ function tick(): void {
  * anywhere else simply changes the scope, so the next row focused is recorded
  * against the right view.
  */
+/**
+ * The element that really has focus: through every open shadow root, down to
+ * the one inside it. The graph's rows live in <gitstudio-graph>'s shadow root,
+ * so `document.activeElement` is only the host — which has no tabindex — and
+ * a menu or a dialog that handed focus back to it dropped the keyboard on
+ * <body>, where the arrows move nothing.
+ */
+export function deepActiveElement(doc: Document = document): HTMLElement | null {
+  let el = doc.activeElement as HTMLElement | null;
+  while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement as HTMLElement;
+  return el;
+}
+
 export function setFocusScope(view: string): void {
   wire();
   scope = view;

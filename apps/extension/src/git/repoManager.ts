@@ -42,6 +42,18 @@ export interface UndoOptions {
    * is still where the op left it (git-service's Snapshot.branch).
    */
   branch?: string;
+  /**
+   * The op goes on after the wrapped call returns — an interactive rebase
+   * handed to a terminal. Undo then reads what it changed from the reflogs;
+   * `onto` (the rebase's base, a sha) tells its moves from any other rebase.
+   */
+  deferred?: { onto?: string };
+  /**
+   * The op moves only refs and stashes — Delete branch, Drop stash — never
+   * the working tree. An edit saved while its question was open is then the
+   * user's: a cancel records nothing, and Undo never takes the edit back.
+   */
+  refsOnly?: boolean;
 }
 
 /** A live repository: its root, our data context, and (once vscode.git has
@@ -106,6 +118,15 @@ export class RepoManager implements vscode.Disposable {
   private readonly pickStore: PickMemento | undefined;
   /** Resolves when eager discovery has finished (one rev-parse per folder). */
   private eagerDone: Promise<void> = Promise.resolve();
+  /**
+   * False until discovery has settled: our own rev-parse per folder AND
+   * vscode.git's first scan (it finds repositories below the folders, which a
+   * rev-parse does not). Until then "no active repository" means "not found
+   * YET", and a view must not say there is none.
+   */
+  private discovered = false;
+  /** Bounds the wait for vscode.git's first scan (see create's discoveryLimitMs). */
+  private discoveryTimer: ReturnType<typeof setTimeout> | undefined;
   private disposed = false;
 
   private readonly disposables: vscode.Disposable[] = [];
@@ -134,8 +155,19 @@ export class RepoManager implements vscode.Disposable {
    * `pickStore` is the workspace's Memento (context.workspaceState): where the
    * repository picked with Switch Repository… is remembered across reloads.
    */
-  static async create(pickStore?: PickMemento): Promise<RepoManager> {
+  static async create(
+    pickStore?: PickMemento,
+    opts: {
+      /**
+       * How long "no repository" may mean "not found yet" while vscode.git
+       * has not finished its first scan. A vscode.git that never reports one
+       * must not leave the views saying "Looking for a repository…" for good.
+       */
+      discoveryLimitMs?: number;
+    } = {},
+  ): Promise<RepoManager> {
     const manager = new RepoManager(pickStore);
+    manager.discoveryTimer = setTimeout(() => manager.markDiscovered(), opts.discoveryLimitMs ?? 10_000);
     // Discover repos from the workspace folders via OUR OWN git (one fast
     // `git rev-parse` each) so views get a root + git-service ctx INSTANTLY,
     // without waiting for vscode.git to activate + scan (the gate that made
@@ -143,6 +175,7 @@ export class RepoManager implements vscode.Disposable {
     manager.eagerDone = manager.eagerDiscover().catch(() => undefined);
     void manager.init().catch(() => {
       // git unavailable — the views simply stay in their no-repo state.
+      void manager.eagerDone.then(() => manager.markDiscovered());
     });
     return manager;
   }
@@ -251,15 +284,40 @@ export class RepoManager implements vscode.Disposable {
     if (!api || api.state === "initialized") {
       await this.eagerDone;
       this.settlePick();
+      this.markDiscovered();
     } else {
       const settled = api.onDidChangeState((state) => {
         if (state === "initialized") {
           settled.dispose();
-          void this.eagerDone.then(() => this.settlePick());
+          void this.eagerDone.then(() => {
+            this.settlePick();
+            this.markDiscovered();
+          });
         }
       });
       this.disposables.push(settled);
     }
+  }
+
+  /**
+   * True while repositories may still be found: the first discovery has not
+   * settled. A view with no active repository shows "looking", not "none".
+   */
+  isDiscovering(): boolean {
+    return !this.discovered;
+  }
+
+  /** Discovery settled: a view still waiting to say "no repository" may now. */
+  private markDiscovered(): void {
+    if (this.discoveryTimer !== undefined) {
+      clearTimeout(this.discoveryTimer);
+      this.discoveryTimer = undefined;
+    }
+    if (this.discovered || this.disposed) {
+      return;
+    }
+    this.discovered = true;
+    this.changeEmitter.fire();
   }
 
   /**
@@ -558,6 +616,10 @@ export class RepoManager implements vscode.Disposable {
 
   dispose(): void {
     this.disposed = true;
+    if (this.discoveryTimer !== undefined) {
+      clearTimeout(this.discoveryTimer);
+      this.discoveryTimer = undefined;
+    }
     if (this.refreshTimer !== undefined) {
       clearTimeout(this.refreshTimer);
       this.refreshTimer = undefined;

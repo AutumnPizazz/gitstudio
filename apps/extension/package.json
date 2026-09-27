@@ -284,6 +284,12 @@
         "icon": "$(repo)"
       },
       {
+        "command": "gitstudio.branches.open",
+        "title": "Branches\u2026",
+        "category": "GitStudio",
+        "icon": "$(git-branch)"
+      },
+      {
         "command": "gitstudio.resolveInMergeEditor",
         "title": "Resolve in Merge Editor",
         "category": "GitStudio",
@@ -432,6 +438,18 @@
         "icon": "$(folder-opened)"
       },
       {
+        "command": "gitstudio.worktree.openInNewWindow",
+        "title": "Open in New Window",
+        "category": "GitStudio",
+        "icon": "$(empty-window)"
+      },
+      {
+        "command": "gitstudio.worktree.openHere",
+        "title": "Open in This Window",
+        "category": "GitStudio",
+        "icon": "$(folder-opened)"
+      },
+      {
         "command": "gitstudio.worktree.add",
         "title": "New Worktree\u2026",
         "category": "GitStudio",
@@ -444,8 +462,14 @@
         "icon": "$(trash)"
       },
       {
+        "command": "gitstudio.worktree.forget",
+        "title": "Forget Worktree",
+        "category": "GitStudio",
+        "icon": "$(close)"
+      },
+      {
         "command": "gitstudio.worktree.lock",
-        "title": "Lock Worktree",
+        "title": "Lock Worktree\u2026",
         "category": "GitStudio",
         "icon": "$(lock)"
       },
@@ -1144,11 +1168,6 @@
           "default": false,
           "description": "Enable the Sign-off toggle by default in the GitStudio commit box (adds a Signed-off-by trailer)."
         },
-        "gitstudio.push.forceWithLease": {
-          "type": "boolean",
-          "default": true,
-          "description": "When force-pushing from GitStudio, use the safer --force-with-lease (which refuses to overwrite remote work you haven't seen) instead of a raw --force."
-        },
         "gitstudio.worktrees.prefixWithProjectName": {
           "type": "boolean",
           "default": false,
@@ -1161,13 +1180,15 @@
             "copilot",
             "anthropic",
             "openai",
+            "cli",
             "off"
           ],
           "enumDescriptions": [
             "Prefer the zero-key VS Code Language Model (GitHub Copilot / Cursor) when available; otherwise Anthropic (if a key is set), then an OpenAI-compatible endpoint (if a model is configured).",
             "Use the VS Code Language Model API \u2014 GitHub Copilot or Cursor's models, with no key. Pick a specific model via \u201cGitStudio: Select AI Model\u2026\u201d.",
-            "Use Anthropic directly (requires an API key set via GitStudio: Set AI API Key).",
+            "Use Anthropic directly (requires an API key, set with \u201cGitStudio: Connect AI Provider\u201d).",
             "Use any OpenAI-compatible endpoint \u2014 OpenAI, Codex, OpenRouter, or a local server (Ollama / LM Studio). Configure the base URL and model below; a key is optional for local servers.",
+            "Use a local agent CLI \u2014 Claude Code, Codex or Gemini CLI \u2014 with its own login and no API key. Which one is gitstudio.ai.cliAgent; pick it with \u201cGitStudio: Connect AI Provider\u201d.",
             "Disable all GitBrain AI features."
           ],
           "default": "auto",
@@ -1308,7 +1329,7 @@
           {
             "id": "gitstudio.walkthrough.graph",
             "title": "Browse your history in the commit graph",
-            "description": "Your history as a live, virtualized commit graph \u2014 right in the **Commits** view in the sidebar, or full-screen in an editor tab. Colored lanes, ref chips and authorship (never a flat list); right-click any commit to checkout, cherry-pick, branch, or reset, and compare any two branches.\n[Open Commit Graph](command:gitstudio.showCommitGraph)\nTip: the graph lives in the **Commits** view at the top of the GitStudio sidebar \u2014 no need to leave it.",
+            "description": "Your history as a live, virtualized commit graph \u2014 right in the **Commits** view in the sidebar, or in the **Commit Graph** panel beside the terminal. Colored lanes, ref chips and authorship (never a flat list); right-click any commit to checkout, cherry-pick, branch, or reset, and compare any two branches.\n[Open Commit Graph](command:gitstudio.showCommitGraph)\nTip: the graph lives in the **Commits** view, under Changes in the GitStudio sidebar \u2014 no need to leave it.",
             "media": {
               "image": {
                 "light": "media/wordmark-light.png",
@@ -1391,7 +1412,7 @@
           {
             "id": "gitstudio.walkthrough.connect",
             "title": "Connect GitHub & set up GitBrain (optional)",
-            "description": "Sign in once with VS Code's built-in GitHub account to list, check out, review, merge, and create pull requests in-editor. GitBrain AI is optional and bring-your-own-key \u2014 set an Anthropic key (or use Copilot's model) for commit messages, explain-this-diff, and summaries. It's off until you turn it on and never gates a Git operation.\n[Sign in to GitHub](command:gitstudio.pr.signIn)\n[Set AI API Key](command:gitstudio.ai.setApiKey)",
+            "description": "Sign in once with VS Code's built-in GitHub account to list, check out, review, merge, and create pull requests in-editor. GitBrain AI is optional: it uses Copilot's (or Cursor's) model when there is one, with nothing to set up; otherwise connect Anthropic, an OpenAI-compatible endpoint or a local agent CLI for commit messages, explain-this-diff, and summaries. It never gates a Git operation, and Disable AI Features turns it off.\n[Sign in to GitHub](command:gitstudio.pr.signIn)\n[Connect AI Provider](command:gitstudio.ai.connect)",
             "media": {
               "image": {
                 "light": "media/wordmark-light.png",
@@ -1402,7 +1423,7 @@
             },
             "completionEvents": [
               "onCommand:gitstudio.pr.signIn",
-              "onCommand:gitstudio.ai.setApiKey"
+              "onCommand:gitstudio.ai.connect"
             ]
           }
         ]
@@ -1525,7 +1546,7 @@
       "scm/inputBox": [
         {
           "command": "gitstudio.ai.generateCommitMessage",
-          "when": "scmProvider == git",
+          "when": "scmProvider == git && gitstudio.ai.enabled",
           "group": "navigation"
         }
       ],
@@ -1582,6 +1603,26 @@
         {
           "command": "gitstudio.openWalkthrough",
           "when": "true"
+        },
+        {
+          "command": "gitstudio.showWelcome",
+          "when": "false"
+        },
+        {
+          "command": "gitstudio.showCommitGraph",
+          "when": "gitstudio.hasRepo"
+        },
+        {
+          "command": "gitstudio.refreshCommits",
+          "when": "false"
+        },
+        {
+          "command": "gitstudio.refreshBranches",
+          "when": "false"
+        },
+        {
+          "command": "gitstudio.debug.showProcessAudit",
+          "when": "config.gitstudio.debug.logChildProcesses"
         },
         {
           "command": "gitstudio.ai.selectModel",
@@ -1689,15 +1730,15 @@
         },
         {
           "command": "gitstudio.operation.continue",
-          "when": "gitstudio.hasRepo"
+          "when": "gitstudio.hasRepo && gitstudio.operationInProgress"
         },
         {
           "command": "gitstudio.operation.skip",
-          "when": "gitstudio.hasRepo"
+          "when": "gitstudio.hasRepo && gitstudio.operationInProgress"
         },
         {
           "command": "gitstudio.operation.abort",
-          "when": "gitstudio.hasRepo"
+          "when": "gitstudio.hasRepo && gitstudio.operationInProgress"
         },
         {
           "command": "gitstudio.stageSelectedLines",
@@ -1721,7 +1762,7 @@
         },
         {
           "command": "gitstudio.abortRebase",
-          "when": "gitstudio.hasRepo"
+          "when": "gitstudio.hasRepo && gitstudio.operationInProgress"
         },
         {
           "command": "gitstudio.undo",
@@ -1760,7 +1801,19 @@
           "when": "false"
         },
         {
+          "command": "gitstudio.worktree.openInNewWindow",
+          "when": "false"
+        },
+        {
+          "command": "gitstudio.worktree.openHere",
+          "when": "false"
+        },
+        {
           "command": "gitstudio.worktree.remove",
+          "when": "false"
+        },
+        {
+          "command": "gitstudio.worktree.forget",
           "when": "false"
         },
         {
@@ -1773,6 +1826,10 @@
         },
         {
           "command": "gitstudio.compareRefs",
+          "when": "gitstudio.hasRepo"
+        },
+        {
+          "command": "gitstudio.branches.open",
           "when": "gitstudio.hasRepo"
         },
         {
@@ -2045,7 +2102,7 @@
         },
         {
           "command": "gitstudio.showCommitPanel",
-          "when": "gitstudio.hasRepo"
+          "when": "false"
         },
         {
           "command": "gitstudio.stageWithTicks",
@@ -2062,8 +2119,8 @@
       ],
       "view/item/context": [
         {
-          "command": "gitstudio.worktree.open",
-          "when": "view == gitstudio.worktrees && (viewItem == gitstudio.worktree || viewItem == gitstudio.worktree.locked)",
+          "command": "gitstudio.worktree.openInNewWindow",
+          "when": "view == gitstudio.worktrees && viewItem =~ /^gitstudio\\.worktree(\\.main)?(\\.locked)?$/",
           "group": "inline@1"
         },
         {
@@ -2072,19 +2129,29 @@
           "group": "inline@2"
         },
         {
-          "command": "gitstudio.worktree.open",
-          "when": "view == gitstudio.worktrees && (viewItem == gitstudio.worktree || viewItem == gitstudio.worktree.locked)",
+          "command": "gitstudio.worktree.forget",
+          "when": "view == gitstudio.worktrees && viewItem =~ /^gitstudio\\.worktree\\.missing(\\.locked)?$/",
+          "group": "inline@2"
+        },
+        {
+          "command": "gitstudio.worktree.openInNewWindow",
+          "when": "view == gitstudio.worktrees && viewItem =~ /^gitstudio\\.worktree(\\.main)?(\\.locked)?$/",
           "group": "1_worktree@1"
         },
         {
-          "command": "gitstudio.worktree.lock",
-          "when": "view == gitstudio.worktrees && viewItem == gitstudio.worktree",
+          "command": "gitstudio.worktree.openHere",
+          "when": "view == gitstudio.worktrees && viewItem =~ /^gitstudio\\.worktree(\\.main)?(\\.locked)?$/",
           "group": "1_worktree@2"
         },
         {
+          "command": "gitstudio.worktree.lock",
+          "when": "view == gitstudio.worktrees && (viewItem == gitstudio.worktree || viewItem == gitstudio.worktree.current)",
+          "group": "1_worktree@3"
+        },
+        {
           "command": "gitstudio.worktree.unlock",
-          "when": "view == gitstudio.worktrees && viewItem == gitstudio.worktree.locked",
-          "group": "1_worktree@2"
+          "when": "view == gitstudio.worktrees && viewItem =~ /^gitstudio\\.worktree(\\.current)?(\\.missing)?\\.locked$/",
+          "group": "1_worktree@3"
         },
         {
           "command": "gitstudio.worktree.remove",
@@ -2092,28 +2159,33 @@
           "group": "2_worktree@1"
         },
         {
+          "command": "gitstudio.worktree.forget",
+          "when": "view == gitstudio.worktrees && viewItem =~ /^gitstudio\\.worktree\\.missing(\\.locked)?$/",
+          "group": "2_worktree@1"
+        },
+        {
           "command": "gitstudio.pr.checkout",
-          "when": "view == gitstudio.pullRequests && viewItem == gitstudio.pr",
+          "when": "view == gitstudio.pullRequests && viewItem =~ /^gitstudio\\.pr(\\.draft)?$/",
           "group": "inline@1"
         },
         {
           "command": "gitstudio.pr.openOnGitHub",
-          "when": "view == gitstudio.pullRequests && viewItem == gitstudio.pr",
+          "when": "view == gitstudio.pullRequests && viewItem =~ /^gitstudio\\.pr(\\.draft)?$/",
           "group": "inline@2"
         },
         {
           "command": "gitstudio.pr.checkout",
-          "when": "view == gitstudio.pullRequests && viewItem == gitstudio.pr",
+          "when": "view == gitstudio.pullRequests && viewItem =~ /^gitstudio\\.pr(\\.draft)?$/",
           "group": "1_pr@1"
         },
         {
           "command": "gitstudio.pr.openDescription",
-          "when": "view == gitstudio.pullRequests && viewItem == gitstudio.pr",
+          "when": "view == gitstudio.pullRequests && viewItem =~ /^gitstudio\\.pr(\\.draft)?$/",
           "group": "1_pr@2"
         },
         {
           "command": "gitstudio.pr.startReview",
-          "when": "view == gitstudio.pullRequests && viewItem == gitstudio.pr",
+          "when": "view == gitstudio.pullRequests && viewItem =~ /^gitstudio\\.pr(\\.draft)?$/",
           "group": "1_pr@3"
         },
         {
@@ -2123,12 +2195,12 @@
         },
         {
           "command": "gitstudio.pr.openOnGitHub",
-          "when": "view == gitstudio.pullRequests && viewItem == gitstudio.pr",
+          "when": "view == gitstudio.pullRequests && viewItem =~ /^gitstudio\\.pr(\\.draft)?$/",
           "group": "2_pr@1"
         },
         {
           "command": "gitstudio.pr.copyUrl",
-          "when": "view == gitstudio.pullRequests && viewItem == gitstudio.pr",
+          "when": "view == gitstudio.pullRequests && viewItem =~ /^gitstudio\\.pr(\\.draft)?$/",
           "group": "2_pr@2"
         }
       ],
@@ -2378,7 +2450,7 @@
     "watch": "node esbuild.js --watch",
     "package": "node esbuild.js --production",
     "check-types": "tsc --noEmit",
-    "test": "tsx --test \"test/**/*.test.ts\"",
+    "test": "tsx --import ../../scripts/test/hermetic-git.mjs --test \"test/**/*.test.ts\"",
     "vscode:prepublish": "npm run package"
   },
   "devDependencies": {

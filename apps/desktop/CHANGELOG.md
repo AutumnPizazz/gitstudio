@@ -13,6 +13,54 @@ but they share the same engine, so most Git behaviour lands in both at once.
 
 ### Added
 
+- **Select several commits in the graph.** **Cmd/Ctrl+click** adds or removes
+  a commit, **Shift+click** selects everything from the last one you clicked,
+  and **Shift+Up/Down** extends the selection from the keyboard; **Escape**
+  keeps only the commit the cursor is on. Every selected row is highlighted and
+  the one the cursor is on keeps its accent bar. Right-click inside the
+  selection (or press Shift+F10) for one menu for all of them; right-click
+  outside it and it is that commit's own menu, as before. The details pane says
+  how many commits are selected, by whom and when, lists them — click one to
+  keep just it — and offers the same actions, instead of one commit's details
+  standing in for all of them. (#32)
+- **Act on several commits at once.** **Cherry-pick N commits** applies them
+  oldest first in one run, and **Revert N commits** reverts them newest first;
+  if one conflicts you're taken to Changes, where the conflicts dashboard
+  offers Continue, Skip and Abort — abort puts the branch back as it was — and
+  uncommitted changes that any of them would overwrite are asked about before
+  anything is applied, with Stash & Retry. **Squash N commits…** opens a
+  message editor with every commit message, oldest first, ready to edit, and
+  makes them one commit with your message. **Drop N commits…** asks once,
+  listing every commit it removes and whether they are already pushed.
+  **Compare these two commits** opens Compare for exactly two, and **Copy
+  SHAs** copies every one, a line each. Only what can apply is offered:
+  Cherry-pick and Revert are left out when a merge commit is selected, Squash
+  and Drop when the commits are not all on your current branch — and Squash
+  also when there are other commits between them. Each one can be undone
+  straight afterwards: Undo puts back the branch it ran on, and the branches
+  a drop or squash carried. (#32)
+- **Repositories open as tabs.** The top row of the window holds a tab for
+  every repository you have open — its name, **●** with the number of changed
+  files when it has any, a spinner while a push, pull or other operation runs
+  in it, and a close button. **+** opens another (Open…, Clone…, your recent
+  repositories); opening one that already has a tab switches to it. Each tab
+  keeps its own place: the view you were on, Back and Forward, how far you had
+  scrolled, its searches and filters, the diff or log you had open, the
+  commit message you had started, its terminals, and a stopped rebase or
+  merge — switching back finds them as you left them, and a running CI page
+  or a log you were following picks up again. One tab's search never filters
+  another's list. A push that finishes in a tab you are not looking at tells
+  you when you go back to it. **Ctrl+Tab** and
+  **Ctrl+Shift+Tab** move between tabs, **⌃1–⌃9** (Alt+1–9 on Windows and
+  Linux) jump to one, and **⌘W** (Ctrl+W) closes the tab in front — asking
+  first if something is still running in it; an unsent commit message is kept
+  and comes back when you reopen the repository. Right-click a tab to close
+  the others or reveal it in Finder, drag tabs to reorder them, and when there
+  are more than fit, the list button shows them all. The tabs you had open come
+  back when you restart GitStudio. Up to ten repositories can be open at once.
+  A tab whose folder is moved or deleted stays, its name struck through, and
+  when you go to it one screen says so, with **Look again** and **Close Tab**
+  — put the folder back and it carries on where it was. (#32)
 - **Open a repository in your editor from its row.** Every repository under
   *On this machine* has the editor button beside **Open** — the same one the
   top bar and Home carry, the primary half opening your default editor, its
@@ -48,15 +96,160 @@ but they share the same engine, so most Git behaviour lands in both at once.
   a merge, rebase, cherry-pick or revert still in progress, it says so before
   asking anything. If a later commit conflicts, the rebase stops and you land
   in Changes, where the conflicts dashboard offers Continue, Skip and Abort —
-  Abort puts the branch back as it was. **Undo** on the toast, or ⌘Z,
-  restores the branch. The same drop as the VS Code extension's. (#32)
+  Abort puts the branch back as it was. **Undo** on the toast, or ⌘Z, puts
+  back the branch the drop rewrote — even after you've made and switched to
+  a branch at the new tip — and, after *Drop and move those branches*, the
+  branches it carried, each only while it is still where the drop left it.
+  The same drop as the VS Code extension's. (#32)
+- **Set the action of several commits at once in an interactive rebase.** In
+  the Rebase view, click a commit, then Shift-click or ⌘-click (Ctrl-click)
+  others — or use **Shift+↑/↓**, **Home**/**End** and **⌘A**; **Escape** goes
+  back to one — and choose **Pick**, **Reword**, **Squash**, **Fixup**,
+  **Edit** or **Drop** in the **Set action** bar at the top, or press git's
+  own letter for it: **P R S F E D**. **Alt+↑/↓** and dragging move the whole
+  selection. **Squash** or **Fixup** folds each selected commit into the kept
+  commit below it, so a block of commits folds into the one under the block.
+  When no kept commit is below — the selection reaches the oldest commit you
+  keep — that oldest selected commit stays as it is, for the rest to fold
+  into, and the plan says why instead of letting the rebase fail. The
+  keyboard sheet (**?**) lists these keys. The same as the VS Code
+  extension's. (#32)
+- **The branch switcher works from the keyboard.** Type to filter; **↑**/**↓**
+  move through the branches, and letters you type on one keep filtering;
+  **→** or **Enter** opens a branch's actions — **Checkout** first (for any
+  branch but the one you're on), then Fetch, Push, Pull, Merge, Rebase,
+  Rename, Reset to its remote and the rest of the Branches list's menu for
+  it — with the keyboard on the first;
+  **←** or **Escape** goes back to the branch, and **Escape** again closes.
+  Remote branches and tags have their actions too, and the arrow at the end
+  of every row opens them with the mouse; a plain click still switches.
+  Holding Enter never runs a second action; the keyboard sheet (**?**) lists
+  the keys. As in IntelliJ's branch popup and the VS Code extension's branch
+  menu. (#32)
+
+### Changed
+
+- **Closing a repository is closing its tab.** Repo ▸ **Close Tab** is ⌘W
+  (Ctrl+W) — it was ⌘⇧W, and on macOS ⌘W did nothing. On Windows and Linux
+  the window's own Close moves to Ctrl+Shift+W. The GitStudio mark in the top
+  bar now goes to Home instead of closing the repository, and the top bar's
+  repository menu moved to the tab row's **+**. (#32)
 
 ### Fixed
 
+- **Undo of *Discard changes*, and ⌘Z after *Accept Yours / Theirs*, no longer
+  overwrite edits you made since.** Discard, type something new, Undo: the new
+  text was replaced by the discarded one; resolve a conflict, polish the file
+  (and stage it, as marking it resolved does), ⌘Z: the conflict markers went
+  over the polish. Both now say the file has changed since and leave it
+  alone, staged or not.
+- **Undo of *Rename on origin*** leaves the branch tracking its own remote
+  branch again — it came back tracking the new name.
+- **Undo of *Drop stash*** puts the stash back where it was in the list, not
+  on top of it.
+- **Rebase: the reason a squash was refused could be off screen.** It was
+  written under the list, below the fold of any plan long enough to scroll;
+  it is shown just above **Start rebase** now. The commit the keyboard moves
+  to is never hidden under the header or the footer either. (#32)
+- **A remote's own HEAD is no longer offered as a branch.** git calls
+  `refs/remotes/origin/HEAD` "origin", and the branch switcher, the Commits
+  graph's menu ("Checkout origin/HEAD"), Compare's branch picker and the
+  branch fields of Actions and Releases listed it, where acting on it acts on
+  whatever it points at. Only the Branches view had left it out. (#32)
+- **The commit graph keeps its place.** Going to another view and back
+  brought the graph back scrolled to the top, with the commit you were
+  reading out of sight; it now comes back where you left it — and so does a
+  repository tab's graph when you return to the tab. (#32)
+- **The top bar no longer lets the editor button run over the search box**
+  when the window is just wide enough for everything but a stopped
+  operation's label — it measured what it needed from the collapsed state and
+  came out short. (#32)
 - **Repositories: switching to *On GitHub* and straight back showed GitHub's
   list under *On this machine*.** The GitHub request kept running after the
   switch and painted its answer a second later. Only the side you're on
   paints now. (#32)
+- **A renamed file's diff on a commit page showed the whole file as added.**
+  The commit's parent was read at the file's new name, where it has nothing;
+  it is read under the name the file had there.
+- The Commit Graph's header counted the *Uncommitted changes* row as a
+  commit ("18 commits" for 17).
+- **Apply and Pop keep what a stash had staged.** Its staged changes came back
+  unstaged, and popping a file that was staged and then edited further lost
+  the staged version for good. They come back staged now. When your own staged
+  changes are in the way, or the staged part no longer applies, the stash is
+  applied unstaged, and a Pop keeps it in the list, still holding what was
+  staged, and says so.
+- **Stash & Retry on Apply or Pop acts on the stash you picked.** A stash made
+  while its question was open (from a terminal, or a pull that stashes by
+  itself) moved every number in the list down, and the retry popped that
+  stash instead of yours. A stash that has left the list is said as that, not
+  as "The operation failed."
+- **A stash of new files showed an empty commit.** On a stash's page, *The
+  commit it holds* left out the new files a stash keeps (the Stash dialog
+  makes one whenever a new file is ticked). They are listed now, and open
+  with their contents.
+- Apply and Pop on a stash use the stash-apply and stash-pop icons, as the VS
+  Code extension does.
+- **Removing a worktree in Branches ▸ Worktrees.** The question promised that
+  uncommitted work would go with it, then git refused any worktree with
+  changes — and a locked one could not be removed at all. The question now
+  says what removing takes — the lock's reason, the uncommitted files that
+  go, that the branch stays — and its button does exactly that (**Unlock and
+  Remove**, **Discard Changes and Remove**). The main worktree reads *main
+  worktree* and its Remove is disabled; a worktree whose folder is gone reads
+  *folder missing*, has no Open, and offers **Forget this worktree…** — for a
+  locked one, the question says that a folder on a drive that isn't connected
+  is no longer a worktree when the drive comes back. A worktree that changes
+  while the question is open — an agent still at work in it — is asked about
+  again with what it holds now; nothing the question didn't name is deleted,
+  and it keeps its lock. The same words as the VS Code extension's. A
+  worktree open in another repository tab reads *open in a tab* — however
+  that tab spells its folder (`C:\Users\…` beside git's `C:/Users/…`, a
+  symlink), and as soon as a tab opens or closes — and is not removed from
+  under it: removing it says so, and to close that tab first
+  (one whose folder is gone can still be forgotten). The worktree of the tab
+  you are in reads *this tab*.
+- **Removing a worktree that is stopped in a merge, rebase, cherry-pick or
+  revert says so**, and that removing it abandons the operation — a worktree
+  stopped in a rebase with nothing uncommitted went without a word.
+- **Checking out or deleting a branch that another worktree has checked out
+  says where it is**, instead of git's *already used by worktree* — and
+  Delete says so before asking, rather than after. A pull request's
+  **Checkout** does the same when its `pr/<number>` branch is checked out in
+  another worktree; it showed git's *refusing to fetch into branch* in red.
+  When that worktree's folder is gone, it says to forget the worktree first.
+- **Checking out a pull request again brings `pr/<n>` up to date.** It failed
+  while `pr/<n>` was checked out. When `pr/<n>` has commits the pull request
+  doesn't — yours, or the ones a force-push to the pull request replaced — it
+  is left exactly as it is and the app says why, and how to get the pull
+  request's version, where git's refusal was reported as an error. The same
+  rule as the VS Code extension's. It is fetched from the remote the pull
+  requests are listed from — `upstream`, when `origin` isn't on GitHub — where
+  it always asked `origin`.
+- Repositories whose GitHub remote uses `ssh.github.com` (SSH over port 443),
+  `www.github.com`, or a host alias of `~/.ssh/config` whose HostName is
+  github.com (`git@work:owner/repo`) are recognised as GitHub repositories,
+  as the VS Code extension now does.
+- **A pull request's file diff starts where its branch left the base.** Its
+  left side was the base branch as it is now: once others had merged, it
+  showed their new work as if the pull request removed it, and a comment on
+  a removed line was sent for the wrong line.
+- **A worktree is one folder however its path is spelled.** git names a
+  worktree by its resolved path — `C:/Users/you/…` on Windows — and the same
+  folder can be reached through a symlink or Windows' short `C:\Users\YOU~1\…`
+  names; one whose folder is gone is now found through the folder above it,
+  where it was taken for no worktree of the repository. On Windows, worktree
+  paths are shown and copied the Windows way, `C:\Users\…`, in Worktrees and
+  in "checked out in the worktree at …".
+- On Windows, SSH host aliases are read from `%HOME%\.ssh\config` when
+  `HOME` is set — where Git for Windows' ssh reads them — not only from the
+  user profile's, and the SSH keys listed in Settings come from the same
+  folder.
+- **Rebasing in a SHA-256 repository.** In a repository whose commit ids are
+  64 characters long (`git init --object-format=sha256`), the Rebase view,
+  Drop Commit and the several-commit actions were refused as an
+  "unrecognised plan entry". They run now, and a reworded commit gets its new
+  message — also when the rebase is continued after a conflict.
 
 ## [2.1.0] - 2026-09-25
 

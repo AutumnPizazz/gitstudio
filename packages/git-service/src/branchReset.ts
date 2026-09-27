@@ -25,13 +25,14 @@
  *     checked out in any worktree (including one being rebased there).
  */
 
-import { normalize } from "node:path";
 import type { GitRef } from "@gitstudio/host-bridge/git";
+import { nativePath } from "./folderPath";
 import type { GitProcess, GitRunOptions } from "./GitProcess";
 import { parseV2 } from "./StatusProvider";
 import { refShortName } from "./checkoutRef";
 import { localNameFor } from "./checkoutRemote";
 import { operationInTheWayMessage, pick, stoppedIn } from "./stoppedOperation";
+import { noCopyClause, whyNoCopy, type NoCopy } from "./SnapshotProvider";
 
 /** How many of the commits a reset drops the question lists by subject. */
 export const DROPPED_SHOWN = 5;
@@ -80,6 +81,12 @@ export interface ResetPlan extends ResetTarget {
   untrackedOverwritten: number;
   /** The fetch failed, so the target is as it was at the last fetch. */
   fetchFailed?: boolean;
+  /**
+   * The current branch only: git won't copy its uncommitted changes
+   * (`stash create` refuses a `git add -N` file; a conflict is refused up
+   * front), so Undo can put the branch back but not them. Why, when so.
+   */
+  uncopied?: NoCopy;
 }
 
 /** What the reset should ask — or, when it would change nothing, say. */
@@ -186,7 +193,7 @@ export async function resetTargetOf(
   if (!current && worktreePath) {
     return {
       // git spells a Windows path C:/Users/…; say it the way the system does.
-      refused: `'${branch}' is checked out in another worktree, at ${normalize(worktreePath)}. Reset it there, or check out another branch in that worktree first.`,
+      refused: `'${branch}' is checked out in another worktree, at ${nativePath(worktreePath)}. Reset it there, or check out another branch in that worktree first.`,
     };
   }
   // A name git reads as an option. `branch -f -- <name>` is refused by git
@@ -265,6 +272,7 @@ export async function planReset(
 
   let dirty = 0;
   let untrackedOverwritten = 0;
+  let uncopied: NoCopy | undefined;
   if (t.current) {
     // Every untracked FILE, not git's folded "dir/": an untracked file is only
     // at risk where the target has something at its path.
@@ -276,6 +284,7 @@ export async function planReset(
       ...s.merge.map((f) => f.path),
     ]);
     dirty = changed.size;
+    if (dirty > 0) uncopied = await whyNoCopy(proc, run);
     const untracked = s.unstaged.filter((f) => f.status === "U").map((f) => f.path);
     if (untracked.length > 0) {
       untrackedOverwritten = await countOverwritten(proc, targetSha, untracked, run);
@@ -292,6 +301,7 @@ export async function planReset(
     dirty,
     untrackedOverwritten,
     ...(opts.fetchFailed ? { fetchFailed: true } : {}),
+    ...(uncopied ? { uncopied } : {}),
   };
 }
 
@@ -379,8 +389,14 @@ export function resetQuestion(p: ResetPlan): ResetQuestion {
   if (p.behind > 0) {
     parts.push(`${b} will also get the ${plural(p.behind, "commit")} on ${t} it doesn't have yet.`);
   }
+  const withChanges =
+    dirty === 0
+      ? ""
+      : p.current && p.uncopied
+        ? `, but not your uncommitted changes — git can't keep a copy of them ${noCopyClause(p.uncopied, "now")}`
+        : ", with your uncommitted changes";
   parts.push(
-    `GitStudio's Undo can put the branch back${dirty > 0 ? ", with your uncommitted changes" : ""}.` +
+    `GitStudio's Undo can put the branch back${withChanges}.` +
       (overwritten > 0 ? ` It can't bring back the overwritten untracked ${overwritten === 1 ? "file" : "files"}.` : ""),
   );
   if (stale) parts.push(stale);

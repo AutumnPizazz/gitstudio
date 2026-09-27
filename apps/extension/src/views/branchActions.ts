@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import type { GitContext } from "@gitstudio/git-service/index";
 import type { GitRef, GitRefType } from "@gitstudio/host-bridge/git";
-import type { RepoManager, RepoEntry } from "../git/repoManager";
+import type { RepoManager, RepoEntry, UndoOptions } from "../git/repoManager";
 import { pausedForUser, type OperationMarker } from "../git/pausedForUser";
 import { notifyPaused } from "../git/pauseNotice";
 import { applyOrAsk, checkoutOp, type Applied } from "../git/inTheWay";
@@ -16,6 +16,7 @@ import {
   type DialogChoice,
 } from "../ui/dialogs";
 import { worktreeFromRef } from "./worktreesView";
+import { saidCheckedOutElsewhere } from "./branchElsewhere";
 import { pruneOnFetch } from "../git/fetchOptions";
 import {
   askOverLocalBranch,
@@ -151,6 +152,11 @@ async function runRefCheckout(
     );
     return;
   }
+  // The branch it lands on is checked out in another worktree: git refuses
+  // ("already used by worktree at …"). Said where, before anything is asked.
+  if (await saidCheckedOutElsewhere(a.ctx, c.plan.branch, "checkout")) {
+    return;
+  }
   if (c.fullName.startsWith("refs/remotes/")) {
     const over = await askOverLocalBranch(a.ctx, c.fullName);
     if (over.choice === "cancel") {
@@ -210,6 +216,19 @@ function localName(ref: { fullName: string; name: string }): string | undefined 
   return name;
 }
 
+/**
+ * HEAD as a merge or rebase question names it when it is on no branch —
+ * "HEAD (a1b2c3d)", as the branch menu's item does — or undefined on a branch.
+ */
+async function detachedHead(a: RepoEntry): Promise<string | undefined> {
+  try {
+    const head = await a.ctx.refs.getHead();
+    return head.detached && head.sha ? `HEAD (${head.sha.slice(0, 7)})` : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function mergeBranchIntoCurrent(
   repos: RepoManager,
   arg: unknown,
@@ -225,10 +244,14 @@ export async function mergeBranchIntoCurrent(
     return;
   }
   const name = shown(ref);
+  // On a detached HEAD there is no current branch to name, and the merge
+  // commit lands on no branch.
+  const detached = await detachedHead(a);
   const ok = await promptConfirm({
-    title: `Merge ${name} into the current branch?`,
+    title: detached ? `Merge ${name} into ${detached}?` : `Merge ${name} into the current branch?`,
     message:
-      "Its commits join your history. If the two sides touched the same lines you'll get conflicts to resolve, and Undo can take you back either way.",
+      "Its commits join your history. If the two sides touched the same lines you'll get conflicts to resolve, and Undo can take you back either way." +
+      (detached ? " HEAD is on no branch, so the merge is on no branch either: create a branch from it to keep it." : ""),
     confirmLabel: "Merge",
   });
   if (!ok) {
@@ -245,7 +268,9 @@ export async function mergeBranchIntoCurrent(
     const applied = await applyOrAsk(a.ctx, { kind: "merge", target: ref.fullName, args });
     if (applied.cancelled || applied.settled) {
       if (applied.settled) refresh();
-      return;
+      // Cancelled: nothing ran, and the envelope must not record an edit
+      // saved while the question was open as the merge's.
+      return applied.cancelled ? { cancelled: true } : undefined;
     }
     const result = { ok: applied.result.code === 0, code: applied.result.code, stderr: applied.result.stderr };
     await reportMergeLike(
@@ -274,9 +299,14 @@ export async function rebaseCurrentOnto(
     return;
   }
   const name = shown(ref);
+  // On a detached HEAD there is no current branch to name, and nothing to
+  // push: the rewritten commits land on no branch.
+  const detached = await detachedHead(a);
   const ok = await promptConfirm({
-    title: `Rebase the current branch onto ${name}?`,
-    message: `Your local commits are rewritten on top of ${name}, so they get new shas. If you have already pushed them, the next push needs a force. Undo can take you back.`,
+    title: detached ? `Rebase ${detached} onto ${name}?` : `Rebase the current branch onto ${name}?`,
+    message: detached
+      ? `The commits HEAD has that ${name} does not are rewritten on top of it, so they get new shas. HEAD is on no branch, so they are on no branch either: create a branch from them to keep them. Undo can take you back.`
+      : `Your local commits are rewritten on top of ${name}, so they get new shas. If you have already pushed them, the next push needs a force. Undo can take you back.`,
     confirmLabel: "Rebase",
   });
   if (!ok) {
@@ -290,7 +320,8 @@ export async function rebaseCurrentOnto(
     const applied = await applyOrAsk(a.ctx, { kind: "rebase", onto: ref.fullName, args: ["rebase", ref.fullName] });
     if (applied.cancelled || applied.settled) {
       if (applied.settled) refresh();
-      return;
+      // Cancelled: nothing ran (see Merge).
+      return applied.cancelled ? { cancelled: true } : undefined;
     }
     const result = { ok: applied.result.code === 0, code: applied.result.code, stderr: applied.result.stderr };
     await reportMergeLike(
@@ -453,6 +484,11 @@ export async function deleteBranch(
   if (!ref || !name) {
     return;
   }
+  // Another worktree has it checked out: git refuses the delete. Said where,
+  // instead of asking "Delete branch x?" and then showing git's refusal.
+  if (await saidCheckedOutElsewhere(a.ctx, ref.fullName, "delete")) {
+    return;
+  }
   const ok = await confirm(
     `Delete branch ${name}?`,
     "The branch label is removed. Its commits stay reachable from anywhere else that points at them, and GitStudio's Undo can put the branch back.",
@@ -461,22 +497,31 @@ export async function deleteBranch(
   if (!ok) {
     return;
   }
-  await withUndo(repos, a, `Delete branch ${name}`, async () => {
-    // The name under refs/heads/ — git's "heads/release" names no branch.
-    let result = await a.ctx.branches.delete(name);
-    if (!result.ok && /not fully merged/i.test(result.stderr)) {
-      const force = await confirm(
-        `${name} is not fully merged`,
-        "Some of its commits are not on any other branch, so deleting it may leave them unreachable. Undo can still recover them.",
-        "Force Delete",
-      );
-      if (!force) {
-        return;
+  // Refs only: the second question below is open while the envelope is,
+  // and what the user saves meanwhile is theirs, not the delete's.
+  await withUndo(
+    repos,
+    a,
+    `Delete branch ${name}`,
+    async () => {
+      // The name under refs/heads/ — git's "heads/release" names no branch.
+      let result = await a.ctx.branches.delete(name);
+      if (!result.ok && /not fully merged/i.test(result.stderr)) {
+        const force = await confirm(
+          `${name} is not fully merged`,
+          "Some of its commits are not on any other branch, so deleting it may leave them unreachable. Undo can still recover them.",
+          "Force Delete",
+        );
+        if (!force) {
+          return { cancelled: true };
+        }
+        result = await a.ctx.branches.delete(name, { force: true });
       }
-      result = await a.ctx.branches.delete(name, { force: true });
-    }
-    report(result, `Deleted ${name}`, refresh);
-  });
+      report(result, `Deleted ${name}`, refresh);
+      return undefined;
+    },
+    { refsOnly: true },
+  );
 }
 
 /**
@@ -1044,15 +1089,20 @@ async function pickRemote(
   return promptPick({ title, choices });
 }
 
+/**
+ * Run a door's op under the Undo envelope. `fn` returns `{ cancelled: true }`
+ * when a question inside it was cancelled and nothing ran.
+ */
 async function withUndo(
   repos: RepoManager,
   repo: RepoEntry,
   label: string,
-  fn: () => Promise<void>,
+  fn: () => Promise<{ cancelled: true } | undefined>,
+  opts?: UndoOptions,
 ): Promise<void> {
   const ledger = repos.getUndoLedger();
   if (ledger) {
-    await ledger.runWithUndo(repo, label, fn);
+    await ledger.runWithUndo(repo, label, fn, opts);
   } else {
     await fn();
   }

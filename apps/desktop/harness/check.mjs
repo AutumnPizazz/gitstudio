@@ -13,6 +13,7 @@
 // Exit code is non-zero if any case fails, so it can gate a commit.
 
 import { harnessChrome } from "./chrome.mjs";
+import { headlessChromeArgs } from "../../../scripts/test/no-network-chrome.mjs";
 import { execFile } from "node:child_process";
 import { chromeProfile } from "./profile.mjs";
 import { existsSync } from "node:fs";
@@ -63,6 +64,7 @@ const CASES = [
   ["a-branch-name-git-would-refuse-is-caught-before-git", "branches"],
   ["a-rename-refuses-a-name-git-would-refuse", "branches"],
   ["renaming-a-published-branch-offers-to-rename-it-on-the-remote", "branches"],
+  ["undoing-a-rename-on-origin-tracks-its-own-remote-branch-again", "branches"],
   ["the-rename-question-outlives-the-refresh-the-rename-causes", "branches"],
   ["renaming-an-unpublished-branch-asks-nothing", "branches"],
   // Branch ops by FULL name, and a branch named like an option (issue #30's follow-up).
@@ -135,6 +137,34 @@ const CASES = [
   ["create-pull-request-comes-back", "compare"],
   ["a-plan-that-keeps-nothing-cannot-be-started", "rebase"],
   ["a-dragged-commit-lands-where-the-line-says", "rebase"],
+  // #32: the branch switcher from the keyboard, and its per-ref actions.
+  ["the-branch-switcher-works-from-the-keyboard", "code~click:.topbar-branch"],
+  ["the-branch-switcher-works-from-the-keyboard", "code~click:.topbar-branch", { theme: "light" }],
+  ["the-branch-switchers-remotes-and-tags-have-actions", "code~click:.topbar-branch"],
+  ["the-small-switcher-still-filters", "code~click:.topbar-branch", { extra: "fewrefs=1" }],
+  ["the-switchers-fetch-runs-in-place", "code~click:.topbar-branch", { extra: "fetchfinds=1" }],
+  ["the-branch-actions-sit-level-with-their-branch", "code~click:.topbar-branch"],
+  // #32: several commits selected, one action set on all of them — the long
+  // plan the issue is about, in both themes where the selection is painted.
+  ["rebase-selection-follows-the-keyboard", "rebase", { extra: "rbmany=1" }],
+  ["rebase-selection-follows-the-keyboard", "rebase", { extra: "rbmany=1", theme: "light" }],
+  // A laptop's height: the list runs under both sticky bars.
+  ["rebase-selection-follows-the-keyboard", "rebase", { extra: "rbmany=1", height: 700 }],
+  ["rebase-selection-follows-the-mouse", "rebase", { extra: "rbmany=1" }],
+  ["rebase-selection-follows-the-mouse", "rebase", { extra: "rbmany=1", theme: "light" }],
+  ["rebase-sets-the-action-of-every-selected-commit", "rebase", { extra: "rbmany=1" }],
+  ["rebase-squash-across-a-selection-folds-into-the-commit-below", "rebase", { extra: "rbmany=1" }],
+  // …on a laptop's height, where the list runs past the fold and a reason
+  // written under it is written nowhere.
+  ["rebase-squash-across-a-selection-folds-into-the-commit-below", "rebase", { extra: "rbmany=1", height: 760 }],
+  ["rebase-moves-the-selection-together", "rebase", { extra: "rbmany=1" }],
+  // The host's own note shares that footer banner with the refusals.
+  ["rebase-keeps-the-hosts-note-on-screen", "rebase", { extra: "rbmany=1&rbnote=1", height: 700 }],
+  ["rebase-keeps-the-hosts-note-on-screen", "rebase", { extra: "rbmany=1&rbnote=1", height: 700, theme: "light" }],
+  // …and the "?" sheet names #32's keys — and still fits a 1280×800 laptop
+  // window, where tabs' four rows beside rebase-bulk's group ran it off the top.
+  ["the-shortcuts-sheet-names-the-rebase-and-switcher-keys", "rebase", { extra: "rbmany=1" }],
+  ["the-shortcuts-sheet-names-the-rebase-and-switcher-keys", "rebase", { extra: "rbmany=1", width: 1280, height: 800 }],
   ["a-background-refresh-does-not-kill-forward", "changes"],
   ["a-kept-view-comes-back-where-you-left-it", "issues", { extra: "many=1" }],
   ["a-refresh-keeps-you-on-the-job-you-were-reading", "actions~open9100~click:.gh-job-log"],
@@ -153,7 +183,7 @@ const CASES = [
   ["every-ansi-block-can-be-read", "actions~open9100~click:.gh-job-log"],
   ["every-ansi-block-can-be-read", "actions~open9100~click:.gh-job-log", { theme: "light" }],
   ["switch-account-starts-a-sign-in", "settings"],
-  ["a-half-filled-dialog-survives-a-file-save", "changes~click:.topbar-switch~text:Clone"],
+  ["a-half-filled-dialog-survives-a-file-save", "changes~click:.repo-tabs-add~text:Clone"],
   ["a-nested-control-keeps-its-own-enter", "projects"],
   ["the-gate-closes-as-well-as-it-opens", "assistant~click:.topbar-assistant", { extra: "ai=1" }],
   ["stopping-a-run-closes-what-it-was-asking", "assistant~click:.topbar-assistant", { extra: "ai=1" }],
@@ -358,7 +388,7 @@ const CASES = [
     { extra: "staging=checkboxes" },
   ],
   ["staging-does-not-blank-the-list", "changes~text:app.css"],
-  ["repo-manager-opens-from-the-repo-chip", "code~click:.topbar-switch~text:All%20repositories"],
+  ["repo-manager-opens-from-the-tab-row", "code~click:.repo-tabs-add~text:All%20repositories"],
   ["settings-holds-preferences-not-repositories", "code~text:Settings"],
   ["landing-answers-what-you-arrive-with", "changes"],
   // …and the real first run, where nothing has chosen a view yet.
@@ -562,6 +592,14 @@ const CASES = [
     ["the-pr-list-answers-like-the-issues-list", "prs"],
   ["branch-people-yield-at-narrow-widths", "branches", { width: 1000 }],
   ["worktree-rows-share-the-table", "branches~click:.gh-seg-btn:nth-child(5)"],
+  ["a-worktree-removal-says-what-it-takes", "branches~click:.gh-seg-btn:nth-child(5)"],
+  ["worktree-row-verbs-stay-in-the-list", "branches~click:.gh-seg-btn:nth-child(5)", { width: 880 }],
+  ["worktree-row-verbs-stay-in-the-list", "branches~click:.gh-seg-btn:nth-child(5)", { width: 940 }],
+  ["worktree-row-verbs-stay-in-the-list", "branches~click:.gh-seg-btn:nth-child(5)", { width: 1100 }],
+  ["worktree-row-verbs-stay-in-the-list", "branches~click:.gh-seg-btn:nth-child(5)", { width: 1180 }],
+  ["worktree-row-verbs-stay-in-the-list", "branches~click:.gh-seg-btn:nth-child(5)", { width: 1200 }],
+  ["worktree-row-verbs-stay-in-the-list", "branches~click:.gh-seg-btn:nth-child(5)"],
+  ["a-worktree-that-changed-while-asked-is-asked-again", "branches~click:.gh-seg-btn:nth-child(5)", { extra: "wtchanged=1" }],
   ["the-tag-tooltip-survives-the-fallback-tile", "branches~click:.gh-seg-btn:nth-child(3)"],
   ["home-offers-sign-in-when-signed-out", "dashboard", { extra: "signedout=1" }],
   ["the-back-arrow-goes-where-it-says", "issues"],
@@ -602,6 +640,19 @@ const CASES = [
   ["the-graph-menu-offers-drop-only-where-it-can-work", "graph", { theme: "light" }],
   ["a-drop-over-uncommitted-changes-is-refused-before-the-question", "graph", { extra: "dropblocked=1" }],
   ["a-drop-that-conflicts-lands-on-the-conflict-flow", "graph", { extra: "dropconflict=1" }],
+  // Several commits at once (issue #32): select, summarise, the menu, the flows.
+  ["several-commits-are-selected-and-summarised", "graph", { extra: "stack=1" }],
+  ["several-commits-are-selected-and-summarised", "graph", { extra: "stack=1", theme: "light" }],
+  ["a-held-shift-arrow-asks-main-once-for-where-it-stops", "graph", { extra: "stack=1" }],
+  ["a-selection-summary-asks-its-own-tab-once-it-is-back", "graph", { extra: "stack=1&tabs=2" }],
+  ["the-menu-for-several-commits-runs-for-all-of-them", "graph", { extra: "stack=1" }],
+  ["the-menu-for-several-commits-runs-for-all-of-them", "graph", { extra: "stack=1", theme: "light" }],
+  ["the-squash-message-editor-takes-the-message-the-user-writes", "graph", { extra: "stack=1" }],
+  ["cherry-picking-several-lands-a-stop-on-the-conflict-flow", "graph", { extra: "pickpaused=1" }],
+  ["comparing-two-commits-opens-the-compare-view", "graph"],
+  ["comparing-two-commits-opens-the-compare-view", "graph", { theme: "light" }],
+  ["the-menu-key-menu-gives-the-keyboard-back-to-the-list", "graph", { extra: "stack=1" }],
+  ["enter-on-several-opens-the-focused-one-alone", "graph", { extra: "stack=1" }],
   ["the-open-branch-picker-reads-at-aa", "graph~click:.gh-branches", { theme: "light" }],
   ["the-open-branch-picker-reads-at-aa", "graph~click:.gh-branches~click:.gh-preset%5Bdata-preset%3Dlocal%5D", { theme: "light" }],
   ["the-open-branch-picker-reads-at-aa", "graph~click:.gh-branches~click:.gh-preset%5Bdata-preset%3Dlocal%5D"],
@@ -611,6 +662,10 @@ const CASES = [
   ["the-logs-states-each-say-the-right-thing", "actions~open9097~click:.gh-job-log"],
   ["the-logs-live-states-each-say-the-right-thing", "actions~open9101~click:.gh-job-log"],
   ["a-stash-page-holds-one-commit", "branches~click:.gh-seg-btn:nth-child(4)~click:.sec-row"],
+  ["a-stash-page-applies-and-pops-with-the-stash-glyphs", "branches~click:.gh-seg-btn:nth-child(4)~click:.sec-row"],
+  ["a-stash-rows-pop-wears-the-stash-glyph", "branches~click:.gh-seg-btn:nth-child(4)"],
+  ["a-pop-that-keeps-its-stash-says-applied", "branches~click:.gh-seg-btn:nth-child(4)", { extra: "stashkept=1" }],
+  ["a-pop-that-keeps-its-stash-leaves-its-page-open", "branches~click:.gh-seg-btn:nth-child(4)~click:.sec-row", { extra: "stashkept=1" }],
   ["the-palette-keeps-your-place-when-results-arrive", "branches~palette"],
   ["one-key-press-closes-one-layer", "branches"],
   ["one-key-press-closes-one-layer", "issues"],
@@ -670,6 +725,7 @@ const CASES = [
   ["a-long-repository-name-keeps-its-counts-and-controls", "repositories", { extra: "longrepo=1", width: 1280 }],
   // Reset a branch to its upstream (#32).
   ["the-branch-menu-offers-a-reset-to-its-upstream", "branches"],
+  ["deleting-a-branch-another-worktree-has-says-where-before-asking", "branches"],
   ["resetting-the-current-branch-says-what-goes-and-can-be-undone", "branches"],
   ["resetting-another-branch-leaves-your-working-tree-alone", "branches"],
   ["a-branch-checked-out-elsewhere-is-refused-before-anything-is-asked", "branches"],
@@ -745,6 +801,72 @@ const CASES = [
   ["what-a-stash-and-retry-could-not-put-back-is-said", "code", { extra: "intheway=note", theme: "light" }],
   ["still-in-the-way-after-the-stash-is-said-not-asked-again", "code", { extra: "intheway=still" }],
   ["a-genuine-failure-asks-nothing-and-stays-red", "prs~open106~text:Commits~text:issues%3A%20full-page%20detail", { extra: "intheway=fail" }],
+  // Repositories as tabs (issue #32) — the state table in docs/desktop-repo-tabs.md.
+  ["the-tab-row-shows-each-open-repository", "changes", { extra: "tabs=3" }],
+  ["the-tab-row-shows-each-open-repository", "changes", { extra: "tabs=3", theme: "light" }],
+  ["the-front-tab-is-unmistakable", "changes", { extra: "tabs=3" }],
+  ["the-front-tab-is-unmistakable", "changes", { extra: "tabs=3", theme: "light" }],
+  ["switching-tabs-keeps-each-tabs-place", "issues", { extra: "tabs=3&many=1" }],
+  ["each-tab-keeps-its-own-commit-message", "changes", { extra: "tabs=2" }],
+  // A's every answer 2s late: the answer lands after you have moved to B.
+  ["a-slow-answer-from-one-tab-never-paints-into-another", "changes", { extra: "tabs=2&slow=*@gitstudio:2000" }],
+  ["an-operation-in-a-background-tab-reports-when-you-are-back", "changes", { extra: "tabs=2&slow=sync:push@gitstudio:1500" }],
+  ["closing-a-tab-with-an-operation-running-asks-first", "changes", { extra: "tabs=2&slow=sync:push@gitstudio:4000" }],
+  ["closing-tabs-picks-the-neighbour-and-ends-at-home", "changes", { extra: "tabs=3&active=2" }],
+  ["the-tab-keys-move-between-tabs", "changes", { extra: "tabs=4" }],
+  ["the-tab-row-fits-a-narrow-window", "changes", { extra: "tabs=9&active=9", width: 880 }],
+  ["the-tab-row-fits-a-narrow-window", "changes", { extra: "tabs=9&active=9", width: 880, theme: "light" }],
+  ["opening-a-repository-that-has-a-tab-switches-to-it", "branches", { extra: "tabs=2" }],
+  ["an-open-lands-in-the-new-tab-and-the-old-one-stays-put", "repositories", { extra: "tabs=1" }],
+  ["a-background-tabs-disk-event-leaves-the-front-tab-alone", "changes", { extra: "tabs=2" }],
+  ["a-stopped-operation-stays-with-its-tab", "changes", { extra: "tabs=2&op=cherry-pick&conflicts=1" }],
+  ["each-tab-has-its-own-terminal-dock", "changes", { extra: "tabs=2" }],
+  ["each-restored-tab-comes-back-on-its-own-view", "changes", { extra: "tabs=2&tabviews=1" }],
+  ["a-restored-tab-comes-back-to-search-and-a-new-one-lands-on-its-code", "explore", { extra: "tabs=1" }],
+  // …in main's boot order: the restore announces the tabs before the window's
+  // first read of them is answered (?latetabs=1, see the shim).
+  ["a-restored-tab-comes-back-to-search-and-a-new-one-lands-on-its-code", "explore", { extra: "tabs=1&latetabs=1" }],
+  ["each-restored-tab-comes-back-on-its-own-view", "changes", { extra: "tabs=2&tabviews=1&latetabs=1" }],
+  ["the-graph-keeps-its-place-across-a-tab-switch", "graph", { extra: "tabs=2" }],
+  ["a-switch-takes-the-menus-and-the-palette-with-it", "changes", { extra: "tabs=2" }],
+  ["a-switch-takes-an-open-peek-with-it", "prs~open106", { extra: "tabs=2" }],
+  ["a-tab-whose-folder-is-gone-says-so-and-closes", "changes", { extra: "tabs=3&gone=webapp" }],
+  ["a-tab-whose-folder-is-gone-says-so-and-closes", "changes", { extra: "tabs=3&gone=webapp", theme: "light" }],
+  ["a-gone-folder-put-back-makes-its-tab-whole-again", "changes", { extra: "tabs=2&gone=gistudio.dev" }],
+  ["a-tab-round-trip-keeps-its-diff-or-log", "prs~open106~text:Files", { extra: "tabs=2", arg: "diff" }],
+  ["a-tab-round-trip-keeps-its-diff-or-log", "prs~open106~text:Commits~text:issues%3A%20full-page%20detail", { extra: "tabs=2", arg: "diff" }],
+  ["a-tab-round-trip-keeps-its-diff-or-log", "actions~open9100~click:.gh-job-log", { extra: "tabs=2", arg: "log" }],
+  ["closing-a-tab-in-the-back-lets-its-diff-or-log-go", "prs~open106~text:Files", { extra: "tabs=2" }],
+  ["closing-a-tab-in-the-back-lets-its-diff-or-log-go", "actions~open9100~click:.gh-job-log", { extra: "tabs=2" }],
+  ["each-tab-keeps-its-own-list-state", "issues", { extra: "tabs=2", arg: "issues" }],
+  ["each-tab-keeps-its-own-list-state", "prs", { extra: "tabs=2", arg: "prs" }],
+  ["each-tab-keeps-its-own-list-state", "actions", { extra: "tabs=2", arg: "actions" }],
+  ["each-tab-keeps-its-own-list-state", "releases", { extra: "tabs=2", arg: "releases" }],
+  ["a-kept-page-routes-its-own-tab-after-a-visit-to-another", "prs~open106", { extra: "tabs=2", arg: ".det-title-edit|predit" }],
+  ["a-kept-page-routes-its-own-tab-after-a-visit-to-another", "actions~open9100", { extra: "tabs=2", arg: ".det-commit-chip|commit" }],
+  ["a-kept-page-routes-its-own-tab-after-a-visit-to-another", "actions~open9100", { extra: "tabs=2", arg: ".gh-job-log|joblog" }],
+  ["a-kept-page-routes-its-own-tab-after-a-visit-to-another", "releases~open52", { extra: "tabs=2", arg: ".det-tb-actions > .mini-btn:first-child|releasenew" }],
+  ["quote-reply-lands-in-its-own-tabs-box", "issues~open31", { extra: "tabs=2" }],
+  ["the-org-filter-filters-its-own-tabs-page", "orgs", { extra: "tabs=2" }],
+  ["each-tab-keeps-its-own-filter-through-a-rebuild", "mywork", { extra: "tabs=2", arg: "stream" }],
+  ["each-tab-keeps-its-own-filter-through-a-rebuild", "gists", { extra: "tabs=2", arg: "aliases" }],
+  ["each-tab-keeps-its-own-filter-through-a-rebuild", "notifications", { extra: "tabs=2", arg: "xterm" }],
+  ["each-tab-keeps-its-own-filter-through-a-rebuild", "repositories", { extra: "tabs=2", arg: "design" }],
+  ["a-home-still-loading-when-you-switch-away-paints-when-you-are-back", "dashboard", { extra: "tabs=2&slow=*@gitstudio:800" }],
+  ["each-tab-keeps-its-own-search", "explore", { extra: "tabs=2" }],
+  ["a-board-still-loading-when-you-switch-away-paints-when-you-are-back", "projects", { extra: "tabs=2&slow=project:board@gitstudio:1500" }],
+  ["an-assistant-run-uses-its-own-tabs-permission", "assistant~click:.topbar-assistant", { extra: "tabs=2&ai=1" }],
+  ["opening-a-worktree-opens-a-tab-and-says-so-there", "branches~click:.gh-seg-btn:nth-child(5)", { extra: "tabs=1" }],
+  ["opening-a-worktree-with-every-tab-taken-says-so-once", "branches~click:.gh-seg-btn:nth-child(5)", { extra: "tabs=10" }],
+  ["a-worktree-open-in-another-tab-says-so", "branches~click:.gh-seg-btn:nth-child(5)", { extra: "wttab=1" }],
+  ["worktree-paths-read-the-systems-way", "branches~click:.gh-seg-btn:nth-child(5)", { extra: "winpaths=1" }],
+  ["a-worktree-open-in-a-tab-is-marked-however-its-folder-is-spelled", "branches~click:.gh-seg-btn:nth-child(5)", { extra: "wttab=1&winpaths=1" }],
+  ["a-restored-branches-view-still-follows-the-tabs", "branches~click:.gh-seg-btn:nth-child(5)", { extra: "wttab=1", budget: 40000 }],
+  ["a-branches-view-left-mid-read-still-follows-the-tabs", "branches~click:.gh-seg-btn:nth-child(5)", { extra: "wttab=1&slow=worktree:list:1500", budget: 40000 }],
+  ["a-slow-clone-lands-in-its-new-tab-and-says-so", "explore~type:git~key:Enter~text:libgit2/libgit2", { extra: "tabs=1&clonems=1200" }],
+  ["a-cloned-repository-says-so-in-its-new-tab", "code~palette~type:clone~text:Clone%20repository%E2%80%A6", { extra: "tabs=1" }],
+  ["a-live-page-keeps-polling-after-a-tab-round-trip", "actions~open9101", { extra: "tabs=2", arg: "actions:runDetail", budget: 40000 }],
+  ["a-live-page-keeps-polling-after-a-tab-round-trip", "actions~open9101~click:.gh-job-log", { extra: "tabs=2", arg: "actions:jobLogChunk|windows", budget: 40000 }],
 ];
 
 function run(scene, checkId, opts = {}) {
@@ -763,16 +885,17 @@ function run(scene, checkId, opts = {}) {
   return new Promise((res) => {
     execFile(
       CHROME,
-      [
-        "--headless",
+      headlessChromeArgs([
         "--disable-gpu",
         "--hide-scrollbars",
         profile.flag,
         `--window-size=${width},${height}`,
-        "--virtual-time-budget=12000",
+        // A case that has to watch a poller across a tab round trip needs
+        // more virtual time than the rest (`budget`).
+        `--virtual-time-budget=${opts.budget ?? 12000}`,
         "--dump-dom",
         url,
-      ],
+      ]),
       // A page that never lets virtual time run out (an unbounded animation, a
       // self-rescheduling timer) hangs headless Chrome forever, and without a
       // timeout that hangs the WHOLE suite with no clue which case did it.

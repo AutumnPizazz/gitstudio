@@ -16,8 +16,9 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { CloneProgress } from "../shared/ipc";
 import { startClone } from "./cloneBridge";
-import { parseGitHubRemote } from "./githubRemote";
-import type { RepoStore } from "./repoStore";
+import { githubRepoOfRemote } from "./githubRemote";
+import { MAX_TABS, type RepoStore } from "./repoStore";
+import { tabsFullNotice } from "./repoNotice";
 
 /** Where implicit clones live. Fixed and predictable (GitHub Desktop keeps
  *  ~/Documents/GitHub); users who care about placement use Clone… instead. */
@@ -32,7 +33,10 @@ function originOf(root: string): Promise<{ owner: string; repo: string } | undef
       "git",
       ["-C", root, "remote", "get-url", "origin"],
       { timeout: 5_000 },
-      (err, stdout) => resolve(err ? undefined : parseGitHubRemote(stdout.trim())),
+      (err, stdout) => {
+        if (err) return resolve(undefined);
+        githubRepoOfRemote(stdout.trim()).then(resolve, () => resolve(undefined));
+      },
     );
   });
 }
@@ -65,6 +69,12 @@ export async function openGitHubRepo(
   dest?: string,
   /** Per-action folder-name override. */
   nameOverride?: string,
+  /**
+   * Where `owner/repo` is cloned from: `<base>/<owner>/<repo>.git`. Injectable
+   * for tests, which clone from a folder on disk (a file:// base) — never from
+   * github.com, where a clone waits on the network and a credential helper.
+   */
+  cloneBase: string = "https://github.com",
 ): Promise<GhOpenResult> {
   const [owner, repo] = fullName.split("/", 2);
   if (!owner || !repo) {
@@ -98,7 +108,11 @@ export async function openGitHubRepo(
     const info = await repos.open(hitRoot);
     return info
       ? { ok: true, root: hitRoot, cloned: false }
-      : { ok: false, code: "open-failed", message: `Found a clone at ${hitRoot}, but it couldn't be opened.` };
+      : (tabsFull(repos) ?? {
+          ok: false,
+          code: "open-failed",
+          message: `Found a clone at ${hitRoot}, but it couldn't be opened.`,
+        });
   }
 
   // 2. No clone anywhere — make one in the chosen destination (an explicit
@@ -122,7 +136,7 @@ export async function openGitHubRepo(
     };
   }
   const result = await startClone(
-    { url: `https://github.com/${fullName}.git`, parentDir: parent, name },
+    { url: `${cloneBase}/${fullName}.git`, parentDir: parent, name },
     onProgress,
   );
   if (!result.ok || !result.root) {
@@ -139,5 +153,24 @@ export async function openGitHubRepo(
   const info = await repos.open(result.root);
   return info
     ? { ok: true, root: result.root, cloned: true }
-    : { ok: false, code: "open-failed", message: `Cloned to ${result.root}, but it couldn't be opened.` };
+    : (tabsFull(repos, result.root) ?? {
+        ok: false,
+        code: "open-failed",
+        message: `Cloned to ${result.root}, but it couldn't be opened.`,
+      });
+}
+
+/**
+ * The one open refusal that is a state, not a fault: every tab is taken
+ * (issue #32). Said as such, and not crash-reported.
+ */
+function tabsFull(repos: RepoStore, cloned?: string): GhOpenResult | undefined {
+  if (!repos.isFull?.()) return undefined;
+  const says = tabsFullNotice(MAX_TABS).message;
+  return {
+    ok: false,
+    code: "open-failed",
+    expected: true,
+    message: cloned ? `Cloned to ${cloned}. ${says}` : says,
+  };
 }

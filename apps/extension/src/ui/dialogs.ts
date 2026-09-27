@@ -74,6 +74,13 @@ export interface InputSpec extends BaseSpec {
   validate?: DialogValidator;
   /** Render a textarea (PR bodies, commit messages). */
   multiline?: boolean;
+  /**
+   * Select the pre-filled `value` on open, so typing replaces it (the
+   * default). False puts the caret at the start instead — for a message to
+   * EDIT, like Squash Commits' combined messages (issue #32), where the first
+   * keystroke must not throw the whole text away.
+   */
+  selectOnOpen?: boolean;
   /** Mask the field (API keys). The value still crosses postMessage once, on
    *  confirm — the same trip a quick-input password field makes. */
   secret?: boolean;
@@ -118,6 +125,18 @@ export interface DialogHost {
 
 let host: DialogHost | undefined;
 
+/** How many questions have been put so far (see `questionsAsked`). */
+let asked = 0;
+
+/**
+ * A running count of the questions put — for the Undo envelope, which must
+ * know whether one was open while an op ran: these dialogs are DOM, not
+ * modal, so the user can edit and save meanwhile (undoLedger.ts).
+ */
+export function questionsAsked(): number {
+  return asked;
+}
+
 /** Wire up the surface that renders dialogs (the Changes view, at activation). */
 export function registerDialogHost(h: DialogHost): vscode.Disposable {
   host = h;
@@ -144,6 +163,7 @@ async function run(spec: DialogSpec): Promise<DialogResult | undefined> {
     );
     return undefined;
   }
+  asked++;
   return host.show(spec);
 }
 

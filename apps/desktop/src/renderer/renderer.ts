@@ -19,8 +19,22 @@ import { ConflictsDashboard } from "@gitstudio/webview-ui/conflicts/dashboard";
 import type { ConflictsState } from "@gitstudio/host-bridge/conflictsProtocol";
 import { clickIntent, parseRowKey, rangeBetween, reconcile, rowKey, selectionEntries, selectionPaths } from "./selection";
 import { installNavStack } from "./navStack";
-import { clearUndo, didUndoable, installUndoKey, push as pushUndoable, redoOrText, undoOrText } from "./undo";
-import { repoChanged } from "./repoEpoch";
+import { didUndoable, dropUndoScope, installUndoKey, push as pushUndoable, redoOrText, setUndoScope, undoOrText } from "./undo";
+import { repoChanged, whileSameRepo } from "./repoEpoch";
+import { SettleLatest } from "@gitstudio/host-bridge/settleLatest";
+import {
+  currentSession,
+  endSession,
+  inOpenLanding,
+  onRunningChange,
+  runningOperation,
+  setActiveSession,
+  shellHost,
+  type TabSession,
+} from "./bridge";
+import { RepoTabStrip, type TabStripItem } from "./repoTabs";
+import { stepTab, tabAtDigit, tabKeyAction } from "./tabModel";
+import { saveDraftIn, takeDraftIn } from "./draftStore";
 import { renderCommit } from "./views/commit";
 import { renderJobLog } from "./views/jobLog";
 import { renderReleaseCompose } from "./views/releaseCompose";
@@ -52,16 +66,19 @@ import { ReadonlyFileView } from "./readonlyFileView";
 import { renderMarkdown } from "./markdown";
 import { renderAssistant, seedAssistantGoal } from "./assistant";
 import { aiModelsCard, agentAccessCard } from "./aiSettings";
-import { openInButton } from "./openIn";
+import { openInButton, REVEAL_LABEL } from "./openIn";
 import { editorsCard } from "./views/editorsCard";
 import { aiChip, openAssistantTab, registerAssistantTab, streamInto, aiEnabled } from "./aiAssist";
-import { toast, confirmDialog, promptInline, promptChoice, openModal, type ToastAction } from "./dialogs";
+import { toast, clearToasts, confirmDialog, promptInline, promptChoice, promptMessage, openModal, type ToastAction } from "./dialogs";
 import { refLabel, revealCandidate, storedFilterOf, withRef } from "@gitstudio/host-bridge/graphRefFilter";
+import { worktreeRemovalQuestion, worktreeRemovalRefusal } from "@gitstudio/host-bridge/worktreeRemoval";
+import { checkedOutElsewhereMessage } from "@gitstudio/host-bridge/branchElsewhere";
 import { createBranchFlow } from "./branchCreate";
 import type { BranchStart } from "../shared/branchStart";
 import { TerminalDock } from "./terminalDock";
 import { openCloneDialog } from "./cloneDialog";
-import { gget, peek, bust, setCacheScope, swr, sameData} from "./cache";
+import { gget, peek, bust, bustEverywhere, dropCacheScope, setCacheScope, swr, sameData} from "./cache";
+import { dropTabState } from "./tabState";
 import {
   el,
   span,
@@ -97,19 +114,20 @@ import {
 } from "./ui";
 import type { MenuItem } from "./ui";
 import { plural } from "./textFit";
-import { dismissLayers, pageOwnsKeys } from "./overlays";
-import { setFocusScope, clearFocusReturn } from "./focusReturn";
+import { dismissLayers, isModalOpen, openLayerCount, pageOwnsKeys } from "./overlays";
+import { setFocusScope, setFocusTab, dropFocusTab } from "./focusReturn";
 import { closePeek } from "./peek";
 import type { GitPeekHost } from "./peeks";
-import { CommitContextMenu, askForCommitAction, commitActionItem } from "./contextMenu";
+import { CommitContextMenu, askForCommitAction, commitActionItem, manyMenuRows, type ManyAction } from "./contextMenu";
 import { dropCommitFlow } from "./dropCommit";
+import { runManyAction } from "./multiCommit";
 import { askPullMode, pullWithChoice, pullVerdict, type PullOutcome, type PullVerdict } from "./pullFlow";
 import { resetItemLabel, resetToUpstream } from "./resetToUpstream";
 import { installInTheWayAsker } from "./inTheWayAsk";
 import { refCheckoutRequest, refDisplay, type RowRef } from "./refMenuItems";
-import { branchName, remoteRefParts, tagName, upstreamLabel, upstreamParts } from "./branchRequests";
+import { branchName, isRemoteHead, remoteRefParts, tagName, upstreamLabel, upstreamParts } from "./branchRequests";
 import { explainRefusedCheckout } from "./optionLikeRename";
-import { wireListNav, commitList, ghHeader, searchField, segmented, secRow, facetBar } from "./views/common";
+import { wireListNav, commitList, ghHeader, searchField, segmented, secRow, facetBar, parkScreen, releaseScreen } from "./views/common";
 import { resolveRelative, wireProseNav } from "./proseNav";
 import { refreshHighlightTheme } from "./highlight";
 import { openCommandPalette, paletteIsOpen } from "./commandPalette";
@@ -152,11 +170,13 @@ import type {
   SshKey,
   StashInfo,
   WorktreeInfo,
+  WorktreeRemovalInfo,
   SyncStatus,
   ConflictModel,
   FileDiff,
   GitOpState,
   CommitActionResult,
+  RepoTabsState,
 } from "../shared/ipc";
 
 
@@ -190,13 +210,47 @@ function sameTargetContent(a: SectionTarget | undefined, b: SectionTarget | unde
   );
 }
 
+/**
+ * One repository tab's whole app — its screen (top bar, rail, view host,
+ * terminal dock) and every piece of state behind it (issue #32).
+ *
+ * There is one of these PER TAB, not one whose fields are swapped on a switch:
+ * a late answer closes over `this`, and with an instance per tab it can only
+ * ever write into its own tab. The shell (TabShell, below) attaches the screen
+ * of the tab in front and detaches the rest — detached, so every "is my view
+ * still on screen" guard in the app (`isConnected`) stands a background tab's
+ * pollers down by the rules that already stand a parked view's down.
+ */
 class App {
+  constructor(
+    private readonly shell: TabShell,
+    /** This tab's lifetime; the bridge delivers its answers only while it is in front. */
+    readonly session: TabSession,
+    /** The repository, or undefined for the no-repository screen. */
+    private readonly info: RepoInfo | undefined,
+    /** A tab the last session had open, brought back at launch — it comes back
+     *  where it was left, Search included — rather than one opened since. */
+    private readonly restoredAtLaunch = false,
+  ) {}
+
+  /** This tab's whole screen — attached while it is in front, detached otherwise. */
+  screenEl?: HTMLElement;
+  /** Where the tab's view and rail were scrolled when it went to the back. */
+  private awayScroll: [HTMLElement, number, number, boolean][] = [];
+  private awayRailScroll = 0;
+
   private graph?: GraphMount;
   private diffPanel?: DiffPanel;
   private contextMenu = new CommitContextMenu(
     (req) => this.runAction(req),
     (sha) => void this.dropCommit(sha),
+    (action, shas) => void this.runMany(action, shas),
   );
+  /** The "N commits selected" summary asks only once the selection settles,
+   *  and only for the newest one — see showSelection. */
+  private readonly selectionSummary = new SettleLatest();
+  /** What waits for this tab to be in front again — see whenInFront. */
+  private frontWaiters: Array<() => void> = [];
   /** Bumped per right-click; see openCommitMenu. */
   private commitMenuSeq = 0;
 
@@ -266,7 +320,7 @@ class App {
   /** The repo changed while the graph was parked — reload in place on return. */
   private graphDirty = false;
   private diffSurfaceEl?: HTMLElement;
-  private repoSwitchName?: HTMLElement;
+
   private branchSwitchName?: HTMLElement;
   private notifBellBadge?: HTMLElement;
   /** The resolved HEAD from `head:get` — the authoritative answer to "which
@@ -371,6 +425,9 @@ class App {
   private codePath = "";
   private compareBase?: string;
   private compareHead?: string;
+  /** Compare sides that are COMMITS, not refs (Compare these two commits,
+   *  issue #32) — labelled by short sha, with the commit glyph. */
+  private compareCommits = new Set<string>();
   private compareMode: CompareMode = "three-dot";
   /** Compare sub-view: the commits list, or the files master/detail. */
   private compareView: "commits" | "files" = "files";
@@ -426,6 +483,9 @@ class App {
   /** Where each kept-alive view was scrolled when it was parked. Keyed by the
    *  node itself, so a rebuilt view never inherits the old one's position. */
   private viewScroll = new WeakMap<HTMLElement, [HTMLElement, number, number, boolean][]>();
+  /** What a kept-alive view does when the cache puts it back on screen — see
+   *  showBranchesView. Keyed by the node, like viewScroll. */
+  private viewRevive = new WeakMap<HTMLElement, () => void>();
   /** Per view root, the elements inside it that have ever been scrolled. */
   private scrolledIn = new WeakMap<HTMLElement, Set<HTMLElement>>();
   /** Views safe to keep alive (no Monaco surface / dispose lifecycle of their own). */
@@ -541,31 +601,13 @@ class App {
   private terminalExpanded = false;
   private terminalHeight = 280;
 
-  async start(): Promise<void> {
-    // Before anything can invoke a commit-applying command: the one place that
-    // asks Stash & Retry or Cancel for all of them (bridge.ts). It holds its
-    // question while this repository stays open — see whileThisRepo.
-    installInTheWayAsker(() => this.currentRepo?.root);
-    // Views can pop the history from here on. Before this the only way back
-    // from a detail page was a forward navigation dressed as a back button.
-    this.installNav();
-    // Catch-all error boundary: a rejected promise or thrown render should never
-    // leave the app silently broken — surface it as a toast. BUT skip the benign
-    // Monaco worker noise (it asks the base worker for TS language-service methods
-    // we don't bundle, and ResizeObserver loop warnings) — those are harmless.
-    window.addEventListener("unhandledrejection", (e) => {
-      const msg = cleanErr(e.reason);
-      if (isBenignError(msg)) return;
-      toast(msg || "Something went wrong.", "error");
-    });
-    window.addEventListener("error", (e) => {
-      const msg = e.error ? cleanErr(e.error) : e.message || "";
-      if (isBenignError(msg, e.filename)) return;
-      if (e.error || e.message) toast(msg || "Something went wrong.", "error");
-    });
-
-    // Power-user view switching: Cmd/Ctrl+1..8 jumps between sidebar views; Cmd/Ctrl+, opens Settings.
-    window.addEventListener("keydown", (e) => {
+  /**
+   * Power-user view switching: Cmd/Ctrl+1..8 jumps between sidebar views;
+   * Cmd/Ctrl+, opens Settings. The shell's ONE window listener hands the key
+   * to the tab in front — a background tab's App never hears a key.
+   */
+  handleAppKey(e: KeyboardEvent): void {
+    {
       if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
       // Per-branch repo guards, not one at the top. The single early return
       // used to gate EVERY branch on an open repository — so ⌘K, ⌘, and even
@@ -612,38 +654,45 @@ class App {
         e.preventDefault();
         if (!paletteIsOpen()) this.openPalette();
       }
-    });
+    }
+  }
 
-    // "?" opens the keyboard cheat sheet — the j/k/e/Esc layer is worthless
-    // if nobody can discover it.
-    window.addEventListener("keydown", (e) => {
-      if (e.key !== "?" || e.metaKey || e.ctrlKey || e.altKey) return;
-      if (!this.currentRepo) return;
-      const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-      // A PAGE-LEVEL key, so any open layer outranks it — including the sheet
-      // itself. Skipping the text-field check alone let "?" open a second
-      // identical sheet over the first (its own first focusable is a button,
-      // not a field), and a third, and a fourth — each needing its own Escape.
-      // It also fired straight through an open dropdown or dialog.
-      if (!pageOwnsKeys()) return;
+  /** "?" opens the keyboard cheat sheet — the j/k/e/Esc layer is worthless
+   *  if nobody can discover it. */
+  handleHelpKey(e: KeyboardEvent): void {
+    if (e.key !== "?" || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (!this.currentRepo) return;
+    const t = e.target as HTMLElement | null;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+    // A PAGE-LEVEL key, so any open layer outranks it — including the sheet
+    // itself. Skipping the text-field check alone let "?" open a second
+    // identical sheet over the first (its own first focusable is a button,
+    // not a field), and a third, and a fourth — each needing its own Escape.
+    // It also fired straight through an open dropdown or dialog.
+    if (!pageOwnsKeys()) return;
+    e.preventDefault();
+    openShortcutsHelp();
+  }
+
+  /** Mouse back/forward buttons (buttons 3/4) walk the same history — the
+   *  muscle memory every browser user brings to a mouse with side buttons. */
+  handleMouseUp(e: MouseEvent): void {
+    if (!this.currentRepo) return;
+    if (e.button === 3) {
       e.preventDefault();
-      openShortcutsHelp();
-    });
+      this.navBack();
+    } else if (e.button === 4) {
+      e.preventDefault();
+      this.navForward();
+    }
+  }
 
-    // Mouse back/forward buttons (buttons 3/4) walk the same history — the
-    // muscle memory every browser user brings to a mouse with side buttons.
-    window.addEventListener("mouseup", (e) => {
-      if (!this.currentRepo) return;
-      if (e.button === 3) {
-        e.preventDefault();
-        this.navBack();
-      } else if (e.button === 4) {
-        e.preventDefault();
-        this.navForward();
-      }
-    });
-
+  /**
+   * Build this tab's screen and land on its first view. Runs ONCE per tab, the
+   * first time the tab is shown — a tab restored at launch and never visited
+   * costs nothing until it is.
+   */
+  mount(): void {
     // Restore persisted UI preferences so the app reopens where you left it.
     const prefs = loadPrefs();
     // Rail entries are not the only real places. Settings lives in the rail's
@@ -651,30 +700,69 @@ class App {
     // session can end on, and a restore that silently falls back to "changes"
     // teaches people their place isn't kept.
     const OFF_RAIL = new Set(["settings", "explore"]);
-    if (
-      typeof prefs.currentView === "string" &&
-      (App.TABS.some((t) => t.id === prefs.currentView) || OFF_RAIL.has(prefs.currentView))
-    ) {
-      this.currentView = prefs.currentView;
+    const known = (v: unknown): v is string =>
+      typeof v === "string" && (App.TABS.some((t) => t.id === v) || OFF_RAIL.has(v));
+    // A tab starts where THIS repository was last left (a tab restored at
+    // launch, or one reopened while its tab's view is still remembered), else
+    // on the view the window was last on — which is the view of the tab you
+    // opened it from, since the tab in front is the one that saves it.
+    const tabViews = (prefs.tabViews ?? {}) as Record<string, unknown>;
+    const remembered = this.info ? tabViews[this.info.root] : undefined;
+    if (known(remembered)) this.currentView = remembered;
+    else if (known(prefs.currentView)) this.currentView = prefs.currentView;
+    // Search is identified by its target, and that target belongs to the tab
+    // it was searched in: a NEW tab opened from Search lands in its code
+    // (showRepoScreen's staleBrowse rule, for a tab that never had a target).
+    // A tab brought back at launch is not new — it comes back to Search, the
+    // place it was left, as the single window always did.
+    if (this.currentView === "explore" && this.info && !this.restoredAtLaunch) this.currentView = "code";
+    // An unsent commit message this repository's tab was closed with.
+    if (this.info) {
+      const kept = takeDraftIn(this.info.root, "commit", "message");
+      if (kept) {
+        this.composerDraft = { message: kept, amend: false, signoff: false, coAuthors: [] };
+        this.composerDraftRoot = this.info.root;
+      }
     }
-    if (typeof prefs.compareFileListW === "number" && prefs.compareFileListW >= 180) {
-      this.compareFileListW = prefs.compareFileListW;
-    }
-    if (prefs.compareView === "commits" || prefs.compareView === "files") {
-      this.compareView = prefs.compareView;
-    }
-    // `branchCatsCollapsed` is gone with the four collapsible groups it
-    // remembered — the Branches view shows ONE kind at a time now. An old
-    // stored value is simply ignored rather than migrated; it described a
-    // shape that no longer exists.
-    if (
-      prefs.branchTab === "local" ||
-      prefs.branchTab === "remote" ||
-      prefs.branchTab === "tags" ||
-      prefs.branchTab === "stashes" ||
-      prefs.branchTab === "worktrees"
-    ) {
-      this.branchTab = prefs.branchTab;
+    this.readSharedPrefs(prefs, true);
+    this.showRepoScreen(this.info);
+  }
+
+  /**
+   * The saved preferences. Everything when a tab is built; afterwards — each
+   * time the tab comes to the front — only the ones every tab SHARES (the
+   * rail, the theme, the staging model), so collapsing the rail in one tab
+   * collapses it in all of them while each tab keeps its own Compare layout,
+   * Branches kind and dock.
+   */
+  private readSharedPrefs(prefs: Record<string, unknown> = loadPrefs(), initial = false): void {
+    if (initial) {
+      if (typeof prefs.compareFileListW === "number" && prefs.compareFileListW >= 180) {
+        this.compareFileListW = prefs.compareFileListW;
+      }
+      if (prefs.compareView === "commits" || prefs.compareView === "files") {
+        this.compareView = prefs.compareView;
+      }
+      // `branchCatsCollapsed` is gone with the four collapsible groups it
+      // remembered — the Branches view shows ONE kind at a time now. An old
+      // stored value is simply ignored rather than migrated; it described a
+      // shape that no longer exists.
+      if (
+        prefs.branchTab === "local" ||
+        prefs.branchTab === "remote" ||
+        prefs.branchTab === "tags" ||
+        prefs.branchTab === "stashes" ||
+        prefs.branchTab === "worktrees"
+      ) {
+        this.branchTab = prefs.branchTab;
+      }
+      if (typeof prefs.changesListW === "number" && prefs.changesListW >= 220) {
+        this.changesListW = prefs.changesListW;
+      }
+      if (typeof prefs.terminalOpen === "boolean") this.terminalExpanded = prefs.terminalOpen;
+      if (typeof prefs.terminalHeight === "number" && prefs.terminalHeight >= 120) {
+        this.terminalHeight = prefs.terminalHeight;
+      }
     }
     if (prefs.stagingModel === "checkboxes" || prefs.stagingModel === "split") {
       this.stagingModelPref = prefs.stagingModel;
@@ -692,43 +780,134 @@ class App {
       this.railWidth = prefs.railWidth;
     }
     if (typeof prefs.railCollapsed === "boolean") this.railCollapsed = prefs.railCollapsed;
-    if (typeof prefs.changesListW === "number" && prefs.changesListW >= 220) {
-      this.changesListW = prefs.changesListW;
-    }
-    if (typeof prefs.terminalOpen === "boolean") this.terminalExpanded = prefs.terminalOpen;
-    if (typeof prefs.terminalHeight === "number" && prefs.terminalHeight >= 120) {
-      this.terminalHeight = prefs.terminalHeight;
-    }
+  }
 
-    applyTheme(resolveTheme(this.themeMode));
-    // Reflect the resolved brand mark on the dock now that the theme is settled.
-    this.syncDockIcon();
-    // Re-apply on OS theme flips ONLY when following the system.
-    followSystemTheme((osTheme) => {
-      if (this.themeMode === "system") {
-        applyTheme(osTheme);
-        this.rerenderForTheme();
-        // Monaco's token classes are global — without this, every highlighted
-        // code block keeps the OLD theme's colors after an OS light/dark flip.
-        refreshHighlightTheme();
-        this.terminalDock?.applyTheme();
-        // An "auto" dock icon must follow the OS flip too — and so must the
-        // Appearance card's preview OF that icon, which is built once and kept.
-        this.syncDockIcon();
-        this.invalidateAppearanceCard();
+  /**
+   * The OS flipped light/dark. Every tab hears it — a background tab's
+   * terminal and Appearance card would otherwise come back in the old theme.
+   * The body class itself is the shell's to set, once.
+   */
+  onSystemThemeFlip(): void {
+    if (this.themeMode !== "system") return;
+    this.rerenderForTheme();
+    this.terminalDock?.applyTheme();
+    this.invalidateAppearanceCard();
+  }
+
+  /** The theme mode a tab was built with — the shell applies it at launch. */
+  get themeModePref(): ThemeMode {
+    return this.themeMode;
+  }
+
+  // ── The tab's life (issue #32) ──────────────────────────────────────────────
+
+  /**
+   * This tab's screen has just been attached and it is in front. Point every
+   * per-tab module at it, put the scroll back, and ask the disk whether
+   * anything moved while it was away.
+   */
+  activate(firstTime: boolean): void {
+    setCacheScope(this.info?.root);
+    setUndoScope(this.session.id);
+    setFocusTab(this.session.id);
+    // What waited for this tab to be in front again goes on now — as
+    // microtasks, after this switch has finished (the shell made this tab's
+    // session the active one before calling here).
+    for (const go of this.frontWaiters.splice(0)) go();
+    // A question held open through refreshes (repoEpoch) is about the tab it
+    // was asked in — and none can be open across a switch (the shell refuses
+    // to switch under a modal) — but the epoch is what `whileSameRepo` reads.
+    repoChanged();
+    // Module-level hooks point at the App in front.
+    this.installNav();
+    this.registerAssistantOpener();
+    setPeekNav((v, t) => this.routeView(v, false, t));
+    if (firstTime) return;
+    // Shared preferences may have moved while this tab was in the back.
+    const wasCollapsed = this.railCollapsed;
+    const wasWidth = this.railWidth;
+    this.readSharedPrefs();
+    if (this.railEl && (wasCollapsed !== this.railCollapsed || wasWidth !== this.railWidth)) {
+      this.railEl.classList.toggle("collapsed", this.railCollapsed);
+      this.railEl.style.width = this.railCollapsed ? "" : `${this.railWidth}px`;
+      this.syncRailToggle();
+    }
+    // Detaching zeroed every scrollTop in the screen; put them back — now, and
+    // on the frame after layout, as the keep-alive restore does.
+    const shot = this.awayScroll;
+    const rail = this.awayRailScroll;
+    const apply = (): void => {
+      for (const [node, top, left, atTail] of shot) {
+        if (!node.isConnected) continue;
+        node.scrollTop = atTail ? node.scrollHeight : top;
+        node.scrollLeft = left;
       }
-    });
-    this.wireHostEvents();
+      if (this.railEl) this.railEl.scrollTop = rail;
+    };
+    apply();
+    requestAnimationFrame(apply);
+    this.terminalDock?.layout();
+    this.fitTopbar?.();
+    void this.syncAccountChip?.();
+    void this.refreshNotifBadge();
+    // Anything done to this repository while it was in the back — a commit in
+    // a terminal, an edit in your editor — is found by the same cheap question
+    // a window focus asks. Nothing moved, nothing rebuilds.
+    void this.refreshIfDiskMoved();
+    if (this.tabsMoved) this.onTabsChanged(true);
+  }
 
-    try {
-      const current = await host.invoke("repo:current", undefined);
-      // The shell either way. With nothing open it lands on Home, whose first
-      // card is the Open / Browse door.
-      this.showRepoScreen(current);
-    } catch (e) {
-      toast(cleanErr(e) || "Couldn't open the repository.", "error");
-      this.showRepoScreen(undefined);
+  /** This tab is going to the back: remember where its screen was scrolled
+   *  (detaching loses it) before the shell detaches it. */
+  deactivate(): void {
+    const view = this.viewHost?.firstElementChild as HTMLElement | null;
+    this.awayScroll = view ? this.scrollSnapshot(view) : [];
+    this.awayRailScroll = this.railEl?.scrollTop ?? 0;
+  }
+
+  /**
+   * Is anything running in this tab that closing it would stop watching?
+   * In words ("a push"), for the question the close asks.
+   */
+  runningOperation(): string | undefined {
+    return runningOperation(this.session.id);
+  }
+
+  /**
+   * The tab closed. Its unsent commit message is KEPT (it comes back when this
+   * repository is opened again); everything live is torn down — its shells,
+   * its Monaco surfaces, its graph.
+   */
+  dispose(): void {
+    const root = this.info?.root;
+    if (root) {
+      const draft = this.composerDraftRoot === root ? this.composerDraft.message : "";
+      // The prefilled amend message is the previous commit's, not the user's.
+      const own = draft && draft !== this.composerDraft.prefilled ? draft : "";
+      saveDraftIn(root, "commit", "message", own);
     }
+    try {
+      this.activeMonacoView?.dispose();
+    } catch {
+      /* a dying surface's fault is its own */
+    }
+    this.activeMonacoView = undefined;
+    this.changesPanel?.panel.dispose();
+    this.changesPanel = undefined;
+    this.graph?.dispose();
+    this.graph = undefined;
+    this.terminalDock?.dispose();
+    this.terminalDock = undefined;
+    this.viewCache.clear();
+    this.screenEl?.remove();
+    // What its pages held until they were left — the PR diff, a commit's
+    // diff, a job log — goes with the tab, which is never coming back.
+    if (this.screenEl) releaseScreen(this.screenEl);
+  }
+
+  /** Every kept-alive view goes — the signed-in account changed under all of them. */
+  dropKeptViews(): void {
+    this.viewCache.clear();
   }
 
   /**
@@ -784,12 +963,10 @@ class App {
     // to the previous repo's sections.
     this.navHistory = [];
     this.navPos = -1;
-    // Namespace (and wipe) the SWR cache so the previous repo's branches/status/
-    // graph can never bleed into this one.
+    // Namespace the SWR cache so another repo's branches/status/graph can never
+    // bleed into this one. (Each tab has its own namespace now, kept across
+    // switches — see cache.ts.)
     setCacheScope(info?.root);
-    // A different repo makes every remembered row meaningless — issue #31 in
-    // one repo is not issue #31 in another.
-    clearFocusReturn();
     // Baseline the on-disk state for this repo, so the FIRST window focus can
     // tell "nothing changed" from "no idea" and skip a full refresh it does not
     // need. Fire-and-forget: it only has to land before the user alt-tabs.
@@ -818,6 +995,7 @@ class App {
     // README.md would open it, third in its list, with nothing to say why.
     this.compareBase = undefined;
     this.compareHead = undefined;
+    this.compareCommits.clear();
     this.compareOpenPath = undefined;
     const screen = el("div", "screen repo");
     screen.appendChild(this.topbar(info));
@@ -867,7 +1045,10 @@ class App {
     main.append(this.buildNav(), this.buildRailResizer(), stack);
     screen.appendChild(main);
 
-    document.getElementById("root")!.replaceChildren(screen);
+    // Onto the tab stage — this tab's screen, beside (detached from) the
+    // others', never replacing them (issue #32).
+    this.screenEl = screen;
+    this.shell.present(this, screen);
     // The terminal dock is a permanent footer bar — always mounted (after the
     // screen is in the DOM so xterm measures cleanly), starting collapsed or
     // expanded per the saved preference.
@@ -1159,12 +1340,22 @@ class App {
         this.persist();
       },
       onCloseDetails: () => this.closeGraphDiff(),
+      // One dock per tab: its Output log is this repository's commands.
+      root: this.info?.root,
     });
     // Shrinking the window must not leave the dock covering the whole view.
     window.addEventListener("resize", () => this.terminalDock?.handleWindowResize());
-    // The ✨ inline AI actions land in the ASSISTANT SECTION — one AI surface,
-    // full height, instead of a chat tab splitting the window in half from
-    // the bottom dock.
+    this.registerAssistantOpener();
+    return this.terminalDock;
+  }
+
+  /**
+   * The ✨ inline AI actions land in the ASSISTANT SECTION — one AI surface,
+   * full height, instead of a chat tab splitting the window in half from the
+   * bottom dock. Registered by the tab in FRONT (again on every switch), so an
+   * action lands in the tab it was taken in.
+   */
+  private registerAssistantOpener(): void {
     registerAssistantTab((req) => {
       // The TITLE is what the user bubble says — "Analyze #42", not the whole
       // prompt the action builds around the issue body and its comments.
@@ -1178,12 +1369,26 @@ class App {
       if (seedAssistantGoal(req.goal, req.title)) this.routeView("assistant", true);
       else this.routeView("assistant");
     });
-    return this.terminalDock;
   }
 
   /** Persist the UI preferences worth restoring on next launch. */
   private persist(): void {
+    // A background tab has nothing to say about the window's preferences —
+    // the tab in front owns them.
+    if (!this.shell.isActive(this)) return;
+    // Each repository's own last view, for the tab's next launch (#32). Only
+    // the tabs that are open are kept, so the map cannot grow without end.
+    const prev = loadPrefs().tabViews;
+    const tabViews: Record<string, string> = {};
+    const open = new Set(this.shell.openRoots());
+    if (prev && typeof prev === "object") {
+      for (const [root, v] of Object.entries(prev as Record<string, unknown>)) {
+        if (open.has(root) && typeof v === "string") tabViews[root] = v;
+      }
+    }
+    if (this.info) tabViews[this.info.root] = this.currentView;
     savePrefs({
+      tabViews,
       currentView: this.currentView,
       stagingModel: this.stagingModelPref,
       pruneOnFetch: this.pruneOnFetchPref,
@@ -1286,27 +1491,8 @@ class App {
       const left = bar.querySelector<HTMLElement>(".topbar-left");
       const right = bar.querySelector<HTMLElement>(".topbar-right");
       if (!left || !right || !bar.clientWidth) return;
-      const natural = (sel: string): number => bar.querySelector<HTMLElement>(sel)?.scrollWidth ?? 0;
-      const editorLabel = natural(".topbar-openin .openin-label");
-      const searchLabel = natural(".topbar-cmdk-label");
-      // A stopped operation's chip ("Rebasing · 30 conflicts") collapses to its
-      // icon with the editor's name (.is-tight). Its words were left out of
-      // the need, so a tight bar measured as fitting, let everything back, and
-      // the open-in button ended up over the search box ("earch anything…"),
-      // or the chip was cut ("Rebasing · 30 conflic") — in about one render in
-      // seven, whichever observer happened to fire last.
-      const chipLabel = natural(".topbar-opchip:not([hidden]) .topbar-opchip-label");
-      // What the row would need with EVERYTHING shown, whatever state it is in
-      // right now — a collapsed label still reports its full scrollWidth, which
-      // is what stops this flip-flopping between the two states.
-      const need =
-        naturalWidth(left) +
-        naturalWidth(right) +
-        (bar.classList.contains("is-tight") ? editorLabel + chipLabel : 0) +
-        (bar.classList.contains("is-tighter") ? searchLabel : 0);
-      // The room between the bar's OWN padding — on macOS the left one keeps
-      // the traffic lights clear, ~80px that a flat 24px allowance counted as
-      // free — less the gap between the two clusters, and a little slack.
+      // The room between the bar's OWN padding, less the gap between the two
+      // clusters, and a little slack.
       const cs = getComputedStyle(bar);
       const have =
         bar.clientWidth -
@@ -1314,9 +1500,29 @@ class App {
         (parseFloat(cs.paddingRight) || 0) -
         (parseFloat(cs.columnGap) || 0) -
         4;
-      const tight = need > have;
+      // What the row NEEDS in each state, measured IN that state — not the
+      // current state plus whatever its collapsed labels report. A collapse
+      // takes more than the words: the tight rules also drop the gaps and
+      // padding around them (the editor button's, the operation chip's, the
+      // search box's), and adding back only the words' scrollWidth left the
+      // need ~25px short. The bar then read as fitting from its collapsed
+      // state, let everything back, and the open-in button overlapped the
+      // search box — at exactly the widths where the row is on the edge.
+      // (Also why a stopped operation's words count: "Rebasing · 30
+      // conflicts" collapses with the editor's name.) Classes are toggled and
+      // measured within one task, so nothing paints in between, and the
+      // MutationObserver below ignores attributes, so this cannot loop.
+      const needIn = (tight: boolean, tighter: boolean): number => {
+        bar.classList.toggle("is-tight", tight);
+        bar.classList.toggle("is-tighter", tighter);
+        return naturalWidth(left) + naturalWidth(right);
+      };
+      const open = needIn(false, false);
+      const tightNeed = open > have ? needIn(true, false) : open;
+      const tight = open > have;
+      const tighter = tight && tightNeed > have;
       bar.classList.toggle("is-tight", tight);
-      bar.classList.toggle("is-tighter", tight && need - editorLabel - chipLabel > have);
+      bar.classList.toggle("is-tighter", tighter);
     };
     this.fitTopbar = fit;
     const ro = new ResizeObserver(fit);
@@ -1406,6 +1612,16 @@ class App {
    *  specific item in a section view (e.g. opening an issue from the project
    *  board) — keeping navigation inside the app instead of bouncing to GitHub. */
   private routeView(id: string, force = false, target?: SectionTarget): void {
+    // A tab in the BACK never navigates (issue #32). Its screen is detached,
+    // and a route would build a view whose reads are stamped with the tab in
+    // front. The one route that reaches a background tab on purpose is the
+    // landing after an open — `await openPath(); nav("code")` — whose answer
+    // arrives with the opened repository already in front: that means "land
+    // THERE", so it goes to the tab in front. Anything else is dropped.
+    if (!this.shell.isActive(this)) {
+      if (inOpenLanding()) this.shell.routeActive(id, force, target);
+      return;
+    }
     // Where the app actually navigated, for the harness to assert against.
     // Several defects are "it went somewhere else" — a commit reference
     // ejecting you into the graph, a back button landing on a list — and none
@@ -1637,6 +1853,10 @@ class App {
         : undefined;
     if (cached) {
       this.viewHost.replaceChildren(cached);
+      // Live again: its soft-reload hook, dropped above with every route, is
+      // re-armed for THIS route — or a restored Branches view went deaf to
+      // every tab that opened or closed for the rest of the session (#32).
+      this.viewRevive.get(cached)?.();
       // …and put them back, on the frame after the attach so layout has run.
       const shot = this.viewScroll.get(cached);
       if (shot) {
@@ -1899,8 +2119,8 @@ class App {
     // not "origin/HEAD" — so the old `endsWith("/HEAD")` guard never fired and
     // the list carried a phantom row called "origin" offering to check out a
     // branch that does not exist. Its symref names the DEFAULT branch, which is
-    // worth keeping; the row is not.
-    const isRemoteHead = (r: RefInfo): boolean => !!r.symref || !r.name.includes("/");
+    // worth keeping; the row is not (isRemoteHead, shared with the switcher and
+    // the graph's ref menu).
     let remotes = this.refs.filter((r) => r.type === "remote" && !isRemoteHead(r));
     let tags = this.refs.filter((r) => r.type === "tag");
     let defaultBranch = this.defaultBranchName(locals);
@@ -1912,6 +2132,9 @@ class App {
     // follows. Swallowing it let the view assert "No other worktrees" from a
     // git call that never answered.
     let worktreeFailed = false;
+    // Which tabs were open when the list was read: each row's "open in a tab"
+    // is main's answer for THOSE (#32). See tabsEpoch.
+    let tabsRead = this.tabsEpoch;
     try {
       worktrees = await host.invoke("worktree:list", undefined);
     } catch {
@@ -2370,7 +2593,8 @@ class App {
         for (const st of rows) body.appendChild(this.stashRow(st));
       } else {
         total = worktrees.length;
-        const rows = worktrees.filter((w) => hit(w.branch, w.path, w.head.slice(0, 7)));
+        // By the path as it reads (C:\Users\… on Windows) as well as git's.
+        const rows = worktrees.filter((w) => hit(w.branch, w.path, w.shownPath, w.head.slice(0, 7)));
         shown = rows.length;
         for (const w of rows) body.appendChild(this.worktreeRow(w));
       }
@@ -2391,8 +2615,11 @@ class App {
       }
     };
 
-    this.reloadBranchRows = async (): Promise<void> => {
-      if (gen !== this.routeGen) return;
+    // The route this view answers for: the one that built it, and then each
+    // one that restores it from the keep-alive cache (revive, below).
+    let live = gen;
+    const reload = async (): Promise<void> => {
+      if (live !== this.routeGen) return;
       await this.refreshRefs();
       locals = await gget("branches:list", undefined);
       try {
@@ -2412,21 +2639,46 @@ class App {
       // refresh in the view goes through here, including `removeWorktreeLive`.
       // "Worktree removed." left the row and its count on screen, and pressing
       // Remove again ran git against a path that no longer existed.
+      //
+      // The tabs open as main is asked: its answer is about THOSE. A tab that
+      // opens or closes while it answers bumps the epoch past this, and the
+      // next restore reads again.
+      const asked = this.tabsEpoch;
+      let read = false;
       try {
         worktrees = await host.invoke("worktree:list", undefined);
         worktreeFailed = false;
+        read = true;
       } catch {
         // KEEP the rows we have. Replacing them with [] on a failed refresh
         // deleted a list git never said was gone.
         worktreeFailed = true;
         if (worktrees.length) toast("Couldn't re-read the worktrees — showing the last list git gave.", "info");
       }
-      if (gen !== this.routeGen) return;
+      if (live !== this.routeGen) return;
       remotes = this.refs.filter((r) => r.type === "remote" && !isRemoteHead(r));
       tags = this.refs.filter((r) => r.type === "tag");
       defaultBranch = this.defaultBranchName(locals);
       render();
+      // Only now are the rows on screen main's answer for those tabs. Noted
+      // before the read and the route check, a re-read dropped because the
+      // view was left while main answered marked the tabs as seen — and the
+      // restore that should have read them again did not. A failed read
+      // leaves the old rows, and the old note with them.
+      if (read) tabsRead = asked;
     };
+    this.reloadBranchRows = reload;
+    // Restored from the keep-alive cache, the view is on screen again but its
+    // hook was dropped with the route that parked it, and nothing re-armed it:
+    // a tab closing in front of it left its worktree's "open in a tab" mark
+    // behind, and a tab opening never added one. Re-armed for the route that
+    // restored it — and a tab that opened or closed while it was parked is
+    // read now, since the list on screen was main's answer for the tabs then.
+    this.viewRevive.set(wrap, () => {
+      live = this.routeGen;
+      this.reloadBranchRows = reload;
+      if (tabsRead !== this.tabsEpoch) void reload();
+    });
     // ── the keyboard ──────────────────────────────────────────────────────
     //
     // Nothing in this view had a shortcut: not the filter, not Fetch, not New
@@ -2547,7 +2799,8 @@ class App {
       },
       revealInGraph: (sha) => this.revealInGraph(sha),
       openBranch: (ref) => this.routeView("branches", false, { ref }),
-      openCommitFile: (file, sha) => void this.openFile({ path: file.path, status: file.status }, sha),
+      openCommitFile: (file, sha) =>
+        void this.openFile({ path: file.path, status: file.status, oldPath: file.oldPath }, sha),
       stashesChanged: () => {
         // Applying/popping a stash changes the working tree; dropping changes
         // the list. Bust the SWR cache and refresh whatever's showing.
@@ -2578,14 +2831,47 @@ class App {
     try {
       await run();
     } finally {
-      if (btn.isConnected) {
-        (btn as HTMLButtonElement).disabled = false;
-        btn.classList.remove("is-busy");
-        btn.querySelector(".codicon")?.classList.remove("spin");
-      } else if (hadFocus && host_?.isConnected && nth >= 0) {
+      // The button's own state goes back whether or not it is on screen: one
+      // rebuilt away takes it with it, but one kept in a tab that went to the
+      // back meanwhile (an open lands in its new tab — #32) comes back with it,
+      // and it must not come back still busy.
+      (btn as HTMLButtonElement).disabled = false;
+      btn.classList.remove("is-busy");
+      btn.querySelector(".codicon")?.classList.remove("spin");
+      if (!btn.isConnected && hadFocus && host_?.isConnected && nth >= 0) {
         (host_.children[nth] as HTMLElement | undefined)?.focus?.();
       }
     }
+  }
+
+  /** A remote branch's ⋯ menu — in the Branches list, and (after its
+   *  checkout) the branch switcher's submenu for it (#32). */
+  private remoteActionItems(r: RefInfo): MenuItem[] {
+    const { branch: short } = remoteRefParts(r);
+    return [
+      { label: `Compare with ${short}`, icon: "git-compare", onClick: () => this.compareWithRef(r.name) },
+      { label: "View in Commits", icon: "git-commit", onClick: () => this.routeView("graph", false, { sha: r.sha }) },
+      { separator: true },
+      { label: "Copy name", icon: "copy", onClick: () => void copyText(r.name, `Copied “${r.name}”.`) },
+    ];
+  }
+
+  /** A tag's ⋯ menu — in the Branches list, and the branch switcher's
+   *  submenu for it (#32). */
+  private tagActionItems(r: RefInfo): MenuItem[] {
+    return [
+      { label: "View in Commits", icon: "git-commit", onClick: () => this.routeView("graph", false, { sha: r.sha }) },
+      { label: `Compare with ${r.name}`, icon: "git-compare", onClick: () => this.compareWithRef(r.name) },
+      { separator: true },
+      { label: "Copy name", icon: "copy", onClick: () => void copyText(r.name, `Copied “${r.name}”.`) },
+      { separator: true },
+      {
+        label: "Delete tag…",
+        icon: "trash",
+        danger: true,
+        onClick: () => void this.deleteTagLive(tagName(r)),
+      },
+    ];
   }
 
   /**
@@ -2621,13 +2907,7 @@ class App {
     more.setAttribute("aria-label", `More actions for ${said}`);
     more.setAttribute("aria-haspopup", "menu");
     more.appendChild(glyph("ellipsis"));
-    const menu = (): void =>
-      openMenu(more, [
-        { label: `Compare with ${short}`, icon: "git-compare", onClick: () => this.compareWithRef(r.name) },
-        { label: "View in Commits", icon: "git-commit", onClick: () => this.routeView("graph", false, { sha: r.sha }) },
-        { separator: true },
-        { label: "Copy name", icon: "copy", onClick: () => void copyText(r.name, `Copied “${r.name}”.`) },
-      ]);
+    const menu = (): void => openMenu(more, this.remoteActionItems(r));
     more.addEventListener("click", menu);
     actions.push(more);
 
@@ -2699,20 +2979,7 @@ class App {
     more.setAttribute("aria-label", `More actions for ${said}`);
     more.setAttribute("aria-haspopup", "menu");
     more.appendChild(glyph("ellipsis"));
-    const menu = (): void =>
-      openMenu(more, [
-        { label: "View in Commits", icon: "git-commit", onClick: () => this.routeView("graph", false, { sha: r.sha }) },
-        { label: `Compare with ${r.name}`, icon: "git-compare", onClick: () => this.compareWithRef(r.name) },
-        { separator: true },
-        { label: "Copy name", icon: "copy", onClick: () => void copyText(r.name, `Copied “${r.name}”.`) },
-        { separator: true },
-        {
-          label: "Delete tag…",
-          icon: "trash",
-          danger: true,
-          onClick: () => void this.deleteTagLive(tagName(r)),
-        },
-      ]);
+    const menu = (): void => openMenu(more, this.tagActionItems(r));
     more.addEventListener("click", menu);
     actions.push(more);
 
@@ -2778,7 +3045,7 @@ class App {
     more.appendChild(glyph("ellipsis"));
     const menu = (): void =>
       openMenu(more, [
-        { label: "Pop — apply and remove", icon: "arrow-up", onClick: () => void this.stashActLive("pop", st, more) },
+        { label: "Pop — apply and remove", icon: "git-stash-pop", onClick: () => void this.stashActLive("pop", st, more) },
         { separator: true },
         {
           label: "Drop this stash…",
@@ -2907,9 +3174,14 @@ class App {
         await this.refreshBranchesSoft();
         return;
       }
+      // By SHA, not st.ref: the check above holds only until the request
+      // leaves. A Stash & Retry sends it again after its question, and a stash
+      // pushed while the question was up renumbered the list — the old
+      // stash@{n} then popped, and dropped, the newcomer. Main finds the sha
+      // in the list just before git runs.
       const r = await host.invoke(
         action === "apply" ? "stash:apply" : action === "pop" ? "stash:pop" : "stash:drop",
-        st.ref,
+        st.sha || st.ref,
       );
       // Uncommitted changes in the stash's way were asked about (Stash &
       // Retry or Cancel — bridge.ts), and the user cancelled: nothing ran.
@@ -2936,11 +3208,15 @@ class App {
           after: () => this.refreshBranchesSoft(),
         });
       } else {
+        // A Pop whose staging git could not restore was applied and KEPT
+        // (main's stashNote, said by bridge.ts, says why) — not "Popped".
         toast(
           action === "apply"
             ? `Applied ${st.ref}.`
             : action === "pop"
-              ? `Popped ${st.ref}.`
+              ? r.stashKept
+                ? `Applied ${st.ref} — it stays in the list.`
+                : `Popped ${st.ref}.`
               : `Dropped ${st.ref}.`,
           "success",
         );
@@ -3006,7 +3282,7 @@ class App {
           done.length
             ? `Deleted ${done.join(", ")}. Stopped at ${branchName(b)}: ${r?.message ?? "git refused."}`
             : `${branchName(b)} was not deleted: ${r?.message ?? "git refused."}`,
-          "error",
+          r?.expected ? "info" : "error",
         );
         break;
       }
@@ -3140,28 +3416,38 @@ class App {
    *  contract with no caller in any view — the cheapest capability in the app. */
   private worktreeRow(w: WorktreeInfo): HTMLElement {
     const actions: HTMLElement[] = [];
-    if (!w.current) {
+    // Said and copied in the system's spelling; `w.path` (git's) is what is sent.
+    const shown = w.shownPath ?? w.path;
+    // Nothing to open when its folder is gone, or for a bare repository's entry.
+    if (!w.current && !w.missing && !w.bare) {
       const open = el("button", "row-btn") as HTMLButtonElement;
       open.textContent = "Open";
-      open.setAttribute("aria-label", `Open the worktree at ${w.path}`);
-      open.title = `Switch this window to ${w.path}`;
+      open.setAttribute("aria-label", `Open the worktree at ${shown}`);
+      // An open, like any other (issue #32): the worktree gets a tab of its
+      // own, or the one it already has is brought to the front.
+      open.title = `Open the worktree at ${shown} in its own tab`;
       open.addEventListener("click", () => void this.openWorktreeLive(w, open));
       actions.push(open);
     }
     const more = el("button", "row-btn lv-menu-btn") as HTMLButtonElement;
-    more.setAttribute("aria-label", `More actions for ${w.path}`);
+    more.setAttribute("aria-label", `More actions for ${shown}`);
     more.setAttribute("aria-haspopup", "menu");
     more.appendChild(glyph("ellipsis"));
     const menu = (): void =>
       openMenu(more, [
-        { label: "Copy path", icon: "copy", onClick: () => void copyText(w.path, "Copied the path.") },
+        { label: "Copy path", icon: "copy", onClick: () => void copyText(shown, "Copied the path.") },
         { separator: true },
         {
-          label: "Remove this worktree…",
+          // Its folder gone, removing it only forgets git's record of it.
+          label: w.missing ? "Forget this worktree…" : "Remove this worktree…",
           icon: "trash",
           danger: true,
-          disabled: w.current,
-          title: w.current ? "This is the worktree you are in" : undefined,
+          disabled: w.current || w.main,
+          title: w.current
+            ? "This is the worktree you are in"
+            : w.main
+              ? "The main worktree holds the repository itself — git never removes it"
+              : undefined,
           onClick: () => void this.removeWorktreeLive(w),
         },
       ]);
@@ -3169,15 +3455,39 @@ class App {
     actions.push(more);
 
     const pills: HTMLElement[] = [];
+    // A window holds a repository per TAB (#32): the mark is this tab's, and a
+    // worktree another tab has open says so — its Remove is refused for it.
+    // Main says which, by the comparison that refusal makes: a tab's root and
+    // git's path are two spellings of a folder (a symlink, case, C:\ against
+    // C:/), and only main can ask the disk. Compared here as text, the row lost
+    // its mark where main still refused the remove.
+    const inTab = !!w.openInTab;
     if (w.current) {
-      const p = span("this window", "ab-pill current");
-      p.title = "The worktree this window has open";
+      const p = span("this tab", "ab-pill current");
+      p.title = "The worktree this tab has open";
+      pills.push(p);
+    } else if (inTab) {
+      const p = span("open in a tab", "ab-pill default");
+      p.title = "Another tab of this window has it open — close that tab to remove it";
       pills.push(p);
     }
-    if (w.locked) pills.push(span("locked", "ab-pill unpublished"));
-    if (w.prunable) {
-      const p = span("prunable", "ab-pill gone");
-      p.title = "Its directory is gone — git would prune this entry";
+    // Named, as the extension names it: it holds the repository itself, and
+    // was told apart only by "this tab" — when this tab had it open.
+    if (w.main && !w.bare) {
+      const p = span("main worktree", "ab-pill default");
+      p.title = "The main worktree holds the repository itself — git never removes it";
+      pills.push(p);
+    }
+    if (w.locked) {
+      const p = span("locked", "ab-pill unpublished");
+      p.title = w.lockReason ? `Locked: ${w.lockReason}` : "Locked, with no reason given";
+      pills.push(p);
+    }
+    // Not only `prunable`: git never calls a LOCKED worktree prunable, even
+    // with its folder gone.
+    if (w.missing || w.prunable) {
+      const p = span("folder missing", "ab-pill gone");
+      p.title = "Its folder is gone — Forget it from the ⋯ menu";
       pills.push(p);
     }
 
@@ -3192,7 +3502,7 @@ class App {
           for (const p of pills) c.appendChild(p);
           return c;
         })(),
-        span(w.path, "br-subject br-subject-col"),
+        span(shown, "br-subject br-subject-col"),
         span(w.head.slice(0, 7), "br-sha sec-mono"),
       ],
       time: "",
@@ -3206,11 +3516,11 @@ class App {
         w.branch
           ? this.routeView("refdetail", false, { ref: w.branch, id: "head" })
           : this.routeView("commit", false, { sha: w.head }),
-      ariaLabel: `${w.branch ?? w.head.slice(0, 7)} at ${w.path}${w.current ? ", this window" : ""}`,
+      ariaLabel: `${w.branch ?? w.head.slice(0, 7)} at ${shown}${w.current ? ", this tab" : inTab ? ", open in another tab" : ""}${w.main && !w.bare ? ", main worktree" : ""}`,
     });
-    row.classList.add("ref-row");
+    row.classList.add("ref-row", "worktree-row");
     row.dataset.ref = w.path;
-    row.title = w.path;
+    row.title = shown;
     row.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       menu();
@@ -3218,35 +3528,81 @@ class App {
     return row;
   }
 
-  /** Point this window at another worktree. */
+  /** Open another worktree of this repository in a tab of its own (or switch
+   *  to the tab it has). Its answer lands with that tab in front, so the toast
+   *  is said there. */
   private async openWorktreeLive(w: WorktreeInfo, btn: HTMLButtonElement): Promise<void> {
     await this.refreshInPlace(btn, async () => {
       const repo = await host.invoke("worktree:open", w.path);
+      // Main has said why nothing opened (every tab is taken): once is enough.
+      if (repo && "said" in repo) return;
       if (!repo) {
-        toast(`Couldn't open ${w.path}.`, "error");
+        toast(`Couldn't open ${w.shownPath ?? w.path}.`, "error");
         return;
       }
-      toast(`Opened ${w.branch ?? w.path}.`, "success");
+      toast(`Opened ${w.branch ?? w.shownPath ?? w.path}.`, "success");
     });
   }
 
-  /** Remove a worktree — the directory goes with it, so say so. */
-  private async removeWorktreeLive(w: WorktreeInfo): Promise<void> {
-    const ok = await confirmDialog({
-      title: `Remove the worktree at ${w.path}?`,
-      message:
-        `git removes the directory as well as the entry. Any uncommitted work inside ` +
-        `${w.path} goes with it. The branch ${w.branch ?? "it holds"} is not deleted.`,
-      confirmLabel: "Remove",
-      danger: true,
-    });
-    if (!ok) return;
-    const r = await host.invoke("worktree:remove", { path: w.path, force: false });
-    if (!r.ok) {
-      toast(r.message ?? "Couldn't remove the worktree.", r.expected ? "info" : "error");
+  /**
+   * Remove (or, its folder gone, forget) a worktree. What that takes is read
+   * FIRST (`worktree:removal`), so the one question names it — a lock's
+   * reason, the uncommitted files that go — and the answer runs exactly that.
+   * It used to promise "any uncommitted work goes with it", run a plain
+   * remove, and show git's refusal: a dirty worktree was never removed, a
+   * locked one could not be, and the main one was offered at all. The words
+   * are the extension's (host-bridge/worktreeRemoval).
+   *
+   * A change made while the question is open (an agent still at work in it)
+   * is never deleted unasked: the remove runs nothing and answers
+   * `changedSince` with what the worktree holds now, and the question is asked
+   * again from that — once, as the extension's is. It used to show git's
+   * refusal ("use --force to delete it") in a red toast, filed as a crash.
+   */
+  private async removeWorktreeLive(w: WorktreeInfo, again?: WorktreeRemovalInfo): Promise<void> {
+    const label = w.branch ?? (w.bare ? "(bare)" : `${w.head.slice(0, 7)} (detached)`);
+    const plan = again ?? (await host.invoke("worktree:removal", { path: w.path }));
+    if (plan.kind === "notListed" || plan.kind === "main" || plan.kind === "current" || plan.kind === "openInTab") {
+      toast(worktreeRemovalRefusal(plan.kind, label, "tab"), "info");
+      if (plan.kind === "notListed") await this.refreshBranchesSoft();
       return;
     }
-    toast("Worktree removed.", "success");
+    const q = worktreeRemovalQuestion({
+      kind: plan.kind,
+      label,
+      shownPath: w.shownPath ?? w.path,
+      branch: plan.branch,
+      head: plan.head,
+      locked: plan.locked,
+      lockReason: plan.lockReason,
+      changes: plan.changes,
+      operation: plan.operation,
+    });
+    const ok = await confirmDialog({
+      title: q.title,
+      message: q.message,
+      confirmLabel: q.confirmLabel,
+      danger: q.danger,
+      holdWhile: this.whileThisRepo(),
+    });
+    if (!ok) return;
+    const r = await host.invoke("worktree:remove", {
+      path: w.path,
+      discardChanges: q.discardChanges,
+      // Exactly what the question named: a path it did not stops the discard.
+      ...(q.discardChanges && plan.kind === "present" && plan.changes ? { listed: plan.changes } : {}),
+      pastLock: plan.locked,
+    });
+    if (!r.ok) {
+      if (r.changedSince && !again) {
+        await this.removeWorktreeLive(w, r.changedSince);
+        return;
+      }
+      toast(r.message ?? "Couldn't remove the worktree.", r.expected ? "info" : "error");
+      await this.refreshBranchesSoft();
+      return;
+    }
+    toast(plan.kind === "missing" ? `Forgot worktree ${label}.` : `Removed worktree ${label}.`, "success");
     await this.refreshBranchesSoft();
   }
 
@@ -3654,6 +4010,20 @@ class App {
   /** The per-branch action menu: merge / rebase / rename / set-upstream / tag /
    *  delete-remote — the depth that makes Branches a real manager, not a list. */
   private openBranchActions(b: BranchInfo, anchor: HTMLElement): void {
+    openMenu(anchor, this.branchActionItems(b, anchor));
+  }
+
+  /**
+   * A local branch's actions — the Branches list's ⋯ menu, and the branch
+   * switcher's submenu for that branch (#32), which is the same list with
+   * Checkout moved to the top: the switcher is where you go to SWITCH, and
+   * Enter, Enter there is a checkout, as in IntelliJ's popup.
+   */
+  private branchActionItems(
+    b: BranchInfo,
+    anchor: HTMLElement,
+    opts: { checkoutFirst?: boolean } = {},
+  ): MenuItem[] {
     // Every op below reaches git by b.fullName (the main process refuses one
     // without it); every label names the branch by the part under refs/heads/
     // — git's short "heads/x" beside a tag "x" is neither (branchRequests.ts).
@@ -3685,6 +4055,12 @@ class App {
       await refresh();
     };
     const items: MenuItem[] = [];
+    const checkout: MenuItem = {
+      label: `Checkout ${bn}`,
+      icon: "check",
+      onClick: () => void this.checkoutRef(b.fullName),
+    };
+    if (opts.checkoutFirst && !b.current) items.push(checkout, { separator: true });
     // Fetch is pinned on top and runs IN PLACE: the menu stays open, the item
     // spins while the remotes refresh, and every row's ↓/↑ counts update live
     // behind it — so "what's unpulled where?" is one click, not a round trip.
@@ -3713,13 +4089,7 @@ class App {
         ),
     });
     items.push({ separator: true });
-    if (!b.current) {
-      items.push({
-        label: `Checkout ${bn}`,
-        icon: "check",
-        onClick: () => void this.checkoutRef(b.fullName),
-      });
-    }
+    if (!b.current && !opts.checkoutFirst) items.push(checkout);
     // Always offered while an upstream exists (a fetch from this very menu can
     // surface new commits): pulls WITHOUT checking the branch out. The current
     // branch gets a real pull instead, shown only when it's actually behind.
@@ -3914,7 +4284,7 @@ class App {
       });
     }
     if (tail.length) items.push({ separator: true }, ...tail);
-    openMenu(anchor, items);
+    return items;
   }
 
   /**
@@ -4208,6 +4578,11 @@ class App {
           }
           const u = await host.invoke("branch:rename", back);
           if (!u.ok) return cleanErr(u.message) || `Couldn't rename ${to} back.`;
+          // The rename took `${to}`'s tracking with it — the rename made the
+          // branch track `${fixed.remote}/${to}` — so renaming back left it
+          // tracking the new name. Point it at its own remote branch again,
+          // as the "publish" variant's undo does.
+          if (b.upstream) await host.invoke("branch:setUpstream", { fullName: b.fullName, upstream: b.upstream });
           bust();
           return undefined;
         },
@@ -4311,6 +4686,15 @@ class App {
     // refs/heads/. The short "heads/x" (beside a tag "x") names no branch to
     // delete, and restored as a branch literally called "heads/x".
     const name = branchName(b);
+    // Another worktree has it checked out: git refuses the delete. Say where
+    // BEFORE asking — the bridge refuses it too, in the same words, should
+    // this list be stale.
+    const worktreeList = await host.invoke("worktree:list", undefined).catch((): WorktreeInfo[] => []);
+    const holder = worktreeList.find((w) => !w.current && !w.bare && w.branch === name);
+    if (holder) {
+      toast(checkedOutElsewhereMessage(name, holder.shownPath ?? holder.path, "delete", !!(holder.missing || holder.prunable)), "info");
+      return;
+    }
     // Confirm FIRST. This sits a few pixels from Checkout in a hover-revealed
     // row cluster, and every other destructive action in the app asks before
     // acting — deleting a branch outright was the one that did not. The
@@ -4341,7 +4725,9 @@ class App {
       r = await host.invoke("branch:delete", { fullName: b.fullName, force: true });
     }
     if (!r.ok) {
-      toast(r.message || `Couldn't delete branch '${name}'.`, "error");
+      // `expected`: the person's state (another worktree has it checked out),
+      // said in words — not a failure.
+      toast(r.message || `Couldn't delete branch '${name}'.`, r.expected ? "info" : "error");
       return; // branch still exists — don't refresh as if it were gone
     }
     // A branch is a name and a commit, so putting one back is genuinely
@@ -4477,16 +4863,31 @@ class App {
       // remote-tracking branch and tag in the repo. The upstream is the base
       // anyone actually wants there.
       this.refs.find((r) => r.type === "remote" && r.name.endsWith(`/${head}`))?.name ??
-      this.refs.find((r) => r.type === "remote")?.name;
+      this.refs.find((r) => r.type === "remote" && !isRemoteHead(r))?.name;
 
     const wrap = el("div", "compare-view");
+
+    /** A side as the view names it in words: a commit (Compare these two
+     *  commits, issue #32) by its short sha — as its picker does — a ref by
+     *  its name. Forty hex characters in a sentence named the same commit two
+     *  ways, one line under the other. */
+    const sideLabel = (ref: string | undefined): string =>
+      ref && this.compareCommits.has(ref) ? ref.slice(0, 7) : (ref ?? "");
+    /** Either side is a commit, not a ref: a pull request needs two branches. */
+    const comparingCommits = (): boolean =>
+      [this.compareBase, this.compareHead].some((r) => !!r && this.compareCommits.has(r));
 
     // ── Toolbar: base ⇄ compare pickers + the dot-mode toggle. ────────────────
     const bar = el("div", "compare-bar");
     const baseBtn = el("button", "ref-pick");
     const headBtn = el("button", "ref-pick");
     const setLabel = (btn: HTMLElement, ref: string): void => {
-      btn.replaceChildren(glyph("git-branch"), span(ref), glyph("chevron-down"));
+      // A commit (Compare these two commits, issue #32) reads as one: its
+      // short sha with the commit glyph, the full one on hover.
+      const commit = this.compareCommits.has(ref);
+      btn.replaceChildren(glyph(commit ? "git-commit" : "git-branch"), span(commit ? ref.slice(0, 7) : ref), glyph("chevron-down"));
+      if (commit) btn.title = ref;
+      else btn.removeAttribute("title");
     };
     // With no second ref in the repo the picker says so rather than naming a
     // ref that would compare against itself.
@@ -4538,7 +4939,13 @@ class App {
     };
     const modeWrap = el("div", "cmp-mode");
     const dot3 = el("button", "cmp-mode-btn");
-    dot3.textContent = "What this branch adds";
+    /** "What this branch adds" — or, when the compare side is a commit, what
+     *  THAT commit adds: its short sha, so the words stay right after a swap. */
+    const syncModeLabel = (): void => {
+      const head = this.compareHead;
+      dot3.textContent = head && this.compareCommits.has(head) ? `What ${sideLabel(head)} adds` : "What this branch adds";
+    };
+    syncModeLabel();
     dot3.title = "Three-dot (base...compare): changes introduced since the common ancestor — GitHub's default";
     const dot2 = el("button", "cmp-mode-btn");
     dot2.textContent = "Everything different";
@@ -4569,7 +4976,7 @@ class App {
         () => {
           const b = this.compareBase, h = this.compareHead;
           openAssistantTab({
-            title: `Explain ${b}…${h}`,
+            title: `Explain ${sideLabel(b)}…${sideLabel(h)}`,
             goal: `Explain what changes between \`${b}\` and \`${h}\`. Run \`git diff ${b}..${h}\` to see the changes, then give a clear, structured summary of what changed and why it matters.`,
             nav,
           });
@@ -4581,7 +4988,7 @@ class App {
         () => {
           const b = this.compareBase, h = this.compareHead;
           openAssistantTab({
-            title: `Review ${b}…${h}`,
+            title: `Review ${sideLabel(b)}…${sideLabel(h)}`,
             goal: `Review the changes between \`${b}\` and \`${h}\` for correctness bugs, security issues and risky changes. Run \`git diff ${b}..${h}\` to see them. Be specific and cite files.`,
             nav,
           });
@@ -4625,9 +5032,12 @@ class App {
      *  rest of the session — the view's whole purpose, gone, with no way back
      *  short of a reload. */
     let canPr = false;
-    /** The two conditions, kept apart and re-asserted on every exit. */
+    /** The conditions, kept apart and re-asserted on every exit. Two
+     *  COMMITS are not a pull request's base and head: openCreatePr resolves
+     *  those against branch names, found neither sha, and opened a form for
+     *  the default branch and some other branch — nothing on this screen. */
     const syncPrBtn = (): void => {
-      prBtn.hidden = !(canPr && !!this.compareBase && this.compareBase !== this.compareHead);
+      prBtn.hidden = !(canPr && !!this.compareBase && this.compareBase !== this.compareHead && !comparingCommits());
     };
     prBtn.addEventListener("click", () =>
       void openCreatePr(() => this.routeView("prs", true), {
@@ -4689,7 +5099,7 @@ class App {
           ? { base: this.compareBase, head: this.compareHead, mode: this.compareMode }
           : undefined;
       if (!cmpKey || peek("compare:refs", cmpKey) === undefined) {
-        body.replaceChildren(loadingState(`Comparing ${this.compareBase} … ${this.compareHead}`));
+        body.replaceChildren(loadingState(`Comparing ${sideLabel(this.compareBase)} … ${sideLabel(this.compareHead)}`));
       }
       // The previous comparison's answer is no longer an answer to anything.
       // `last` was only reassigned on the success path, so the early return
@@ -4708,6 +5118,7 @@ class App {
       filesCount.textContent = "";
       syncPrBtn();
       syncSwap();
+      syncModeLabel();
       // Nothing to compare yet (a single-branch repo, or base === head):
       // prompt for a second ref instead of running a doomed comparison.
       if (!this.compareBase || this.compareBase === this.compareHead) {
@@ -4722,7 +5133,7 @@ class App {
           emptyState(
             "Pick two refs to compare",
             this.compareBase
-              ? `Base and compare are both ${this.compareHead}. Choose a different ref on either side.`
+              ? `Base and compare are both ${sideLabel(this.compareHead)}. Choose a different ref on either side.`
               : "This repository has only one branch. Compare needs a second ref — create or fetch one first.",
             { icon: "git-compare" },
           ),
@@ -4745,7 +5156,7 @@ class App {
         body.replaceChildren(
           errorState(
             "Couldn't compare these refs",
-            `Make sure ${this.compareBase} and ${this.compareHead} both exist.`,
+            `Make sure ${sideLabel(this.compareBase)} and ${sideLabel(this.compareHead)} both exist.`,
             () => void runCompare(),
           ),
         );
@@ -4760,12 +5171,12 @@ class App {
       filesCount.textContent = String(m);
       summary.textContent =
         n === 0 && m === 0
-          ? `${this.compareHead} is up to date with ${this.compareBase}.`
+          ? `${sideLabel(this.compareHead)} is up to date with ${sideLabel(this.compareBase)}.`
           : `${n} commit${n === 1 ? "" : "s"} · ${m} file${m === 1 ? "" : "s"} changed` +
             // "redesign/issues-detail is 2 ahead" made the reader work out
             // whose commits those were; say it straight.
             (res.behind > 0
-              ? ` · ${res.behind} commit${res.behind === 1 ? "" : "s"} only on ${this.compareBase}`
+              ? ` · ${res.behind} commit${res.behind === 1 ? "" : "s"} only on ${sideLabel(this.compareBase)}`
               : "");
       renderBody();
     };
@@ -5042,7 +5453,7 @@ class App {
       }
     };
     add("Branches", this.refs.filter((r) => r.type === "head"), "git-branch");
-    add("Remotes", this.refs.filter((r) => r.type === "remote" && !r.name.endsWith("/HEAD")), "cloud");
+    add("Remotes", this.refs.filter((r) => r.type === "remote" && !isRemoteHead(r)), "cloud");
     add("Tags", this.refs.filter((r) => r.type === "tag"), "tag");
     if (items.length === 0) items.push({ label: "No refs", disabled: true });
     openMenu(anchor, items);
@@ -5402,7 +5813,7 @@ class App {
           await this.showSettingsView();
           // …and for the card INSIDE it, which paints on its own promise.
           await this.accountCardReady;
-          const fresh = document.querySelector<HTMLElement>(".settings-view");
+          const fresh = (this.screenEl ?? document).querySelector<HTMLElement>(".settings-view");
           const btn = fresh
             ? [...fresh.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
                 /sign in with github/i.test(b.textContent ?? ""),
@@ -8051,7 +8462,11 @@ class App {
       label: n === 1 ? "Bring the changes back" : `Bring ${n} files' changes back`,
       undo: async () => {
         const r = await host.invoke("discard:undo", restore);
-        return r.ok ? undefined : (r.message ?? "Couldn't bring them back.");
+        if (r.ok) return undefined;
+        const why = r.message ?? "Couldn't bring them back.";
+        // Edited again since the discard: refused, and said as the user's
+        // state (an info toast) rather than as an error.
+        return r.expected ? { info: why } : why;
       },
       after: () => this.repaintChanges(),
     });
@@ -8467,8 +8882,11 @@ class App {
     this.graph?.dispose(); // tear down a prior mount before replacing it
     const graph = new GraphMount(graphHost, {
       onSelect: (sha) => void this.selectCommit(sha),
+      // Several commits selected (issue #32): the pane says so and offers
+      // what can be done to all of them.
+      onSelection: (shas) => this.showSelection(shas),
       onOpen: (sha) => void this.selectCommit(sha),
-      onContext: (sha, x, y) => void this.openCommitMenu(sha, x, y),
+      onContext: (sha, x, y, shas) => void (shas ? this.openManyMenu(shas, x, y) : this.openCommitMenu(sha, x, y)),
       // Ref labels are LINKS now: click a branch/tag chip in the graph and land
       // on that ref in Branches, scrolled + flashed.
       // `kind` too. The chip knows whether it is a branch, a remote or a tag,
@@ -8654,7 +9072,8 @@ class App {
   private async doSync(action: "fetch" | "pull" | "push" | "publish"): Promise<void> {
     if (this.syncing) return; // lock the trigger against double-invocation
     this.syncing = true;
-    const widget = document.querySelector(".topbar-sync");
+    // This TAB's widget: a document query answers for whichever tab is in front.
+    const widget = (this.screenEl ?? document).querySelector(".topbar-sync");
     widget?.classList.add("busy");
     // Live in-flight state: the widget shows WHAT it's doing with a spinning
     // icon ("Pulling… / Pushing…"), not just a dimmed button.
@@ -8710,7 +9129,7 @@ class App {
       toast(cleanErr(e) || `${action} failed.`, "error");
     } finally {
       this.syncing = false;
-      document.querySelector(".topbar-sync")?.classList.remove("busy");
+      (this.screenEl ?? document).querySelector(".topbar-sync")?.classList.remove("busy");
       // Restore the widget from its in-flight face (success already repainted
       // it via updateSync; this covers the failure path).
       this.renderSyncWidget?.(this.syncStatus);
@@ -8797,7 +9216,7 @@ class App {
           {
             icon: "repo-clone",
             label: "Clone repository…",
-            run: () => openCloneDialog((root) => void this.openPath(root)),
+            run: () => openCloneDialog((root) => this.openPath(root)),
           },
           { icon: "folder-opened", label: "Open repository…", run: () => void this.openRepo() },
           // Search left the rail (it is a tool, not a destination) — this row
@@ -8986,11 +9405,15 @@ class App {
     sidebarToggle.addEventListener("click", () => this.toggleRail());
     this.railToggleEl = sidebarToggle;
 
+    // The brand mark goes HOME. It used to close the repository ("Back to main
+    // menu") — with repositories as tabs (#32) that is the tab's own × and
+    // ⌘W, and a logo that quietly closed a tab, with a push perhaps still
+    // running in it, would be the most surprising click in the app.
     const home = el("button", "topbar-home");
-    home.title = "Back to main menu";
-    home.setAttribute("aria-label", "Back to main menu");
+    home.title = "Home";
+    home.setAttribute("aria-label", "Home");
     home.appendChild(brandMark());
-    home.addEventListener("click", () => void this.backToMenu());
+    home.addEventListener("click", () => this.routeView("dashboard"));
 
     // Back / forward chevrons — the in-app history walkers (⌘[ / ⌘], and the
     // mouse's back/forward buttons). What makes section-hopping feel like a
@@ -9010,13 +9433,9 @@ class App {
     this.navFwdBtn = fwdBtn;
     this.updateNavButtons();
 
-    const repoSwitch = el("button", "topbar-switch");
-    const repoName = el("span", "switch-name");
-    repoName.textContent = info?.name ?? "No repository";
-    this.repoSwitchName = repoName;
-    repoSwitch.append(glyph("folder"), repoName, glyph("chevron-down"));
-    repoSwitch.title = info?.root ?? "Open or clone a repository";
-    repoSwitch.addEventListener("click", () => void this.openRepoMenu(repoSwitch));
+    // No repository chip: the TAB names the repository you are working in, one
+    // row up (issue #32 — "tabs at the top row instead of a single one"), and
+    // the tab row's + is where another is opened.
 
     const branchSwitch = el("button", "topbar-switch topbar-branch");
     const branchName = el("span", "switch-name");
@@ -9042,9 +9461,13 @@ class App {
     const where = el("span", "topbar-where");
     where.append(glyph("globe"), span("", "topbar-where-name"));
     where.hidden = true;
-    const working = span("working in", "topbar-working");
+    // "working in <repo>" — the repository the controls to its right act on.
+    // It was a clause before the old repository chip; the chip is the tab row
+    // now (#32), so the clause carries the name itself, in words.
+    const working = el("span", "topbar-working");
+    working.append(span("working in", "topbar-working-lead"), span(info?.name ?? "", "topbar-working-name"));
     working.hidden = true;
-    left.append(home, sidebarToggle, backBtn, fwdBtn, where, working, repoSwitch);
+    left.append(home, sidebarToggle, backBtn, fwdBtn, where, working);
     let primedStatus = false;
     const syncWhere = (): void => {
       const route =
@@ -9070,6 +9493,7 @@ class App {
           .catch(() => {});
       }
       working.hidden = !route || !info || openName === route.fullName.toLowerCase();
+      working.title = info ? `The controls on this bar act on ${info.root}` : "";
       // `hidden` is an ATTRIBUTE, and wireTopbarFit's MutationObserver
       // deliberately does not watch attributes — so ask for the re-measure.
       this.fitTopbar?.();
@@ -9174,7 +9598,8 @@ class App {
     const head = this.headInfo;
     if (!head) return;
     const name = head.detached ? "detached HEAD" : (head.branch ?? "HEAD");
-    const nameEl = document.querySelector<HTMLElement>(".dc-branch-name");
+    // This tab's composer — never whichever tab's is on screen (#32).
+    const nameEl = (this.screenEl ?? document).querySelector<HTMLElement>(".dc-branch-name");
     if (nameEl) nameEl.textContent = name;
     // The composer owns its own label — writing it from here made two writers
     // for one string, and the other one holds the amend flag.
@@ -9299,114 +9724,113 @@ class App {
    * clock. The toast stays at the call site — only Sign out has one to say.
    */
   private async authChanged(): Promise<void> {
-    // Every cached GitHub answer was computed for a session that is over.
-    bust();
-    // …and the kept-alive DOM those answers were rendered into, which `bust()`
+    // Every cached GitHub answer was computed for a session that is over — in
+    // EVERY tab (issue #32): the account is the window's, not the tab's.
+    bustEverywhere();
+    // …and the kept-alive DOM those answers were rendered into, which a bust
     // does not touch: a stashed view is re-attached verbatim on return, so
     // Issues and PRs came back showing the previous account's pages — names,
-    // avatars, private titles — on a window that was signed out.
-    this.viewCache.clear();
+    // avatars, private titles — on a window that was signed out. Every tab's
+    // parked views go, or a background tab would come back signed in as
+    // someone who just signed out.
+    this.shell.dropEveryTabsKeptViews();
     await this.syncAccountChip?.();
     void this.refreshNotifBadge();
   }
 
   // ── Host events ──────────────────────────────────────────────────────────────
 
-  private wireHostEvents(): void {
-    host.on("repo:changed", (info) => {
-      // FIRST: a question held open through refreshes (repoEpoch) is about the
-      // repository that was open, and must close with it.
-      repoChanged();
-      // Every pending undo belongs to the repository it was recorded in. A
-      // branch restored into whatever repo happens to be open now would be a
-      // brand-new branch in the wrong place — the one outcome an undo must
-      // never produce — so switching repositories drops them.
-      clearUndo();
-      // A stopped operation belongs to its repository too — and so does the
-      // Changes surface kept across repaints, with whatever merge is in it.
-      this.conflictsCtl = undefined;
-      this.resolveHere.clear();
-      this.changesShowConflicts = undefined;
-      this.changesOpenMerge = undefined;
-      this.changesPanel?.panel.dispose();
-      this.changesPanel = undefined;
-      this.changesDash = undefined;
-      // Closing the repository keeps the shell and lands on Home, rather than
-      // dropping you onto a separate card with no navigation on it.
-      this.showRepoScreen(info);
-    });
-    // Forgetting or trashing a clone changes the welcome screen's recent list
-    // (and the repo switcher, which re-reads on open) — repaint the one surface
-    // that renders it eagerly, and only when it's actually showing.
-    // The Inbox tells the shell what it actually loaded, so the bell badge and
-    // the panel header can't drift apart.
-    window.addEventListener("gs:unread", (e) => {
-      const n = (e as CustomEvent<number>).detail;
-      if (typeof n === "number") this.setNotifBadge(n);
-    });
-    host.on("repo:recentChanged", () => {
-      // Home's "other repositories" card and the Repositories list both read
-      // this, so repaint whichever is showing rather than a bespoke screen.
-      if (this.currentView === "dashboard" || this.currentView === "repositories") {
-        this.routeView(this.currentView, true);
-      }
-    });
-    host.on("app:notice", (n) => {
-      // A warning is a state the user is in — a folder that is not a
-      // repository, a repository this account cannot read — not a failure of
-      // the app, so it is not painted as one. Only `error` is red.
-      toast(n.message, n.kind === "error" ? "error" : "info");
-    });
-    // Something changed on disk (issue #17). Already debounced in main.
-    host.on("repo:filesChanged", (info) => {
-      void this.refreshFromDisk(info?.gitDir ?? true);
-    });
-    // And when the window comes back to the front. This is the reported flow —
-    // edit in another app, switch to GitStudio — and it is also the safety net
-    // for when the watcher could not start at all (a huge tree on Linux can
-    // exhaust inotify), so it deliberately does not check whether one is running.
-    // Coming back to the front does NOT mean anything changed. This used to call
-    // refreshFromDisk(true) unconditionally, which drops the entire cache, throws
-    // away every kept-alive view and force-rebuilds the current one — so a plain
-    // alt-tab away and back cost a full reload of the app and ejected you from
-    // whatever detail page you were reading. Ask what changed first; if the
-    // answer is nothing, do nothing.
-    window.addEventListener("focus", () => {
-      void this.refreshIfDiskMoved();
-    });
-    installUndoKey();
-    // Home's Push/Fetch buttons ride the topbar's own sync flow — same busy
-    // state, same toasts, same refresh — rather than forking a second one out
-    // of raw IPC calls. The event is the only coupling the view needs.
-    window.addEventListener("gs:sync", (e) => {
-      const action = (e as CustomEvent<{ action?: string }>).detail?.action;
-      if (action === "push" || action === "fetch" || action === "pull") void this.doSync(action);
-    });
-    // "Take me to the repository that just became the open one." Used by the
-    // clone flow, which otherwise leaves you on whatever view was current when
-    // you started — a browse page that no longer has a target.
-    window.addEventListener("gs:go", (e) => {
-      const view = (e as CustomEvent<{ view?: string }>).detail?.view;
-      if (view) this.routeView(view);
-    });
-    host.on("menu:command", (msg) => {
-      if (msg.command === "openRepo") void this.openRepo();
-      else if (msg.command === "refresh") void this.refreshAll();
-      else if (msg.command === "closeRepo") void this.backToMenu();
-      else if (msg.command === "toggleTerminal") this.toggleTerminal();
-      else if (msg.command === "cloneRepo") openCloneDialog((root) => void this.openPath(root));
-      else if (msg.command === "toggleSidebar") this.toggleRail();
-      else if (msg.command === "palette") this.openPalette();
-      else if (msg.command === "undo") void undoOrText();
-      else if (msg.command === "redo") redoOrText();
-    });
-    // App updates: the main process polls; the USER decides. Nothing downloads
-    // or installs without a confirm here.
-    host.on("update:available", (u) => void this.promptUpdateAvailable(u));
-    host.on("update:ready", (r) => void this.promptUpdateReady(r));
-    host.on("update:progress", (p) => {
-      if (this.updateProgressEl) this.updateProgressEl.textContent = `Downloading… ${p.percent}%`;
-    });
+  // The shell (TabShell) owns the ONE subscription to each host event and
+  // window event, and hands it to the tab in front through these. A background
+  // tab hears nothing: its screen is not on show, and whatever it would do
+  // with the news it does when it comes back (refreshIfDiskMoved, the held
+  // answers the bridge delivers).
+
+  /** The Inbox tells the shell what it actually loaded, so the bell badge and
+   *  the panel header can't drift apart. */
+  onUnread(n: number): void {
+    this.setNotifBadge(n);
+  }
+
+  /** A tab opened or closed (#32): which worktree another tab has open is
+   *  main's to say again, in the Branches view that lists them (whichever
+   *  segment is up — the list is read once for all five) — now, or when this
+   *  tab is next in front (Open on a worktree row puts its new tab in front;
+   *  coming back, the row it was opened from says so). */
+  onTabsChanged(inFront: boolean): void {
+    this.tabsEpoch++;
+    this.tabsMoved = !inFront;
+    if (inFront && this.currentView === "branches") void this.reloadBranchRows?.();
+  }
+  private tabsMoved = false;
+  /** Bumped whenever the set of open tabs changes, so a Branches view the
+   *  keep-alive cache parked can tell, when it is restored, that the list it
+   *  shows was read for other tabs than these. */
+  private tabsEpoch = 0;
+
+  /** Forgetting or trashing a clone changes Home's "other repositories" card
+   *  and the Repositories list — repaint whichever is showing. */
+  onRecentChanged(): void {
+    if (this.currentView === "dashboard" || this.currentView === "repositories") {
+      this.routeView(this.currentView, true);
+    }
+  }
+
+  /** Something changed on disk (issue #17). Already debounced in main. */
+  onFilesChanged(gitDir: boolean): void {
+    void this.refreshFromDisk(gitDir);
+  }
+
+  /**
+   * The window came back to the front. This is the reported flow — edit in
+   * another app, switch to GitStudio — and it is also the safety net for when
+   * the watcher could not start at all (a huge tree on Linux can exhaust
+   * inotify), so it deliberately does not check whether one is running.
+   *
+   * Coming back to the front does NOT mean anything changed. This used to call
+   * refreshFromDisk(true) unconditionally, which drops the entire cache, throws
+   * away every kept-alive view and force-rebuilds the current one — so a plain
+   * alt-tab away and back cost a full reload of the app and ejected you from
+   * whatever detail page you were reading. Ask what changed first; if the
+   * answer is nothing, do nothing.
+   */
+  onWindowFocus(): void {
+    void this.refreshIfDiskMoved();
+  }
+
+  /** Home's Push/Fetch buttons ride the topbar's own sync flow — same busy
+   *  state, same toasts, same refresh — rather than forking a second one out
+   *  of raw IPC calls. The event is the only coupling the view needs. */
+  onSyncRequest(action: string | undefined): void {
+    if (action === "push" || action === "fetch" || action === "pull") void this.doSync(action);
+  }
+
+  /** A route asked from outside the App — "take me to the repository that
+   *  just became the open one" (gs:go), or the landing after an open. */
+  route(view: string, force = false, target?: SectionTarget): void {
+    this.routeView(view, force, target);
+  }
+
+  /** The menu commands that belong to the tab in front. */
+  onMenuCommand(command: string): void {
+    if (command === "refresh") void this.refreshAll();
+    else if (command === "toggleTerminal") this.toggleTerminal();
+    else if (command === "toggleSidebar") this.toggleRail();
+    else if (command === "palette") this.openPalette();
+    else if (command === "undo") void undoOrText();
+    else if (command === "redo") redoOrText();
+  }
+
+  /** App updates: the main process polls; the USER decides. Nothing
+   *  downloads or installs without a confirm here. */
+  onUpdateAvailable(u: { version: string; current: string }): void {
+    void this.promptUpdateAvailable(u);
+  }
+  onUpdateReady(r: { version: string; kind: "restart" | "installer" }): void {
+    void this.promptUpdateReady(r);
+  }
+  onUpdateProgress(percent: number): void {
+    if (this.updateProgressEl) this.updateProgressEl.textContent = `Downloading… ${percent}%`;
   }
 
   // ── App updates (confirm → pull → apply) ────────────────────────────────────
@@ -9415,14 +9839,14 @@ class App {
    *  card's status line when Settings is open; harmlessly detached otherwise). */
   private updateProgressEl?: HTMLElement;
   /** Versions the user already saw a prompt for this session. */
-  private readonly updatePrompted = new Set<string>();
+  private static readonly updatePrompted = new Set<string>();
 
   private async promptUpdateAvailable(
     u: { version: string; current: string },
     force = false,
   ): Promise<void> {
-    if (!force && this.updatePrompted.has(u.version)) return;
-    this.updatePrompted.add(u.version);
+    if (!force && App.updatePrompted.has(u.version)) return;
+    App.updatePrompted.add(u.version);
     const mac = navigator.platform.toLowerCase().includes("mac");
     const ok = await confirmDialog({
       title: `GitStudio ${u.version} is available`,
@@ -9468,16 +9892,13 @@ class App {
     if (!res.ok) toast(res.message || "Couldn't apply the update.", "error");
   }
 
-  // ── Repo lifecycle (screen transitions are driven by repo:changed) ──────────
+  // ── Repo lifecycle (tab changes are the shell's, driven by repo:tabs) ───────
 
   private async openRepo(): Promise<void> {
-    await host.invoke("repo:open", undefined);
+    await this.shell.openRepo();
   }
   private async openPath(root: string): Promise<void> {
-    await host.invoke("repo:openPath", root);
-  }
-  private async backToMenu(): Promise<void> {
-    await host.invoke("repo:close", undefined);
+    await this.shell.openPath(root);
   }
 
   /**
@@ -9503,7 +9924,7 @@ class App {
    */
   private refsOn(sha: string): RowRef[] {
     return this.refs
-      .filter((r) => r.sha === sha && r.type !== "stash" && !r.name.endsWith("/HEAD"))
+      .filter((r) => r.sha === sha && r.type !== "stash" && !(r.type === "remote" && isRemoteHead(r)))
       .map((r) => ({
         name: r.name,
         kind: r.type === "remote" ? "remote" : r.type === "tag" ? "tag" : "head",
@@ -9693,59 +10114,7 @@ class App {
     }
   }
 
-  // ── Top-bar dropdowns (repo switcher + branch switcher) ─────────────────────
-
-  private async openRepoMenu(anchor: HTMLElement): Promise<void> {
-    const recent = await host.invoke("repo:recent", undefined);
-    const items: MenuItem[] = [
-      {
-        label: "Open repository…",
-        icon: "folder-opened",
-        onClick: () => void this.openRepo(),
-      },
-      {
-        label: "Clone repository…",
-        icon: "cloud-download",
-        onClick: () => openCloneDialog((root) => void this.openPath(root)),
-      },
-    ];
-    const others = recent
-      .filter((r) => r.root !== this.currentRepo?.root)
-      .slice(0, 8);
-    if (others.length) {
-      items.push({ separator: true, label: "Recent" });
-      for (const r of others) {
-        items.push({
-          label: r.name,
-          sub: middleTruncate(r.root, 40),
-          icon: "folder",
-          onClick: () => void this.openPath(r.root),
-        });
-      }
-    }
-    items.push({ separator: true });
-    items.push({
-      // The DESTINATION, not a modal listing the same clones a third time.
-      // "move the repos in a dedicated space" was answered by ADDING a space
-      // while two older pickers stayed wired — this menu, which is the most
-      // used gesture for switching repository, did not even offer the new one.
-      label: "All repositories",
-      icon: "repo",
-      title: "Every repository on this machine and on GitHub",
-      onClick: () => this.routeView("repositories"),
-    });
-    items.push({
-      // Was "Back to the main menu" — a name for a destination that does not
-      // exist. It closes the repository, and what it opened was a full-screen
-      // card offering Open… / Clone… / Recent: the same three things this menu
-      // already offers, one row above. One name for one act.
-      label: "Close repository",
-      icon: "close",
-      title: "Close this repository and go back to the picker",
-      onClick: () => void this.backToMenu(),
-    });
-    openMenu(anchor, items);
-  }
+  // ── Top-bar dropdowns (branch switcher; the repository menu is the tab row's +) ──
 
   /** Jump to a commit in the graph, switching to the graph view first if the
    *  graph isn't currently mounted (the branch switcher is available on every
@@ -9879,7 +10248,10 @@ class App {
    */
   private openBranchMenu(anchor: HTMLElement): void {
     const locals = this.refs.filter((r) => r.type === "head");
-    const remotes = this.refs.filter((r) => r.type === "remote");
+    // Not the remote's own HEAD: its row offered "Check out as a local
+    // branch", "Compare with HEAD" (with origin's default branch) and "Copy
+    // name" (copying "origin"), for a ref every other list leaves out.
+    const remotes = this.refs.filter((r) => r.type === "remote" && !isRemoteHead(r));
     const tags = this.refs.filter((r) => r.type === "tag");
     const items: MenuItem[] = [];
     // Every entry is NAMED by its full name under the namespace — "release",
@@ -9903,6 +10275,11 @@ class App {
             }
             void this.checkoutRef(b.fullName);
           },
+          // Its actions (#32) — Right or Enter from the keyboard, the arrow
+          // at the row's end from the pointer: the Branches list's own menu
+          // for it, Checkout first.
+          submenuLabel: `Actions for ${branchName(b)}`,
+          submenu: () => this.switcherBranchActions(b, anchor),
         });
       }
     }
@@ -9917,6 +10294,16 @@ class App {
           icon: "cloud",
           title: `Check out ${refDisplay(b.fullName)} as a local branch`,
           onClick: () => void this.checkoutRef(b.fullName),
+          submenuLabel: `Actions for ${refDisplay(b.fullName)}`,
+          submenu: () => [
+            {
+              label: "Check out as a local branch",
+              icon: "check",
+              onClick: () => void this.checkoutRef(b.fullName),
+            },
+            { separator: true },
+            ...this.remoteActionItems(b),
+          ],
         });
       }
     }
@@ -9934,6 +10321,8 @@ class App {
           icon: "tag",
           title: `Show ${tagName(t)} in Commits`,
           onClick: () => this.revealInGraph(t.sha),
+          submenuLabel: `Actions for ${tagName(t)}`,
+          submenu: () => this.tagActionItems(t),
         });
       }
     }
@@ -9952,9 +10341,32 @@ class App {
         onClick: () => this.routeView("branches"),
       });
     }
-    // No `searchable` override: openMenu already turns the filter on above 9
-    // rows, which every repo large enough to need it will exceed.
-    openMenu(anchor, items);
+    // The filter always: type-to-filter is how the switcher is driven (#32),
+    // as the extension's branch menu always has its search field. openMenu
+    // turns it on by itself only above nine rows, so a small repository's
+    // switcher had no filter and the letters typed into it did nothing.
+    openMenu(anchor, items, { searchable: true });
+  }
+
+  /**
+   * A branch's submenu in the switcher: the Branches list's menu for it, read
+   * from the branch list (which knows its upstream and counts), Checkout
+   * first. A branch the list no longer has — deleted from a terminal a moment
+   * ago — offers what its ref alone allows.
+   */
+  private async switcherBranchActions(ref: RefInfo, anchor: HTMLElement): Promise<MenuItem[]> {
+    let list: BranchInfo[] = [];
+    try {
+      list = await gget("branches:list", undefined);
+    } catch {
+      /* the fallback below */
+    }
+    const b = list.find((x) => x.fullName === ref.fullName);
+    if (b) return this.branchActionItems(b, anchor, { checkoutFirst: true });
+    const name = branchName(ref);
+    return ref.isCurrent
+      ? [{ label: `Show ${name} in Commits`, icon: "git-commit", onClick: () => this.revealInGraph(ref.sha) }]
+      : [{ label: `Checkout ${name}`, icon: "check", onClick: () => void this.checkoutRef(ref.fullName) }];
   }
 
   // ── Refs / HEAD (drives the branch switcher) ────────────────────────────────
@@ -10000,6 +10412,7 @@ class App {
 
   private async selectCommit(sha: string): Promise<void> {
     this.selectedSha = sha;
+    this.selectionSummary.cancel(); // a pending "N commits selected" answer is for a selection that is gone
     // Loading a commit's details is a round trip, and this pane used to sit
     // showing the PREVIOUS commit's files the whole time — so a slow load was
     // indistinguishable from a fast one, and a FAILED load was invisible: the
@@ -10059,7 +10472,7 @@ class App {
       const f = d.files.find((x) => x.path === detail.path);
       if (f) {
         void this.openFile(
-          { path: f.path, status: f.status },
+          { path: f.path, status: f.status, oldPath: f.oldPath },
           d.kind === "wip" ? undefined : d.sha,
         );
       }
@@ -10352,7 +10765,11 @@ class App {
     const panel = this.diffPanel;
     if (!panel) return;
     const gen = ++this.diffGen;
-    const diff = await host.invoke("file:diff", { path: file.path, sha });
+    const diff = await host.invoke("file:diff", {
+      path: file.path,
+      sha,
+      ...(sha && file.oldPath ? { oldPath: file.oldPath } : {}),
+    });
     if (gen !== this.diffGen || panel !== this.diffPanel) return;
     if (!diff) {
       // The FOURTH caller of this shape, and the last one still laundering a
@@ -10422,6 +10839,117 @@ class App {
     this.contextMenu.open(sha, x, y, this.refsOn(sha), { drop: plan?.ok === true });
   }
 
+  /**
+   * The graph's menu for a selection of several commits (issue #32). What
+   * applies is main's answer (commits:menu); a later right-click wins, as it
+   * does for one commit's menu.
+   */
+  private async openManyMenu(shas: string[], x: number, y: number): Promise<void> {
+    const seq = ++this.commitMenuSeq;
+    const can = await host
+      .invoke("commits:menu", { shas })
+      .catch(() => ({ apply: false, drop: false, squash: false }));
+    if (seq !== this.commitMenuSeq) return;
+    this.contextMenu.openMany(shas, x, y, can);
+  }
+
+  /**
+   * The details pane with several commits selected (issue #32): a summary —
+   * how many, who, when, each commit, and the menu's actions as buttons —
+   * never the first commit's details standing in for the rest. None selected
+   * (a Cmd-click took the last one off) is the pane's empty state.
+   */
+  private showSelection(shas: string[]): void {
+    this.selectedSha = undefined;
+    this.closeGraphDiff();
+    if (shas.length < 2) {
+      this.selectionSummary.cancel();
+      this.showDetailsPlaceholder();
+      return;
+    }
+    const panel = document.createElement("gitstudio-commit-details") as CommitDetailsEl;
+    panel.className = "details-panel";
+    panel.selection = { commits: this.graph?.summaryCommits(shas) ?? [] };
+    panel.addEventListener("gs-selection-action", (e) => {
+      const d = (e as CustomEvent<{ id: string; shas: string[] }>).detail;
+      void this.runMany(d.id as ManyAction, d.shas);
+    });
+    // A row keeps just that commit: the graph selects it and says so.
+    panel.addEventListener("gs-reveal", (e) => {
+      const d = (e as CustomEvent<{ sha: string }>).detail;
+      this.revealInGraph(d.sha);
+    });
+    panel.addEventListener("gs-close", () => this.setGraphDetailsVisible(false));
+    const wrap = el("div", "details-split");
+    wrap.append(panel);
+    this.detailsEl?.replaceChildren(wrap);
+    this.setGraphDetailsVisible(true);
+    // Settle first: Shift+Down held over twenty rows is twenty selections, and
+    // each would walk the branch three ways. Only the one it stops on is asked
+    // — through the SettleLatest the extension's summary uses too.
+    //
+    // The settle is a timer, and a timer runs in the back too: a question it
+    // asked from there would be stamped with the tab in FRONT (bridge.ts
+    // stamps a call when it is made) and asked of that repository. So it
+    // waits for this tab to be in front again.
+    void this.selectionSummary
+      .run(async () => {
+        await this.whenInFront();
+        return host.invoke("commits:menu", { shas }).catch(() => ({ apply: false, drop: false, squash: false }));
+      })
+      .then((can) => {
+        if (!can || !panel.selection) return;
+        panel.selection = {
+          ...panel.selection,
+          actions: manyMenuRows(shas.length, can).map((r) => ({ id: r.action, label: r.label, icon: r.icon, danger: r.danger })),
+        };
+      });
+  }
+
+  /**
+   * Resolves once this tab is in front — at once when it is. For work a TIMER
+   * starts (a settle, a debounce): a call made while the tab is in the back
+   * would be stamped with the tab in front and go to its repository. An answer
+   * already asked for is held by the bridge instead; this is for the asking.
+   */
+  private whenInFront(): Promise<void> {
+    if (currentSession()?.id === this.session.id) return Promise.resolve();
+    return new Promise((resolve) => this.frontWaiters.push(resolve));
+  }
+
+  /** An item of the several-commit menu or summary — see renderer/multiCommit.ts. */
+  private async runMany(action: ManyAction, shas: string[]): Promise<void> {
+    try {
+      await runManyAction(action, shas, {
+        plan: (req) => host.invoke("commits:plan", req),
+        // in-the-way-reviewed: a forwarder — multiCommit.ts's applyManyFlow
+        // reads `.cancelled` and says nothing on Cancel.
+        apply: (req) => host.invoke("commit:action", req),
+        rewrite: (req) => host.invoke("commits:rewrite", req),
+        undo: (req) => host.invoke("commits:undo", req),
+        confirm: (opts) => confirmDialog(opts),
+        choose: (opts) => promptChoice(opts),
+        message: (opts) => promptMessage({ ...opts, label: "Commit message", holdWhile: whileSameRepo() }),
+        toast: (message, kind) => toast(message, kind),
+        undoable: (message, act) => didUndoable(message, act),
+        refresh: async () => {
+          bust();
+          await this.refreshAll();
+        },
+        landOnConflicts: () => this.landOnConflicts(),
+        copy: (text, said) => copyText(text, said),
+        compare: (base, head) => {
+          this.compareCommits = new Set([base, head]);
+          this.compareBase = base;
+          this.compareHead = head;
+          this.routeView("compare", true);
+        },
+      });
+    } catch (e) {
+      toast(cleanErr(e) || "That didn't work.", "error");
+    }
+  }
+
   /** "Drop commit…" — see renderer/dropCommit.ts for the flow. */
   private async dropCommit(sha: string): Promise<void> {
     try {
@@ -10486,6 +11014,701 @@ class App {
       toast(cleanErr(e) || "The action failed.", "error");
     }
   }
+
+  /** The repository this tab is for, or undefined for the no-repository screen. */
+  get repo(): RepoInfo | undefined {
+    return this.info;
+  }
+
+  /** Push the dock icon variant this tab's preferences resolve to. */
+  syncDock(): void {
+    this.syncDockIcon();
+  }
+}
+
+// ── The tab shell (issue #32) ───────────────────────────────────────────────
+
+/**
+ * Owns the repository tab row and the stage the tab in front is shown on, one
+ * App per open repository, and the ONE subscription to every window-level
+ * event (keys, focus, host events), which it hands to the tab in front.
+ *
+ * main (RepoStore) is the source of truth for which tabs are open and which
+ * is active; every change arrives as `repo:tabs` and is applied here. A switch
+ * is shown at once and told to main; `activations` keeps the answers to a
+ * burst of Ctrl+Tabs from dragging the screen back through each step.
+ * docs/desktop-repo-tabs.md is the design and the state table.
+ */
+class TabShell {
+  private readonly apps = new Map<string, App>();
+  private noRepo?: App;
+  private active?: App;
+  private state: RepoTabsState = { tabs: [] };
+  private readonly strip: RepoTabStrip;
+  private readonly stage: HTMLElement;
+  private readonly dirty = new Map<string, number>();
+  /** Tabs from the launch state whose App is not built yet (see appFor). */
+  private readonly launchRoots = new Set<string>();
+  /**
+   * The window's first read of its tabs has been answered. Until then main's
+   * `repo:tabs` events are not news: main answers that read once the launch
+   * restore is done, and the restore announces the same tabs a moment BEFORE
+   * the answer arrives — applied, that event built the restored tabs as new
+   * ones (a window left on Search came back on Code).
+   */
+  private tabsRead = false;
+  /** Tabs whose folder is gone (row 14): moved, deleted, no longer a repository. */
+  private readonly gone = new Set<string>();
+  /**
+   * The tab in front has no folder: the stage shows the gone screen, and the
+   * tab's own screen stays parked (or unbuilt) — so nothing of it runs git in
+   * the folder that is not there, not a view, not a refresh, not a key.
+   */
+  private goneScreenEl?: HTMLElement;
+  private sessionSeq = 0;
+  /** Switches told to main and not yet answered. */
+  private activations = 0;
+  /** A switch main asked for while a dialog was open — shown when it closes. */
+  private deferredTo: string | undefined | null = null;
+  private marksTimer = 0;
+  private marksSeq = 0;
+  /** When the marks were last asked for. */
+  private marksAt = 0;
+  private readonly isMac = navigator.platform.toLowerCase().includes("mac");
+  private readonly inElectron = /Electron\//.test(navigator.userAgent);
+
+  constructor() {
+    this.strip = new RepoTabStrip({
+      activate: (root) => this.requestActivate(root),
+      close: (root) => void this.requestClose(root),
+      add: (anchor) => void this.openAddMenu(anchor),
+      move: (root, index) => void shellHost.invoke("repo:moveTab", { root, index }).catch(() => undefined),
+      menu: (root, anchor) => this.openTabMenu(root, anchor),
+      list: (anchor) => this.openTabList(anchor),
+    });
+    this.stage = el("div", "tab-stage");
+    // The panel the tab row controls: whatever tab is in front is shown here.
+    this.stage.id = RepoTabStrip.PANEL_ID;
+    this.stage.setAttribute("role", "tabpanel");
+  }
+
+  async start(): Promise<void> {
+    document.getElementById("root")!.replaceChildren(this.strip.el, this.stage);
+    // Before anything can invoke a commit-applying command: the one place that
+    // asks Stash & Retry or Cancel for all of them (bridge.ts). It holds its
+    // question while the tab it was asked in stays in front.
+    installInTheWayAsker(() => currentSession()?.root);
+    // Catch-all error boundary: a rejected promise or thrown render should never
+    // leave the app silently broken — surface it as a toast. BUT skip the benign
+    // Monaco worker noise (it asks the base worker for TS language-service methods
+    // we don't bundle, and ResizeObserver loop warnings) — those are harmless.
+    window.addEventListener("unhandledrejection", (e) => {
+      const msg = cleanErr(e.reason);
+      if (isBenignError(msg)) return;
+      toast(msg || "Something went wrong.", "error");
+    });
+    window.addEventListener("error", (e) => {
+      const msg = e.error ? cleanErr(e.error) : e.message || "";
+      if (isBenignError(msg, e.filename)) return;
+      if (e.error || e.message) toast(msg || "Something went wrong.", "error");
+    });
+    // The theme is the window's: applied once here, and on an OS flip.
+    const prefs = loadPrefs();
+    const mode: ThemeMode =
+      prefs.themeMode === "light" || prefs.themeMode === "dark" || prefs.themeMode === "system"
+        ? prefs.themeMode
+        : "system";
+    applyTheme(resolveTheme(mode));
+    followSystemTheme((osTheme) => {
+      if ((this.active?.themeModePref ?? "system") !== "system") return;
+      applyTheme(osTheme);
+      // Monaco's token classes are global — without this, every highlighted
+      // code block keeps the OLD theme's colors after an OS light/dark flip.
+      refreshHighlightTheme();
+      // Every tab, not just the one in front: a background tab's terminal and
+      // Appearance card would come back in the old theme.
+      for (const app of this.allApps()) app.onSystemThemeFlip();
+      // An "auto" dock icon must follow the OS flip too.
+      this.active?.syncDock();
+    });
+    window.addEventListener("keydown", (e) => this.onKey(e));
+    window.addEventListener("keydown", (e) => this.live()?.handleHelpKey(e));
+    window.addEventListener("mouseup", (e) => this.live()?.handleMouseUp(e));
+    installUndoKey();
+    this.wireHostEvents();
+    // A tab's spinner follows the operations running in it.
+    onRunningChange(() => {
+      this.renderStrip();
+      // An operation that just ENDED may have changed what the marks say.
+      this.scheduleMarks(600);
+    });
+    let st: RepoTabsState = { tabs: [] };
+    try {
+      st = await shellHost.invoke("repo:tabs", undefined);
+    } catch (e) {
+      toast(cleanErr(e) || "Couldn't open the repository.", "error");
+    }
+    // The tabs the last session left open: main answers this read only once
+    // its launch restore is done (RepoStore.settledState), so every tab in it
+    // is one this window is bringing back.
+    for (const t of st?.tabs ?? []) this.launchRoots.add(t.root);
+    this.tabsRead = true;
+    this.apply(st ?? { tabs: [] });
+    this.active?.syncDock();
+  }
+
+  // ── What the Apps ask of the shell ──
+
+  /** Put a tab's freshly built screen on the stage (only the tab in front builds). */
+  present(app: App, screen: HTMLElement): void {
+    if (app !== this.active) return;
+    for (const child of [...this.stage.children]) {
+      if (child === screen) continue;
+      parkScreen(child as HTMLElement);
+      child.remove();
+    }
+    if (screen.parentElement !== this.stage) this.stage.appendChild(screen);
+  }
+
+  isActive(app: App): boolean {
+    return app === this.active;
+  }
+
+  /** A route asked of a background tab by the landing after an open. */
+  routeActive(id: string, force: boolean, target?: SectionTarget): void {
+    this.live()?.route(id, force, target);
+  }
+
+  openRoots(): string[] {
+    return this.state.tabs.map((t) => t.root);
+  }
+
+  /** Every tab's kept-alive views — the signed-in account changed. */
+  dropEveryTabsKeptViews(): void {
+    for (const app of this.allApps()) app.dropKeptViews();
+  }
+
+  async openRepo(): Promise<void> {
+    await host.invoke("repo:open", undefined);
+  }
+
+  async openPath(root: string): Promise<void> {
+    await host.invoke("repo:openPath", root);
+  }
+
+  // ── Tabs ──
+
+  private allApps(): App[] {
+    return [...this.apps.values(), ...(this.noRepo ? [this.noRepo] : [])];
+  }
+
+  private activeRoot(): string | undefined {
+    return this.active?.repo?.root;
+  }
+
+  /** main says which tabs are open and which is in front. */
+  private apply(next: RepoTabsState): void {
+    const roots = (st: RepoTabsState): string => st.tabs.map((t) => t.root).sort().join("\n");
+    const before = roots(this.state);
+    this.state = { tabs: next.tabs ?? [], active: next.active };
+    const open = new Set(this.state.tabs.map((t) => t.root));
+    const want = this.state.active && open.has(this.state.active) ? this.state.active : this.state.tabs[0]?.root;
+    // A switch we asked for is still being answered: its echo — and the
+    // echoes of the Ctrl+Tabs before it — must not drag the screen back.
+    if (this.activations === 0 && (want !== this.activeRoot() || !this.active)) {
+      if (isModalOpen()) this.deferUntilNoModal(want);
+      else this.show(want);
+    }
+    // Tabs that closed go AFTER the switch away from them.
+    for (const [root, app] of [...this.apps]) {
+      if (!open.has(root) && app !== this.active) this.disposeApp(root, app);
+    }
+    // …and what the row knew about them, built or not.
+    for (const root of [...this.dirty.keys()]) if (!open.has(root)) this.dirty.delete(root);
+    for (const root of [...this.gone]) if (!open.has(root)) this.gone.delete(root);
+    this.renderStrip();
+    this.scheduleMarks(0);
+    // Which tabs are open, not their order or which is in front.
+    if (roots(this.state) !== before) for (const app of this.allApps()) app.onTabsChanged(app === this.active);
+  }
+
+  /** Show `root`'s tab (undefined = the no-repository screen). */
+  private show(root: string | undefined): void {
+    const prev = this.active;
+    const next = root ? this.appFor(root) : this.noRepoApp();
+    if (prev === next) return;
+    // Floating layers and toasts belong to the tab being left.
+    closePeek();
+    closeMenu();
+    dismissLayers();
+    clearToasts();
+    if (prev) this.putAway(prev);
+    this.active = next;
+    this.bringIn(next);
+    // The no-repository screen is rebuilt when it is needed again.
+    if (prev && prev === this.noRepo && next !== prev) {
+      this.noRepo = undefined;
+      prev.dispose();
+      endSession(prev.session.id);
+      dropUndoScope(prev.session.id);
+      dropFocusTab(prev.session.id);
+    }
+    this.renderStrip();
+  }
+
+  /** The tab in front goes to the back: its screen is detached, whole. */
+  private putAway(app: App): void {
+    if (this.goneScreenEl) {
+      // Its own screen was never up (row 14): nothing to put away.
+      this.goneScreenEl.remove();
+      this.goneScreenEl = undefined;
+      return;
+    }
+    app.deactivate();
+    // In the back, whole: the pages on it are kept, not left — their Monaco
+    // diffs and log panes must not dispose themselves on the detach.
+    if (app.screenEl) parkScreen(app.screenEl);
+    app.screenEl?.remove();
+  }
+
+  /** The tab in front shows its screen — or, when its folder is gone, says so. */
+  private bringIn(app: App): void {
+    const root = app.repo?.root;
+    if (root && this.gone.has(root)) {
+      this.showGone(root);
+      return;
+    }
+    // BEFORE the screen is built: every call it makes is stamped with it. The
+    // answers it was owed while in the back are delivered as microtasks, after
+    // this switch has finished attaching and activating it.
+    setActiveSession(app.session);
+    if (!app.screenEl) {
+      app.activate(true);
+      app.mount();
+    } else {
+      this.stage.replaceChildren(app.screenEl);
+      app.activate(false);
+    }
+  }
+
+  /**
+   * Row 14: the tab in front has no folder any more. ONE screen says so, in
+   * place of the tab's own — where it was, and the two things to do about it.
+   * Its tab stays until it is closed, because the folder may be on a drive
+   * that is coming back. The tab's own session is not made active: answers
+   * still owed to it stay held, and it makes no new calls.
+   */
+  private showGone(root: string): void {
+    setActiveSession(undefined);
+    // ⌘Z here has nothing to undo: an entry of this tab's would run git in
+    // the folder that is not there.
+    setUndoScope(0);
+    const name = this.state.tabs.find((t) => t.root === root)?.name ?? root;
+    const screen = el("div", "tab-gone");
+    screen.setAttribute("role", "region");
+    screen.setAttribute("aria-label", `${name}: folder not found`);
+    screen.appendChild(
+      emptyState(
+        `${name}'s folder is not there`,
+        `${root} was moved or deleted. Put it back and this tab carries on where you left it — or close the tab.`,
+        {
+          icon: "warning",
+          action: { label: "Look again", icon: "refresh", onClick: () => void this.lookAgain(root) },
+          secondary: { label: "Close Tab", onClick: () => void this.requestClose(root) },
+        },
+      ),
+    );
+    this.goneScreenEl = screen;
+    this.stage.replaceChildren(screen);
+  }
+
+  /** "Look again": ask the disk now, rather than at the row's next look. */
+  private async lookAgain(root: string): Promise<void> {
+    await this.refreshMarks();
+    if (this.activeRoot() === root && this.gone.has(root)) toast(`${root} is still not there.`, "info");
+  }
+
+  /** The App in front, when its own screen is up — not the gone screen. */
+  private live(): App | undefined {
+    return this.goneScreenEl ? undefined : this.active;
+  }
+
+  private newSession(root: string | undefined): TabSession {
+    return { id: ++this.sessionSeq, root };
+  }
+
+  private appFor(root: string): App {
+    let app = this.apps.get(root);
+    if (!app) {
+      const info = this.state.tabs.find((t) => t.root === root) ?? { root, name: root.split(/[\\/]/).pop() || root };
+      // Where it starts is the App's to decide (mount): where this
+      // repository was left, else the view the window was last on. A tab
+      // from the launch state is a restore — once: closed and opened again,
+      // it is a new tab like any other.
+      const restored = this.launchRoots.delete(root);
+      app = new App(this, this.newSession(root), info, restored);
+      this.apps.set(root, app);
+    }
+    return app;
+  }
+
+  private noRepoApp(): App {
+    if (!this.noRepo) this.noRepo = new App(this, this.newSession(undefined), undefined);
+    return this.noRepo;
+  }
+
+  private disposeApp(root: string, app: App): void {
+    this.apps.delete(root);
+    this.dirty.delete(root);
+    app.dispose();
+    endSession(app.session.id);
+    dropCacheScope(root);
+    // What its section views remembered (a search, a sort, a sub-tab) goes
+    // too: the repository opened again is a new tab, and starts clean.
+    dropTabState(root);
+    dropUndoScope(app.session.id);
+    dropFocusTab(app.session.id);
+  }
+
+  /** A dialog is open: the switch main asked for waits for it to be answered. */
+  private deferUntilNoModal(root: string | undefined): void {
+    const first = this.deferredTo === null;
+    this.deferredTo = root;
+    if (!first) return;
+    const wait = (): void => {
+      // Already made — by the landing of the open that asked for it (gs:go).
+      if (this.deferredTo === null) return;
+      if (isModalOpen()) {
+        window.setTimeout(wait, 120);
+        return;
+      }
+      this.makeDeferredSwitch();
+    };
+    window.setTimeout(wait, 120);
+  }
+
+  /**
+   * Make the switch that waited for a dialog, now that none is open. The
+   * poll above gets there within 120 ms — too late for an open whose own
+   * dialog (the clone's progress card) is what it waited for: that open's
+   * answer closes the card and lands at once (gs:go), and must land in the
+   * tab it opened, not in the one it was started from.
+   */
+  private makeDeferredSwitch(): void {
+    if (this.deferredTo === null || isModalOpen()) return;
+    const to = this.deferredTo;
+    this.deferredTo = null;
+    if (to !== this.activeRoot()) this.show(to ?? undefined);
+    // Tabs closed while waiting go now that nothing shows them.
+    const open = new Set(this.state.tabs.map((t) => t.root));
+    for (const [r, app] of [...this.apps]) if (!open.has(r) && app !== this.active) this.disposeApp(r, app);
+  }
+
+  /** The user asked for a tab. Shown now; main is told. */
+  requestActivate(root: string | undefined): void {
+    if (!root || root === this.activeRoot()) return;
+    if (!this.state.tabs.some((t) => t.root === root)) return;
+    // A dialog is answered before anything else happens — its verb would run
+    // in whichever tab is in front when it is answered.
+    if (isModalOpen()) return;
+    dismissLayers();
+    // A layer that declined to close (a form with unsaved work) keeps you here.
+    if (openLayerCount() > 0) return;
+    this.show(root);
+    this.activations++;
+    void shellHost
+      .invoke("repo:activate", root)
+      .catch(() => false)
+      .finally(() => {
+        this.activations--;
+        // The last answer is in: main's word is final again.
+        if (this.activations === 0) this.apply(this.state);
+      });
+  }
+
+  /** Close a tab — asking first when an operation is still running in it. */
+  async requestClose(root: string | undefined): Promise<void> {
+    if (!root) return;
+    if (isModalOpen()) return;
+    const tab = this.state.tabs.find((t) => t.root === root);
+    if (!tab) return;
+    const running = this.apps.get(root)?.runningOperation();
+    if (running) {
+      const ok = await confirmDialog({
+        title: `Close ${tab.name}?`,
+        message:
+          `${running.charAt(0).toUpperCase()}${running.slice(1)} is still running in ${tab.name}. ` +
+          "Git will finish it, but this tab will not be here to say how it ended.",
+        confirmLabel: "Close tab",
+      });
+      if (!ok) return;
+    }
+    await shellHost.invoke("repo:closeTab", root).catch(() => false);
+  }
+
+  private renderStrip(): void {
+    const items: TabStripItem[] = this.state.tabs.map((t) => {
+      const app = this.apps.get(t.root);
+      return {
+        root: t.root,
+        name: t.name,
+        dirty: this.dirty.get(t.root),
+        running: app ? runningOperation(app.session.id) : undefined,
+        gone: this.gone.has(t.root),
+      };
+    });
+    this.strip.render(items, this.activeRoot());
+    // The panel is named by the tab in front.
+    const front = this.activeRoot() ? this.strip.tabFor(this.activeRoot()!) : undefined;
+    if (front) this.stage.setAttribute("aria-labelledby", front.id);
+    else this.stage.removeAttribute("aria-labelledby");
+  }
+
+  /** Ask which tabs have uncommitted changes — soon, and once for a burst. */
+  private scheduleMarks(ms: number): void {
+    window.clearTimeout(this.marksTimer);
+    this.marksTimer = window.setTimeout(() => void this.refreshMarks(), ms);
+  }
+
+  private async refreshMarks(): Promise<void> {
+    const roots = this.state.tabs.map((t) => t.root);
+    if (!roots.length) return;
+    const seq = ++this.marksSeq;
+    this.marksAt = Date.now();
+    try {
+      const st = await shellHost.invoke("repo:tabStatus", roots);
+      if (seq !== this.marksSeq || !st) return;
+      const front = this.activeRoot();
+      let cameBack = false;
+      for (const r of roots) {
+        if (st[r]?.gone) {
+          this.gone.add(r);
+          this.dirty.delete(r);
+          continue;
+        }
+        // Put back where it was: the tab is whole again.
+        if (this.gone.delete(r) && r === front) cameBack = true;
+        const d = st[r]?.dirty;
+        if (typeof d === "number") this.dirty.set(r, d);
+        else this.dirty.delete(r);
+      }
+      this.renderStrip();
+      const app = this.active;
+      if (front && app && this.gone.has(front) && !this.goneScreenEl && !isModalOpen()) {
+        // Found gone while in front: its screen goes to the back, and the gone
+        // screen takes its place.
+        closePeek();
+        closeMenu();
+        dismissLayers();
+        this.putAway(app);
+        this.showGone(front);
+      } else if (cameBack && app && this.goneScreenEl) {
+        // The folder in front came back: its own screen returns — and, if it
+        // had one, re-reads the disk, since what it last showed was read
+        // before the folder went. (One never built reads it as it builds.)
+        const built = !!app.screenEl;
+        this.putAway(app);
+        this.bringIn(app);
+        if (built) app.onFilesChanged(true);
+      }
+    } catch {
+      /* the marks are a courtesy: a failed read leaves the last known */
+    }
+  }
+
+  // ── Keys and host events: one subscription each, for the tab in front ──
+
+  private onKey(e: KeyboardEvent): void {
+    const act = tabKeyAction(e, this.isMac);
+    if (act) {
+      // ⌘W is the menu's in Electron (Repo ▸ Close Tab) — answering it here
+      // too would close two tabs per press.
+      if (act.kind === "close" && this.inElectron) return;
+      if (isModalOpen()) return;
+      const order = this.openRoots();
+      if (!order.length) return;
+      e.preventDefault();
+      if (act.kind === "next") this.requestActivate(stepTab(order, this.activeRoot(), 1));
+      else if (act.kind === "prev") this.requestActivate(stepTab(order, this.activeRoot(), -1));
+      else if (act.kind === "digit") this.requestActivate(tabAtDigit(order, act.n));
+      else void this.requestClose(this.activeRoot());
+      return;
+    }
+    this.live()?.handleAppKey(e);
+  }
+
+  private wireHostEvents(): void {
+    // Before the first read is answered, an event is the restore announcing
+    // the tabs that answer is about to bring (see tabsRead).
+    host.on("repo:tabs", (st) => {
+      if (this.tabsRead) this.apply(st);
+    });
+    window.addEventListener("gs:unread", (e) => {
+      const n = (e as CustomEvent<number>).detail;
+      if (typeof n === "number") this.live()?.onUnread(n);
+    });
+    host.on("repo:recentChanged", () => this.live()?.onRecentChanged());
+    host.on("app:notice", (n) => {
+      // A warning is a state the user is in — a folder that is not a
+      // repository, a repository this account cannot read — not a failure of
+      // the app, so it is not painted as one. Only `error` is red.
+      toast(n.message, n.kind === "error" ? "error" : "info");
+    });
+    host.on("repo:filesChanged", (info) => {
+      // About the tab you LEFT, if it landed after a switch: that tab re-asks
+      // the disk when it comes back, and this one did not change.
+      const about = info?.root;
+      if (!about || about === this.activeRoot()) this.live()?.onFilesChanged(info?.gitDir ?? true);
+      this.scheduleMarks(800);
+    });
+    window.addEventListener("focus", () => {
+      this.live()?.onWindowFocus();
+      // Your editor may have changed a background tab's files — but a focus
+      // is not news, and the marks cost one `git status` per open tab. At
+      // most once a minute from focus; everything else that changes a count
+      // (a switch, a watcher tick, an operation ending) asks on its own.
+      if (Date.now() - this.marksAt > 60_000) this.scheduleMarks(0);
+    });
+    window.addEventListener("gs:sync", (e) => {
+      this.live()?.onSyncRequest((e as CustomEvent<{ action?: string }>).detail?.action);
+    });
+    // "Take me to the repository that just became the open one." Used by the
+    // clone flow, which otherwise leaves you on whatever view was current when
+    // you started — a browse page that no longer has a target.
+    window.addEventListener("gs:go", (e) => {
+      const { view, root } = (e as CustomEvent<{ view?: string; root?: string }>).detail ?? {};
+      if (!view) return;
+      // The open this lands was announced while its progress card was up, so
+      // its switch may still be waiting for that card — which is closed by now.
+      this.makeDeferredSwitch();
+      // Only the repository it opened: never the tab it was started from.
+      if (root && root !== this.activeRoot()) return;
+      this.live()?.route(view);
+    });
+    host.on("menu:command", (msg) => {
+      // The tab-row commands are the shell's; the rest belong to the tab in front.
+      if (msg.command === "openRepo") {
+        if (!isModalOpen()) void this.openRepo();
+      } else if (msg.command === "cloneRepo") {
+        if (!isModalOpen()) openCloneDialog((root) => this.openPath(root));
+      } else if (msg.command === "openPath") {
+        if (msg.root && !isModalOpen()) void this.openPath(msg.root);
+      } else if (msg.command === "closeTab" || msg.command === "closeRepo") {
+        void this.requestClose(this.activeRoot());
+      } else {
+        this.live()?.onMenuCommand(msg.command);
+      }
+    });
+    // The update prompts are the window's dialogs, not the tab's screen — a
+    // tab whose folder is gone still hears them.
+    host.on("update:available", (u) => this.active?.onUpdateAvailable(u));
+    host.on("update:ready", (r) => this.active?.onUpdateReady(r));
+    host.on("update:progress", (p) => this.active?.onUpdateProgress(p.percent));
+  }
+
+  // ── Menus ──
+
+  /** The +: open a repository in a new tab, or switch to one you have. */
+  private async openAddMenu(anchor: HTMLElement): Promise<void> {
+    const recent = await host.invoke("repo:recent", undefined).catch(() => []);
+    const open = new Set(this.openRoots());
+    const mod = this.isMac ? "⌘" : "Ctrl+";
+    const items: MenuItem[] = [
+      {
+        label: "Open repository…",
+        icon: "folder-opened",
+        title: `Open a folder as a new tab  (${mod}O)`,
+        onClick: () => void this.openRepo(),
+      },
+      {
+        label: "Clone repository…",
+        icon: "cloud-download",
+        title: `Clone into a new tab  (${this.isMac ? "⌘⇧O" : "Ctrl+Shift+O"})`,
+        onClick: () => openCloneDialog((root) => this.openPath(root)),
+      },
+    ];
+    // Recent repositories that do not already have a tab: the ones that do
+    // are one row above, and "opening" one only switches to it.
+    const others = recent.filter((r) => !open.has(r.root)).slice(0, 8);
+    if (others.length) {
+      items.push({ separator: true, label: "Recent" });
+      for (const r of others) {
+        items.push({
+          label: r.name,
+          sub: middleTruncate(r.root, 40),
+          icon: "folder",
+          title: `Open ${r.root} in a new tab`,
+          onClick: () => void this.openPath(r.root),
+        });
+      }
+    }
+    items.push({ separator: true });
+    items.push({
+      // The DESTINATION, not a modal listing the same clones a third time.
+      label: "All repositories",
+      icon: "repo",
+      title: "Every repository on this machine and on GitHub",
+      onClick: () => this.live()?.route("repositories"),
+    });
+    openMenu(anchor, items);
+  }
+
+  /** Every open tab — the row's overflow button, for the ones scrolled away. */
+  private openTabList(anchor: HTMLElement): void {
+    const front = this.activeRoot();
+    const items: MenuItem[] = this.state.tabs.map((t) => {
+      const dirty = this.dirty.get(t.root);
+      return {
+        label: t.name,
+        sub: middleTruncate(t.root, 40),
+        icon: "repo",
+        current: t.root === front,
+        title: dirty ? `${t.root}\n${dirty} changed ${dirty === 1 ? "file" : "files"}` : t.root,
+        onClick: () => this.requestActivate(t.root),
+      };
+    });
+    openMenu(anchor, items);
+  }
+
+  /** Right-click on a tab: the close family, and where the folder is. */
+  private openTabMenu(root: string, anchor: HTMLElement): void {
+    const order = this.openRoots();
+    const i = order.indexOf(root);
+    const others = order.filter((r) => r !== root);
+    const right = order.slice(i + 1);
+    const closeAll = async (roots: string[]): Promise<void> => {
+      for (const r of roots) await this.requestClose(r);
+    };
+    const items: MenuItem[] = [
+      { label: "Close", title: "Close this tab", onClick: () => void this.requestClose(root) },
+      {
+        label: "Close Other Tabs",
+        disabled: !others.length,
+        title: "Close every tab but this one",
+        onClick: () => void closeAll(others),
+      },
+      {
+        label: "Close Tabs to the Right",
+        disabled: !right.length,
+        title: "Close the tabs after this one",
+        onClick: () => void closeAll(right),
+      },
+      { separator: true },
+      {
+        label: "Copy Path",
+        title: root,
+        onClick: () => void copyText(root).then(() => toast("Copied the repository's path.", "success")),
+      },
+      {
+        // No icons in this menu: VS Code's tab menu has none, and half a menu
+        // with icons leaves the other half's words out of line.
+        label: REVEAL_LABEL,
+        title: root,
+        onClick: () => void host.invoke("repos:reveal", root).catch(() => undefined),
+      },
+    ];
+    openMenu(anchor, items);
+  }
 }
 
 const PREFS_KEY = "gitstudio.ui.prefs";
@@ -10502,6 +11725,16 @@ function openShortcutsHelp(): void {
         [`${mod}K`, "Jump anywhere — sections, branches, PRs, actions"],
         [`${mod}1–8`, "Switch between the first eight sections"],
         [`${mod}[  ${mod}]`, "Back / forward through your navigation"],
+        // Repositories are tabs (#32), and their keys work everywhere. The
+        // number keys are VS Code's "open editor at index" chord, because
+        // ⌘1–8 above already means the rail. Here rather than in a group of
+        // their own: a seventh group sat alone on a row of the sheet (the
+        // rebase keys' check holds it to rows of two or more).
+        ["Ctrl+Tab  Ctrl+Shift+Tab", "Next / previous repository tab"],
+        [mac ? "⌃1–8  ⌃9" : "Alt+1–8  Alt+9", "Go to a tab by position / the last tab"],
+        // One row for the pair: with a row each, this group ran the sheet
+        // off the top of a 1280×800 window.
+        [`${mod}O  ${mod}W`, "Open a repository in a new tab / close the one in front"],
         [`${mod}\``, "Toggle the terminal dock"],
         [`${mod},`, "Settings"],
         ["?", "This cheat sheet"],
@@ -10526,6 +11759,14 @@ function openShortcutsHelp(): void {
         ["/", "Filter the list"],
         [`${mod}Enter`, "Run the focused row's main action — checkout, pull, publish"],
         ["Shift+F", "Fetch from every remote"],
+        // #32: the top bar's switcher — IntelliJ's branch popup, and the
+        // extension's branch menu.
+        ["→  or  Enter", "Switcher: a branch's actions"],
+        ["←  or  Esc", "Switcher: back to the branch"],
+        // The first ACTION, which is Checkout for every branch but the one
+        // you're on — whose actions start with Fetch. It said "check out the
+        // first match", and with no filter typed the first match IS yours.
+        ["Enter  Enter", "Switcher: a branch's first action — Checkout, unless it's yours"],
       ],
     },
     {
@@ -10546,6 +11787,18 @@ function openShortcutsHelp(): void {
         ["n", "Jump to the next failure"],
         ["j / k", "Next / previous job in this run"],
         ["Enter  Shift+Enter", "Step through search matches"],
+      ],
+    },
+    {
+      // #32: several commits at once. The letters are git's own todo letters,
+      // the same ones the Rebase view's toolbar names in its tooltips.
+      title: "Interactive rebase",
+      rows: [
+        ["Shift+↑ ↓", "Select several (or Shift-click)"],
+        [`${mod}A`, "Select every commit"],
+        ["P R S F E D", "Set Pick, Reword, Squash, Fixup, Edit or Drop"],
+        ["Alt+↑ ↓", "Move the selected commits"],
+        ["Esc", "Back to one commit"],
       ],
     },
   ];
@@ -10602,7 +11855,7 @@ function savePrefs(p: Record<string, unknown>): void {
   }
 }
 
-new App().start().catch((err) => {
+new TabShell().start().catch((err) => {
   // eslint-disable-next-line no-console
   console.error("Renderer failed:", err);
 });

@@ -7,6 +7,31 @@ All notable changes to **GitStudio** are documented here. This project adheres t
 ## [Unreleased]
 
 ### Added
+- **Select several commits.** In the Commit Graph and the Commits list,
+  **Cmd/Ctrl+click** adds or removes a commit, **Shift+click** selects
+  everything from the last one you clicked, and **Shift+Up/Down** extends the
+  selection from the keyboard; **Escape** keeps only the commit the cursor is
+  on. Right-click inside the selection (or press Shift+F10) for one menu for
+  all of them; right-click outside it and it is that commit's own menu, as
+  before. The commit details pane says how many commits are selected, by whom
+  and when, and offers the same actions — it no longer shows one commit's
+  details as if they were all. (#32)
+- **Act on several commits at once.** **Cherry-Pick N Commits** applies them
+  oldest first in one run, and **Revert N Commits** reverts them newest first;
+  if one conflicts, **Resolve Conflicts…** takes you to the Conflicts
+  dashboard to continue, skip or abort — abort puts the branch back as it was
+  — and uncommitted changes that any of them would overwrite are asked about
+  before anything is applied, with **Stash & Retry**. **Squash N Commits…**
+  opens a message editor with every commit message, oldest first, ready to
+  edit, and makes them one commit with your message. **Drop N Commits…** asks
+  once, listing every commit it removes and whether they are already pushed.
+  **Compare These Two Commits** opens the Compare view for exactly two, and
+  **Copy SHAs** copies every one, a line each. Only what can apply is offered:
+  Cherry-Pick and Revert are left out when a merge commit is selected, Squash
+  and Drop when the commits are not all on your current branch — and Squash
+  also when there are other commits between them. Undo (Ctrl/Cmd+Alt+G Z)
+  covers every one, and after a drop or squash with "move those branches" it
+  puts those branches back too. (#32)
 - **Drop Commit… in the commit menu.** Right-click a commit on your current
   branch — in the Commit Graph or the Commits list — and choose **Drop
   Commit…** to take it out of the branch; the commits after it are replayed
@@ -21,7 +46,8 @@ All notable changes to **GitStudio** are documented here. This project adheres t
   anything. If a later commit conflicts, the rebase stops and **Resolve
   Conflicts…** takes you to the Conflicts dashboard to continue, skip or
   abort — abort puts the branch back as it was. Undo (Ctrl/Cmd+Alt+G Z)
-  restores the branch afterwards. (#32)
+  restores the branch afterwards — and, after "move those branches", the
+  branches it carried. (#32)
 - **Switch Repository.** When the folder you open holds more than one
   repository — a parent folder of checkouts, a multi-root workspace, a repo
   inside another's folder — the Changes view's header shows which one it is
@@ -39,7 +65,16 @@ All notable changes to **GitStudio** are documented here. This project adheres t
   back — as in IntelliJ's branch popup. The highlighted row is drawn in your
   theme's selection colours (with the focus outline in high-contrast themes),
   follows the mouse too, and is read out by screen readers. Holding Enter never
-  runs a second action, nor answers the question the first one asked. (#32)
+  runs a second action, nor answers the question the first one asked.
+  **PageUp** and **PageDown** move a page at a time, **Ctrl/Cmd+Home** and
+  **End** go to the first and last row, and **Tab** leaves you in the search
+  box, as does a click anywhere in the menu. A local branch's actions include
+  **Add to Favorites** (or **Remove from Favorites**), so the star can be set
+  from the keyboard; from there or from the star, the branch moves to or from
+  Favorites at once, and stays there. (#32)
+- **GitStudio: Branches…** in the Command Palette opens the branch menu, as
+  the branch name in the Changes view and the status bar do — bind a key to it
+  to open the menu without the mouse.
 - **Reset a branch to its remote.** A local branch that tracks a remote branch
   has **Reset to 'origin/feature'…** in its branch-menu actions. GitStudio
   fetches first, then says exactly what the reset would take away — the commits
@@ -54,16 +89,459 @@ All notable changes to **GitStudio** are documented here. This project adheres t
   own** now asks: switch to your local branch as it is, or reset it to
   'origin/feature' first. When your local branch has nothing of its own, the
   checkout just switches to it, as before. (#32)
+- **Set the action of several commits at once in an interactive rebase.** In
+  the Interactive Rebase workspace, click a commit, then Shift-click or
+  Cmd/Ctrl-click others — or use **Shift+Up/Down**, **Home**/**End** and
+  **Cmd/Ctrl+A**; **Escape** goes back to one — and choose **Pick**,
+  **Reword**, **Squash**, **Fixup**, **Edit** or **Drop** in the **Set
+  action** bar at the top, or press git's own letter for it: **P R S F E D**.
+  **Alt+Up/Down** and dragging move the whole selection. **Squash** or
+  **Fixup** folds each selected commit into the kept commit below it, so a
+  block of commits folds into the one under the block. When no kept commit is
+  below — the selection reaches the oldest commit you keep — that oldest
+  selected commit stays as it is, for the rest to fold into, and the plan
+  says why instead of letting the rebase fail. The editor that opens for a
+  `git rebase -i` run in a terminal does the same in git's own order, oldest
+  at the top, so there a commit folds into the kept one above it. (#32)
 
 ### Fixed
+- **Undo puts back what the operation changed — and only that.** Undo used to
+  reset whichever branch you were on to the commit HEAD had been at. Undoing
+  *Checkout feature* moved `feature` onto your previous branch's commit
+  instead of switching back — and when `feature` was pushed, it committed a
+  revert of it; undoing *Checkout main* from a branch ahead of it
+  fast-forwarded `main`; undoing a tag checkout or *Detach HEAD Here* left
+  you detached. Undo now switches back to the branch (or detached commit) you
+  were on — your uncommitted changes come along, and it refuses rather than
+  overwrite them — and deletes the local branch a *Checkout origin/x* created.
+  Its question says what will happen, in words: "Switch back to 'main'",
+  "Bring back branch 'feature' at 1a2b3c4".
+- **Delete branch, Drop stash and Pop stash can really be undone.** Their
+  questions promised Undo could bring the branch or the stash back; Undo said
+  it had and restored nothing, and undoing a pop threw the popped changes
+  away. Undo now brings a deleted branch back at its commit, tracking what it
+  tracked, and a dropped or popped stash back where it was in the list — also
+  while a merge or rebase is stopped on a conflict, where nothing was
+  recorded at all. Cancelling at "not fully merged" no longer offers "Undid?
+  Delete branch", and a file you save while that question is open is yours:
+  Undo of the delete brings the branch back and leaves the file alone.
+- **A file saved while an operation's question is open** is no longer taken
+  as the operation's. Cancelling *Stash & Retry* on a merge or rebase records
+  nothing, and where an Undo would put the working tree back over such an
+  edit, its question says so, in red.
+- **Undo never throws away work you did after the operation without saying
+  so.** With a commit made since, Undo says the branch has moved and changes
+  nothing. Uncommitted edits made since are kept when they don't touch the
+  files going back, and named as discarded when they do; a new untracked file
+  where Undo would put a file back is never overwritten — Undo names it and
+  waits.
+- **The *Reset --hard* question said Undo could not bring your uncommitted
+  edits back.** It can, and does: undoing the reset puts the branch back and
+  the edits with it. The question now says so — except while a conflict is
+  unresolved, when git can't keep a copy of them: then it says Undo can put
+  the branch back but not those edits, and Undo says the same. *Reset to
+  'origin/x'* words its question the same way.
+- **Undo of a rebase that stopped** — Rebase onto…, the Interactive Rebase
+  workspace, or *Start Interactive Rebase Here* while paused — abandons the
+  rebase, instead of leaving it half-open on a detached HEAD, and brings back
+  the uncommitted changes *Stash & Retry* had set aside for it. An interactive
+  rebase you quit without running changed nothing, so Undo says so; it no
+  longer resets the branch to where it was at launch, dropping the commits
+  you made since — nor puts back a branch you rebased yourself afterwards.
+  Its Undo names the base as a short sha, not all forty characters.
+- **Undo after reordering commits with "move those branches"** puts those
+  branches back too, not just the current one — as long as nothing has been
+  committed on them since; if something has, Undo says so and changes
+  nothing. (#32)
+- **Undo of an amend** brings your staged changes back staged. Once the
+  amended commit has been pushed, Undo adds a commit that undoes just the
+  amendment — it used to revert the whole commit. A commit you make while
+  that question is open is kept: nothing is reverted, and Undo says why.
+- **Undo no longer reverts commits that were already on the remote.** After a
+  fast-forward merge, a rebase that fast-forwarded, or a reset forward onto
+  your remote's newer commits, Undo moves the branch back rather than offering
+  to commit a revert of them. Revert instead of rewrite is kept for a result
+  you pushed after the operation.
+- **Undo History** undoes an older entry after every newer one, newest first,
+  each asking its own question. A newer one that can't be undone any more
+  (you have committed since) can be forgotten on the way, and Undo's own
+  warning about it has **Forget It** — it no longer stands in front of
+  everything older for good.
+- **The Undo on an operation's notification undoes that operation.** Pressed
+  after you had done something else, it undid the newer operation instead;
+  now the newer ones are undone first, each asked, then the one it names.
+- **Undoing Accept Yours / Accept Theirs** in the Conflicts panel no longer
+  writes the conflict markers over edits you made to that file since, staged
+  or not; it says so and leaves the file alone.
+- **The editor for a `git rebase -i` run in a terminal listed no commits.**
+  It opened saying "No commits to rebase." over a todo full of them. It shows
+  the plan now, each line with the action the todo gives it, and a long one
+  scrolls with **Start rebase** kept on screen. It also opens for `git rebase
+  --edit-todo` on a paused rebase, where git has already applied a commit
+  above the first line: a first line that squashes into it is a plan git
+  runs, and the editor lets you start it. (#32)
+- **Interactive Rebase: a dragged commit lands where the line says.** A drag
+  could put the commit one row away from the line drawn for it — dragging up
+  in the workspace, dragging down in the terminal rebase's editor. The line is
+  drawn on the side you are pointing at, and the commit lands there. Also in
+  the workspace: the reason a squash was refused is shown just above **Start
+  Rebase**, on screen however long the plan is; the commit the keyboard moves
+  to is never hidden under the header or the footer; and **Reset plan** no
+  longer has a grey button face. (#32)
+- **Interactive Rebase: a paused rebase keeps Continue, Skip and Abort.**
+  While a rebase is paused on a conflict or an edit, the workspace's banner
+  holds its way out. A refused squash or **Reset plan** took that banner away
+  for good; now the reason shows for a few seconds and the banner comes back,
+  without moving the keyboard. (#32)
 - **Undo after moving a branch back onto pushed history.** Undoing an
   operation that left the branch on an older, already-pushed commit — a reset
   to it, or dropping your last local commit — offered to revert an empty range
   and failed with git's "empty commit set passed". Going back is a
-  fast-forward that rewrites nothing, so Undo now simply does it.
+  fast-forward that rewrites nothing, so Undo now simply does it. (#32)
 - Blame in a repository nested inside another's folder (a vendored checkout,
   a submodule) no longer runs in the outer repository when the outer one is
-  the repository on screen.
+  the repository on screen. (#32)
+- **Staging several files at once works.** Stage, Unstage or Discard on a
+  multi-selection, the selection bar, or a few quick clicks sent one git
+  command per file, all together, and most were refused ("Unable to create
+  '.git/index.lock': File exists"), so only some files moved and nothing
+  said so. A selection is now one request, writes to a repository's index
+  run one at a time, and a file git refuses goes back to where it was, with
+  git's reason.
+- **Discard on a multi-selection discards every selected file.** "Discard 3
+  Files" asked once per file, each question dismissed the one before, and
+  only the last file was discarded. It asks once, naming the count, and says
+  what happens: a partly staged file keeps its staged part; an untracked
+  file is deleted.
+- **A conflicted file is never staged or committed with its conflict markers
+  in it.** Staging a conflicted row (its +, its tick, its folder, Stage All)
+  holds back every file that still has markers and says which; **Commit
+  all** never includes a conflicted file, and no longer counts them.
+- **The commit button no longer offers a push that cannot work.** On a
+  detached HEAD (every stopped rebase is one) or in a repository with no
+  remote, it offers Commit, and its tip says why. The push review on a
+  detached HEAD says that is why it cannot push, and it never starts with
+  **Force push** focused. In a stopped rebase the reason is to finish it —
+  the commits then land on the branch being rebased — never to create a
+  branch at a half-rebased commit; any other operation stopped on a detached
+  HEAD is named, and finished before a branch is made.
+- **Diffs of a renamed file show the change, not an empty or all-new file.**
+  Blame's Show Diff and Open Previous Revision on a line older than the
+  rename, a rename commit in the Commit Graph's details, a staged rename in
+  the Changes view, and file history, the Timeline and Line History before a
+  rename now read each side under the name the file had there. Opening a
+  file deleted from the working tree shows it removed.
+- The Commit Graph's header counted the *Uncommitted changes* row as a
+  commit ("18 commits" for 17).
+- **The Command Palette lists only what works.** *GitStudio: Welcome* (which
+  said "The full Git suite is coming online") now opens Get Started and is
+  not listed beside it; *Show Commit Graph* is listed once; the retired
+  *Refresh Commits* / *Refresh Branches* are gone; *Continue / Skip / Abort
+  Operation* and *Abort Rebase* appear only while something is stopped; *Show
+  Process Audit* only while the audit is on.
+- The status bar's Force push question described it, with
+  `gitstudio.push.forceWithLease` off, as overwriting work you haven't seen.
+  Every force push is leased; the question says so, and the setting, which
+  changed nothing else, is gone.
+- Connecting Claude Code, Codex or Gemini CLI set `gitstudio.ai.provider` to
+  a value the Settings editor flagged as not allowed. `cli` is now one of its
+  values.
+- Messages that said to run *GitStudio: Set AI API Key*, which does not
+  exist, name *Set Anthropic API Key…* or *Connect AI Provider*, and the
+  walkthrough's AI button opens Connect AI Provider.
+- The toast after an operation read "Undid? Amend commit". It says what
+  happened — "Amend commit — done." — with **Undo** beside it. One that
+  stopped for you (a conflict, an emptied cherry-pick) says "Cherry-pick 2
+  commits stopped — finish it, or Undo.", and a pop that hit conflicts and
+  kept its stash says it did not finish.
+- **The status bar items have names of their own.** The branch, Commit Graph,
+  terminal and blame items each have an id and a name, so the status bar's
+  menu lists and hides them one by one; a screen reader hears the branch
+  item in words ("Branch main: 1 commit to pull, 2 commits to push"). On a
+  detached HEAD the item says "Detached HEAD at abc1234", and no longer shows
+  the publish cloud or offers Publish Branch, which cannot work there.
+- **The Changes view's arrows point the way they open**: › when closed and ˅
+  when open, as everywhere else in VS Code, for groups, folders and a file's
+  changes toggle (a closed one showed ˄ and an open one ›).
+- Before the Changes view has read anything it says "Reading changes…", not
+  "Working tree clean"; while repositories are still being found, it, the
+  Commit Graph, the Commits view and Pull Requests say "Looking for a
+  repository…", not "No repository open". With no repository, the Commit
+  Graph and Commits view say so instead of "No commits yet".
+- GitStudio's AI sparkle no longer appears in VS Code's own commit box while
+  AI is off, and the Connect-AI plug leaves the commit box once you turn AI
+  off.
+- *Open on GitHub* and blame's *View in Browser* open the commit on the
+  branch's upstream remote (then origin, then any other), not always on
+  `origin`: a repository whose only remote is `upstream` works.
+- The Compare panel says "1 commit" and "1 file changed", and each ref shows
+  the icon of what it is: branch, remote branch, tag or commit.
+- On a clean tree, Stage All and Stash are disabled instead of acting on
+  nothing, and the toolbar's Stage All is disabled while only conflicted files
+  are left (the Merge Changes group's Stage All stages those); the tree/list
+  toggle says which view it switches to.
+- A double-click on a file opens its diff once, not twice.
+- At sidebar width a file row keeps the file's name whole while its folder
+  can give way, and the folder keeps its end (the folder the file is in).
+- Destructive buttons (a Discard or Delete confirm, Force push) are readable:
+  white on the theme's error colour was about 2.5:1 in Dark+.
+- The subject-length counter says what it counts on hover, and past 50
+  characters turns the warning colour instead of blue.
+- A screen reader hears every tick and icon button in the Changes view by
+  name (a file's tick: "Include README.md in the commit"), and whether a
+  group, or a folder in the tree view, is expanded.
+- The README and the Get Started walkthrough no longer say Enter commits,
+  that AI is off by default (with Copilot it works with nothing to set up),
+  or that the graph is at the top of the sidebar or in an editor tab; the
+  shortcut table lists Ctrl/Cmd+Alt+G T.
+- **Stashes: Drop, Pop, Apply and Create Branch act on the stash you picked.**
+  They named it by its place in the list (`stash@{2}`), and a stash made
+  while a question was open — a pull that stashes by itself, Stash & Retry, a
+  terminal — moved every number down, so Drop could drop a different stash.
+  They now find the stash you picked just before git runs; if it has left the
+  list, they say so and change nothing. The Drop question names the stash by
+  its message.
+- **A stash of new files opened as an empty document.** Clicking a stash made
+  with untracked files (the Stash dialog makes one whenever a new file is
+  ticked) left those files out, so a stash of only new files looked empty.
+  They are shown now, beside the edits.
+- **Apply and Pop keep what the stash had staged.** Its staged changes came
+  back unstaged, and popping a file that was staged and then edited further
+  lost the staged version for good. They come back staged now. When your own
+  staged changes are in the way, or the staged part no longer applies, it asks
+  first whether to apply the stash unstaged.
+- **The Stash dialog listed a partly staged file twice**, and unticking one of
+  its two rows still stashed it. Each file has one row now.
+- **Create Branch from a stash asks about changes in its way.** Over an
+  uncommitted edit — or, for a stash with staged changes, over anything you
+  had staged — git switched to the new branch, then refused to apply the
+  stash and showed its error in red, leaving you on the new branch without
+  your stash. Now it asks first, Stash & Retry or Cancel, as Apply and Pop do,
+  naming the branch it is in the way of, and a name a branch already has is
+  said before anything runs.
+- **The Stashes view: Cancel on a Drop no longer freezes every row for six
+  seconds.** Only the row you pressed waits — its right-click menu too — and
+  only until its action is over.
+- **The Stashes view keeps your place.** Every file save redrew all the rows
+  and threw keyboard focus out of the list; now only rows that changed are
+  touched, and a stash popped or dropped from its buttons or its menu hands
+  the keyboard to the next one. Up, Down, Home and End move between stashes,
+  and Delete (on a Mac, the delete key or Cmd+Delete) asks to drop one. A
+  click previews a stash without taking the keyboard, and a double-click
+  opens its menu without opening the stash twice.
+- Apply and Pop in the Stashes view use the stash-apply and stash-pop icons,
+  and the empty view says "Stash", not "Shelve".
+- **Removing a locked worktree works.** Remove asked twice and then failed
+  with git's "cannot remove a locked working tree". It now asks once, quoting
+  the lock's reason, and **Unlock and Remove** removes it.
+- **Removing a worktree says what goes with it.** The question names the
+  worktree by its branch, lists the uncommitted files that are deleted (five,
+  then how many more) and says the branch and its commits stay; the button
+  reads **Discard Changes and Remove** when there are any. A worktree that
+  changed before you answered — an agent still at work in it — is asked about
+  again instead of deleted, and keeps its lock: a file the question didn't
+  name is never deleted with the rest, whether the worktree was clean or
+  already had changes when you were asked.
+- **The worktree this window has open is never removed from under it.** Remove
+  deleted the window's own folder; it is no longer offered there (a worktree
+  open as another folder of the workspace counts too), and says why if
+  reached. The main worktree, which git never removes, now reads *main
+  worktree* and offers no Remove.
+- **A worktree whose folder is gone** reads *folder missing* — locked ones too,
+  which git never calls prunable — opens nothing when clicked, and offers
+  **Forget Worktree**, which clears git's record of it (past its lock, when it
+  has one). For a locked one the question says that a folder on a drive that
+  isn't connected is no longer a worktree when the drive comes back. It used
+  to open a window onto the missing folder.
+- **New Worktree no longer leaves a stray branch behind when it fails**, so
+  trying again with the same name works. Folders are named for the whole
+  branch (`feature/login` → `feature-login`), so `bugfix/login` beside it no
+  longer lands in the same folder; a folder that already exists is refused
+  before anything runs, and so is one git still keeps for a worktree whose
+  folder is gone (with where to forget it); a branch name that's taken is
+  asked for again; and a branch another worktree has checked out goes
+  straight to a new branch from it, saying where it's checked out. The folder
+  picker names the folder it creates.
+- The *current* marker in Worktrees survives opening the repository through a
+  symlink, and clicking the current worktree no longer offers to reopen it.
+- **Lock Worktree…** asks why (optional); the reason shows in the row's tooltip
+  and in the Remove question.
+- **Prune Worktrees** says which worktrees it pruned, or that there was nothing
+  to prune — it reported success either way.
+- Worktree and branch tooltips show paths and upstream names without stray
+  backslashes, and a detached worktree's row uses the commit icon its tooltip
+  does.
+- A worktree row's inline button is **Open in New Window**, and it opens the
+  worktree straight away; **Open in This Window** is in the row's menu. The
+  button was *Open Worktree* and asked which window first.
+- **Removing a worktree that is stopped in a merge, rebase, cherry-pick or
+  revert says so**, and that removing it abandons the operation. A worktree
+  stopped in a rebase with nothing uncommitted used to go without a word.
+- **Checking out or deleting a branch that another worktree has checked out
+  says where it is** — from the Branches view, the branch menu, the Commit
+  Graph and a pull request's Checkout — with **Open Worktree in New
+  Window**. Each used to run git and show its refusal (*already used by
+  worktree*); Delete asked first, and the graph reported it as an error.
+  When that worktree's folder is gone — git still keeps the branch for it —
+  it says to forget that worktree first.
+- New Worktree from a branch whose name starts with "-" makes a new branch
+  from it, saying why, instead of offering a checkout that git would turn
+  into a detached HEAD.
+- **A branch's actions in a narrow or short sidebar.** The actions a branch
+  opens in the branch menu no longer run off the right or bottom edge of the
+  view, where Reset and Delete could not be reached: they stay inside it and
+  scroll when there are more than fit, keeping the highlighted one in sight.
+  The actions menu a changed file opens does the same.
+- **The branch menu in a short or narrow sidebar** uses all the room below
+  the branch name rather than about three quarters of the view's height,
+  fits a sidebar narrower than itself, and stays inside the view — with a
+  branch's actions — when you resize the sidebar while it is open.
+- The branch menu says **Loading branches…** until the branches arrive,
+  instead of showing a repository with none.
+- On a detached HEAD, a branch's actions name the commit they act on —
+  *Merge 'origin/main' into HEAD (a1b2c3d)* — rather than a branch called
+  'current branch', and so does the question Merge or Rebase then asks,
+  which says the result is on no branch rather than warning about a push.
+- The branch menu keeps its width while you type — the width its branches
+  need, also when they arrive after the menu opened or the sidebar is widened
+  under it — and a new search starts at the top of the list with its first
+  group heading in view.
+- A branch's name keeps its room in the branch menu: in a narrow sidebar the
+  upstream beside it is shortened, or left to the tooltip, before the name
+  loses a letter, and the ↑/↓ counts step aside, to the tooltip, before the
+  name is cut to under half the row. The upstream, the group counts and the
+  empty stars are drawn in your theme's secondary text colour, readable in
+  light themes, and the highlighted row still shows which letters matched
+  your search, and its star.
+- A branch whose upstream was deleted from the remote — what a merged pull
+  request leaves behind — shows that upstream struck through and marked
+  **gone** in the branch menu, instead of looking like a live one, and its
+  actions no longer offer a pull from it that could only fail.
+- A branch-menu action that fails is named as you chose it — *Pull into
+  'feature' failed* — rather than by an internal name.
+- The branch menu's words and icons: **Push…** says it asks before pushing,
+  *Pull 2 Commits into 'feature'* says what the number counts, and Checkout
+  and New Worktree have icons of their own — Checkout no longer wears the
+  check that marks the branch you're on, nor New Worktree the Changes view's
+  tree/list toggle.
+- **Pull requests: checks from GitHub Actions.** The Pull Requests list and a
+  PR's page said "running" or "No checks" for every repository on GitHub
+  Actions, whether its runs had failed or passed. They read the runs now, with
+  any legacy statuses: a failure reads as failed, a pass as passed, "No
+  checks" only when there are none. Every row shows it — drafts too, not just
+  the first eight — as its icon, a mark of its own in a colour of its own for
+  passed, failed and running, with the words in its tooltip; rows no longer
+  show the literal text `$(check)`, `$(x)` or `$(circle-filled)`.
+- **Create Pull Request: Draft creates a draft.** Every pull request was
+  created ready for review, whichever you picked. A branch that lives in your
+  fork is now sent to GitHub as `owner:branch` — as a bare name, GitHub looked
+  for it in the target repository. The branch is pushed to the remote git
+  pushes it to, under its own name: one started from `origin/main` tracks
+  `main`, and Create Pull Request pushed its commits into `main` — or, with a
+  push remote set to your fork, into the original repository's `main`, and
+  nothing reached the fork. It asks to push only when the branch isn't there
+  yet or has commits that aren't, and leaves what the branch tracks alone.
+  The title proposed is the branch's one commit subject, or with several
+  commits the branch name, as GitHub proposes it (it was the newest commit's
+  subject). The base branch question offers only branches the remote has
+  (`master` and `develop` were offered everywhere) and says which repository
+  the pull request opens on. "A pull request already exists" opens that pull
+  request, not the list.
+- **Renamed files in a pull request** diff against the file as it was, under
+  its old name — the whole file showed as added — and the page says what each
+  was renamed from.
+- **Review comments GitHub accepts.** Only lines inside the diff take a
+  comment: one comment anywhere else made GitHub refuse the whole review with
+  just "Unprocessable Entity". Removed lines, and deleted files, take comments
+  on their left side. A review is pinned to the commit its diffs show, so a
+  push during the review no longer moves its comments onto other code, and a
+  comment on several lines is sent as that range. Start Review reads the pull
+  request's current head and opens its first file (it opened five previews,
+  each replacing the last), and a file opened from the pull request's page
+  during the review opens as the review sees it, so it takes comments too. A
+  comment GitHub would still refuse is named before anything is sent, and when
+  GitHub refuses, its reason is shown.
+- **A pull request's diff starts where its branch left the base.** The left
+  side was the base branch as it is now: once others had merged, it showed
+  their new work as if the pull request removed it, and comments on removed
+  lines were placed on the wrong lines — or couldn't be placed at all.
+- **Delete Comment on a pending review comment** deletes that comment. It
+  threw and deleted nothing. A comment already posted to GitHub no longer
+  offers it.
+- **Pending review comments are no longer thrown away.** Starting a review of
+  another pull request, or Cancel Review, asks first — submit them, discard
+  them, or keep reviewing — and a pull request whose files fail to load leaves
+  your queued comments alone. The question counts the comments that are
+  pending, and discarding them leaves the ones already posted.
+- **Check Out on a pull request you already have** brings `pr/<n>` up to
+  date. It failed while `pr/<n>` was checked out, and it silently threw away
+  any commits you had made on it; now a `pr/<n>` with commits the pull request
+  doesn't have is never moved without asking. On the pull request's own
+  branch already, it says so instead of moving you to a `pr/<n>` copy. The
+  progress notification ends before "Checked out" appears, and its Open
+  Description opens that pull request even after you have switched
+  repositories (it opened the same number in the repository active then).
+- **A pull request's page:** label chips wear their colours (the page's own
+  security policy dropped them, and every label was grey); a merged pull
+  request reads **Merged** in purple and one closed without merging reads
+  **Closed** in red (both read a purple "Closed"); after **Merge…** the page
+  flips to Merged at once, and the row leaves the list, without a reload or a
+  second Merge — and stays Merged when a Refresh was still loading as the
+  merge landed. Merge… offers only the methods the repository allows, and
+  isn't offered on a draft. A same-repository branch reads without its owner,
+  and a file's line counts no longer show a red "−0".
+- **The Pull Requests list no longer asks GitHub on every file save**, even
+  while collapsed. It refreshes when it comes into view after two minutes,
+  every two minutes while in view in a focused window, on Refresh, and when
+  the repository or your sign-in changes. It names the repository it shows,
+  drops another repository's pull requests as soon as you switch, and says why
+  there is no list — no repository, no remote, or remotes not on github.com —
+  instead of staying blank. A refresh that fails keeps the list and says so; a
+  list that fails to load offers what can put it right: Retry; Sign in, as a
+  new sign-in when GitHub no longer accepts yours (it handed the refused one
+  back); or GitHub's page, when GitHub refuses you access. An answer that
+  arrives after you have switched repositories is not shown over the other
+  repository's list. Rows show when each pull request was last updated, the
+  order they are in.
+- **No more silent 100-item limits.** Up to 1,000 open pull requests are
+  listed, not the first 100, and the list says when there are more; every
+  changed file is listed (GitHub lists up to 3,000), each one commentable in
+  a review. A page's "Changed files" count is the pull request's own, and a
+  list that is partial, or failed to load, says so.
+- **github.com under another name.** Remotes using an SSH host alias
+  (`git@github.com-work:…`, or any `~/.ssh/config` Host whose HostName is
+  github.com), `ssh.github.com` (SSH over port 443) or `www.github.com` turned
+  the pull request features off without a word. They are github.com now —
+  and **Open on GitHub** and blame's **View in Browser** open their commits
+  on github.com too (an `ssh://` remote was "not a GitHub address", and an
+  alias opened `https://github.com-work/…`).
+- **A pull request's diff that can't be loaded says why** — signed out, rate
+  limited, offline — instead of an empty pane that claimed the file was added
+  or deleted. A binary or very large file shows a note, not its bytes.
+- **Interactive rebase under git 2.55 shows commit titles as they are.**
+  git 2.55 writes each line of a rebase plan as `pick <sha> # <title>`, and
+  the rebase editor showed that `#` in front of every commit's title. It
+  reads both the older and the newer form now, telling them apart by the
+  whole plan — so a title that itself starts with `#`, and an empty commit
+  with no message (`# empty`), read as git wrote them under either — and a
+  line whose action you change keeps git's own spelling.
+- **A worktree is one folder however its path is spelled.** git names a
+  worktree by its resolved path — `C:/Users/you/…` on Windows — and the same
+  folder can be reached through a symlink or Windows' short `C:\Users\YOU~1\…`
+  names. **New Worktree** into the folder of a worktree git still keeps, its
+  folder gone, picked by such a spelling, ran git and showed its error; it
+  says whose folder it is now. On Windows, worktree paths — in the Worktrees
+  view, its tooltips and questions, and "checked out in the worktree at …" —
+  are shown the Windows way, `C:\Users\…`.
+- On Windows, SSH host aliases are read from `%HOME%\.ssh\config` when
+  `HOME` is set — where Git for Windows' ssh reads them — so a remote through
+  one is recognised as github.com there too.
+- **Rebasing in a SHA-256 repository.** In a repository whose commit ids are
+  64 characters long (`git init --object-format=sha256`), the rebase panel,
+  Drop Commit and the several-commit actions were refused as an
+  "unrecognised plan entry", and the rebase editor showed part of each id in
+  front of the commit's title. They run now, and a reworded commit gets its
+  new message — also when the rebase is continued after a conflict.
 
 ## [1.14.0] - 2026-09-25
 
