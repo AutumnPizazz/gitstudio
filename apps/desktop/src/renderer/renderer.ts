@@ -5496,6 +5496,8 @@ class App {
     );
     wrap.append(head, scroll);
     this.viewHost.replaceChildren(wrap);
+    // Settings is kept alive: a page restored from the cache is live again.
+    this.viewRevive.set(wrap, () => this.reviveAccountCard?.());
   }
 
   private settingsAppearanceCard(): HTMLElement {
@@ -5779,9 +5781,13 @@ class App {
   /** Resolves once the account card's async body has painted — see below. */
   private accountCardReady: Promise<unknown> = Promise.resolve();
 
+  /** The account card's "ask again" for a name it does not have yet (see settingsAccountCard). */
+  private reviveAccountCard?: () => void;
+
   private settingsAccountCard(): HTMLElement {
     const { card, body } = settingsCard("GitHub Account", "github");
     body.appendChild(loadingState());
+    this.reviveAccountCard = undefined;
     // AWAITABLE. `showSettingsView` returns as soon as the card's shell is in
     // the DOM, and everything the card actually shows arrives in this async
     // body — so "Switch account", which awaits `showSettingsView()` and then
@@ -5798,16 +5804,42 @@ class App {
       body.replaceChildren();
       if (status.connected) {
         const who = el("div", "settings-account-who");
-        who.append(
-          avatar(
-            status.login ?? "you",
-            status.login ? `https://github.com/${status.login}.png` : null,
-            36,
-          ),
-        );
         const name = el("span", "settings-account-name");
-        name.textContent = status.login ?? "you";
-        who.appendChild(name);
+        // The account, by name. Until GitHub has said which (offline, say),
+        // it is "Signed in to GitHub" under GitHub's mark — never "you" in a
+        // "YO" tile — and the card asks again until the name comes.
+        const paint = (login: string | undefined): void => {
+          const face = login
+            ? avatar(login, `https://github.com/${login}.png`, 36)
+            : el("span", "settings-account-mark");
+          if (!login) face.append(glyph("github"));
+          who.replaceChildren(face, name);
+          name.textContent = login ?? "Signed in to GitHub";
+        };
+        paint(status.login);
+        if (!status.login) {
+          // Asked while the card is on screen. Settings is kept alive, so a
+          // page the user left and came back to is the same card: the asking
+          // stops while it is away and starts again when it is restored
+          // (showSettingsView's viewRevive) — it used to stop for good, and
+          // the card said "Signed in to GitHub" until something rebuilt it.
+          let timer = 0;
+          let named = false;
+          const ask = async (): Promise<void> => {
+            if (!who.isConnected || named) return;
+            const again = await host.invoke("github:status", undefined).catch(() => undefined);
+            if (!who.isConnected || !again?.connected) return;
+            if (again.login) {
+              named = true;
+              paint(again.login);
+            } else timer = window.setTimeout(() => void ask(), 3000);
+          };
+          timer = window.setTimeout(() => void ask(), 3000);
+          this.reviveAccountCard = () => {
+            window.clearTimeout(timer);
+            void ask();
+          };
+        }
         const sub = el("div", "settings-sub");
         sub.textContent = "Signed in via OAuth Device Flow · access: repos, actions, org, gists, notifications.";
         const actions = el("div", "settings-actions");
@@ -9860,13 +9892,21 @@ class App {
   private updateProgressEl?: HTMLElement;
   /** Versions the user already saw a prompt for this session. */
   private static readonly updatePrompted = new Set<string>();
+  /** Versions whose question is on screen now — asked twice at once, it is shown once. */
+  private static readonly updateAsking = new Set<string>();
 
   private async promptUpdateAvailable(
     u: { version: string; current: string },
     force = false,
   ): Promise<void> {
+    // A manual check both answers (forced) and announces the same version as
+    // an event: two identical dialogs stacked, and the second Download said
+    // "No update is waiting to download." They held until answered, so both
+    // stayed.
+    if (App.updateAsking.has(u.version)) return;
     if (!force && App.updatePrompted.has(u.version)) return;
     App.updatePrompted.add(u.version);
+    App.updateAsking.add(u.version);
     const mac = navigator.platform.toLowerCase().includes("mac");
     const ok = await confirmDialog({
       title: `GitStudio ${u.version} is available`,
@@ -9874,7 +9914,11 @@ class App {
         ? `You're on ${u.current}. Download the update now? The installer lands in your Downloads folder — one drag to Applications finishes it.`
         : `You're on ${u.current}. Download the update now? You'll confirm again before it restarts.`,
       confirmLabel: "Download update",
-    });
+      // The window's question, not the view's: a refresh re-routing below it,
+      // or a tab switch, answered it "Cancel" for you — and the version was
+      // already marked asked, so it never came back that session.
+      holdWhile: () => true,
+    }).finally(() => App.updateAsking.delete(u.version));
     if (!ok) return;
     const r = await host.invoke("update:download", undefined);
     if (!r.ok) {
@@ -9894,6 +9938,7 @@ class App {
         title: `GitStudio ${r.version} is ready`,
         message: "Restart now to finish updating? If not, it's applied the next time you quit.",
         confirmLabel: "Restart now",
+        holdWhile: () => true,
       });
       if (!ok) {
         toast("The update will be applied when you quit GitStudio.", "info");
@@ -9905,6 +9950,7 @@ class App {
         message:
           "The installer is in your Downloads folder. Open it now? Drag GitStudio to Applications to finish.",
         confirmLabel: "Open installer",
+        holdWhile: () => true,
       });
       if (!ok) return;
     }
@@ -11251,6 +11297,13 @@ class TabShell {
     if (roots(this.state) !== before) for (const app of this.allApps()) app.onTabsChanged(app === this.active);
   }
 
+  /** Window-level work for the tab in front, or for the first one shown. */
+  private toActive(fn: (app: App) => void): void {
+    if (this.active) fn(this.active);
+    else this.waitingForActive.push(fn);
+  }
+  private readonly waitingForActive: ((app: App) => void)[] = [];
+
   /** Show `root`'s tab (undefined = the no-repository screen). */
   private show(root: string | undefined): void {
     const prev = this.active;
@@ -11264,6 +11317,7 @@ class TabShell {
     if (prev) this.putAway(prev);
     this.active = next;
     this.bringIn(next);
+    for (const fn of this.waitingForActive.splice(0)) fn(next);
     // The no-repository screen is rebuilt when it is needed again.
     if (prev && prev === this.noRepo && next !== prev) {
       this.noRepo = undefined;
@@ -11620,8 +11674,9 @@ class TabShell {
     });
     // The update prompts are the window's dialogs, not the tab's screen — a
     // tab whose folder is gone still hears them.
-    host.on("update:available", (u) => this.active?.onUpdateAvailable(u));
-    host.on("update:ready", (r) => this.active?.onUpdateReady(r));
+    // One that arrives before the window has a screen waits for the first.
+    host.on("update:available", (u) => this.toActive((a) => a.onUpdateAvailable(u)));
+    host.on("update:ready", (r) => this.toActive((a) => a.onUpdateReady(r)));
     host.on("update:progress", (p) => this.active?.onUpdateProgress(p.percent));
   }
 
