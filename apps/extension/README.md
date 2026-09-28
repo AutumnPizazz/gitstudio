@@ -53,7 +53,7 @@ Free on public *and* private repos. No account, no sign-up, no analytics, no fea
 
 **Sync is live, not a status readout.** The ahead/behind counts in the header *are* the Push and Pull buttons, and they run the operation with a spinner in place. Force-push defaults to the safer `--force-with-lease`.
 
-**The branch dialog does the work without closing.** Fetch runs in place — the item spins, then every branch row's ↑/↓ badges update, so you can see exactly what's unpulled where. Local branches can be **pulled without checking them out**. Each branch carries its full operation set: checkout, merge, rebase onto, rename, delete, push/publish, set upstream, branch from here, create worktree, compare.
+**The branch dialog does the work without closing.** Open it from the branch name, the status bar or `Ctrl/Cmd+Alt+G G`, and type: `rel21` finds `release/2.1`, the best match is highlighted — a branch before an action it ties with — and Enter runs it; a name that matches nothing offers **New Branch '…'**. Fetch runs in place — the item spins, then every branch row's ↑/↓ badges update, so you can see exactly what's unpulled where. Remote branches are grouped by remote. Local branches can be **pulled without checking them out**. Each branch carries its full operation set, in the same order for every kind of ref: checkout, pull, new branch, new worktree, compare, merge, rebase onto, push/publish, set tracked branch, rename, copy name, favorite, reset to its remote, delete. In a narrow sidebar a branch's actions open in the dialog itself, under a back row.
 
 <table>
   <tr>
@@ -78,13 +78,13 @@ Free on public *and* private repos. No account, no sign-up, no analytics, no fea
 
 ## Branches, stashes, worktrees, tags, remotes
 
-- **Stashes** get a first-class view: one-click **Stash Changes**, per-row Apply / Pop / Branch / Drop, plus a stash control in the Changes toolbar.
-- **Worktrees** get their own view: open, create, remove, lock/unlock, prune — the sane way to review a PR without stashing your work.
+- **Stashes** live under your changes, in the Changes view: open one to see every file it holds — staged and untracked ones too — click a file for its diff, and **Move** (or **Copy**) just the files you want back. Apply, Pop, Create Branch or Drop a whole stash from its row; stash all your changes, or just the files you selected, from the Changes toolbar. Or drag: a stash onto your changes applies it (hold Alt/Option to pop), its files move back (Alt/Option copies), and changed files dropped on the Stashes header are stashed.
+- **Worktrees** get their own view: every worktree with its branch and, in words, what it holds — changes, commits to push or pull, a lock and its reason, a merge or rebase stopped in it, a folder that's gone or is no longer a worktree. Open a row to see its uncommitted files and its commits not pushed, each commit opening to its files, diffs read from that worktree. Pull in place, review its push, open it here or in a new window, lock it, remove it (Stash & Remove keeps its changes), forget or prune the ones that are gone — the sane way to review a PR without stashing your work. New Worktree suggests a folder beside your project, named for the branch.
 - **Tags** support checkout, delete, and push; **remotes** support add, manage, and fetch — all reachable from the branch dialog, the graph, or the Command Palette.
 
 ## GitHub pull requests, in-editor
 
-**Review where the code is.** Sign in once with VS Code's built-in GitHub account — no extra token — and the Pull Requests view lists open PRs for the current repo. Open the description, check the PR out, start a review, comment inline on the diff, submit, and merge with your preferred method. Create new PRs from the editor too. Not signed in? The view shows a quiet connect prompt. Not a GitHub repo? The view says so, naming the remotes it found; nothing breaks.
+**Review where the code is.** Sign in once with VS Code's built-in GitHub account — no extra token — and the Pull Requests view lists the current repo's pull requests: Open, Merged, Closed or All, searchable, and filtered by author, review requested, assignee or label. Each row shows its checks, its reviews, its comments, its branch and whether it's the one you have checked out; a fork shows the repository it was forked from, with your fork one click away. A pull request opens as a page of its own — one tab per pull request, titled with its repository — with its description as GitHub draws it, the conversation with each review's verdict and its threads (reply and resolve right there), its commits, every check with how long it took, and its changed files as a tree. Merge from it with the methods the repository allows, each saying what it does; close, reopen, or mark a draft ready. Review in the editor's own diff: comment on the lines GitHub accepts, and your pending comments stay — even across a window reload — until you submit them from the page as Comment, Approve or Request changes. **Checkout** puts you on the pull request's own branch, tracking it (a fork's remote is added when you need it), so what you push reaches the pull request. **New pull request** is one form in an editor tab: the branch it goes into and the one it comes from, the title GitHub would propose, the repository's template, Draft, reviewers, assignees and labels — and the commits and files it will have, before anything is sent. The words and icons are the GitStudio desktop app's. Not signed in? The view offers to sign you in. Not a GitHub repo? The view says so, naming the remotes it found; nothing breaks.
 
 ## Branch compare
 
@@ -118,7 +118,7 @@ cursor --install-extension gitstudio.gitstudio
 
 …or replace `cursor` with `codium` / `windsurf`, or install from the Open VSX UI.
 
-Then open a folder with a Git repo and click the GitStudio icon in the Activity Bar. The sidebar reads top-to-bottom as a workflow: **Changes** → **Commits** → **Stashes** → **Worktrees** → **Pull Requests**. Run **GitStudio: Get Started** for a guided tour.
+Then open a folder with a Git repo and click the GitStudio icon in the Activity Bar. The sidebar reads top-to-bottom as a workflow: **Changes** (your stashes under them) → **Commits** → **Worktrees** → **Pull Requests**. Run **GitStudio: Get Started** for a guided tour.
 
 > **Prefer a standalone app?** The same engine ships as a native desktop client for macOS, Windows, and Linux — with an integrated terminal, a GitHub home for your repo, and an AI assistant. Grab it from [gitstudio.dev](https://gitstudio.dev).
 
@@ -130,6 +130,7 @@ Everything lives under one conflict-free chord — `Ctrl+Alt+G` (`Cmd+Alt+G` on 
 | --- | --- | --- |
 | Toggle file blame annotations | `Ctrl+Alt+G` `B` | `Cmd+Alt+G` `B` |
 | Show line history | `Ctrl+Alt+G` `H` | `Cmd+Alt+G` `H` |
+| Open the branch menu (*GitStudio: Branches…*) | `Ctrl+Alt+G` `G` | `Cmd+Alt+G` `G` |
 | Open changes vs HEAD | `Ctrl+Alt+G` `D` | `Cmd+Alt+G` `D` |
 | Stage selected lines | `Ctrl+Alt+G` `S` | `Cmd+Alt+G` `S` |
 | Unstage selected lines | `Ctrl+Alt+G` `U` | `Cmd+Alt+G` `U` |
@@ -138,7 +139,11 @@ Everything lives under one conflict-free chord — `Ctrl+Alt+G` (`Cmd+Alt+G` on 
 
 In the commit box, `Enter` starts a new line; commit with the **Commit** button. All bindings are remappable in *Keyboard Shortcuts*.
 
+**In the Changes list** the arrow keys walk the files: `Up`/`Down` move, `Right`/`Left` open and close a group, a folder or a file's changes, `Enter` opens a diff, `Space` ticks a file in the checkbox view, `Shift+Up/Down` selects, and `Shift+F10` opens the menu of a file, a folder or a group — everything its buttons do (Stage, Unstage, Discard, Stage All, Discard All) and Stash; `Escape` or a choice puts you back on the row.
+
 ## Settings
+
+In the Settings editor GitStudio's options are grouped — *General*, *Changes & Staging*, *Commit & Sync*, *Blame*, *Merge & Diff*, *AI*, *Advanced*. The ones most people change:
 
 | Setting | Default | What it does |
 | --- | --- | --- |

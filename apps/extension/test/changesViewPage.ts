@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { headlessChromeArgs } from "../../../scripts/test/no-network-chrome.mjs";
 import { decodeVerdictTitle, findChrome } from "../../../packages/webview-ui/test/headless";
+import { changeRowsScript } from "./changesPage";
 
 export { findChrome };
 
@@ -135,10 +136,13 @@ export function changesViewPage(opts: { theme: ThemeName; harness: string; width
   document.title = "CHECK " + JSON.stringify({ fails, notes });
 })();
 </script>`;
+  const changeRowsCss = readFileSync(join(ROOT, "packages", "webview-ui", "src", "changeRows", "changeRows.css"), "utf8");
   return template()
     .replace("${csp}", "default-src * 'unsafe-inline' file: data:")
     .replace("${codiconUri}", () => codicons)
     .replace("${tokensCss}", () => tokens)
+    .replace("${changeRowsCss}", () => changeRowsCss)
+    .replace("${changeRowsUri}", () => changeRowsScript())
     .split("${nonce}").join("harness")
     .replace('<body class="layout-list">', () => `<body class="layout-list ${theme.bodyClass}">`)
     .replace("</head>", () => `${prelude}\n</head>`)

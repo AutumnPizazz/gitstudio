@@ -4,9 +4,282 @@ All notable changes to **GitStudio** are documented here. This project adheres t
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.15.0] - 2026-09-28
 
 ### Added
+- **Stashes live in the Changes view, file by file.** Under your changes, a
+  **Stashes** group lists every stash — its message (without git's "On
+  main:"), the branch it was made on, how long ago, and how many files — and
+  opens to every file it holds, staged and untracked ones too, as Changes
+  rows. Click a file to see its diff against the commit the stash was made
+  on. **Move** (on a file's row) brings the file back as it was stashed —
+  staged, if it was — and takes it out of the stash; **Copy** brings it back
+  and leaves the stash as it is. Their tips name the group a file lands in
+  (*back into Staged as it was stashed*). Ctrl/Cmd-click and Shift-click select
+  several files to move or copy together; in the tree view a folder moves
+  too. A stash's row has **Apply** (its changes come back, the stash stays)
+  and **Pop** (they come back, the stash goes) — words, not look-alike icons,
+  on the row the pointer is on, each with a tip saying what happens — and its
+  menu **Open All Changes**, **Create Branch…** and **Drop…** (Delete asks
+  too). A file you have changed yourself is never
+  overwritten: it asks, and Stash & Retry keeps both. What is left of a stash
+  stays where the stash was in the list, and Undo (Ctrl/Cmd+Alt+G Z) puts the
+  whole stash back. A row goes the moment you click and comes back if nothing
+  happened, and the group remembers which stashes you opened. A stash made
+  without a message reads "WIP: " and the subject of the commit it was made
+  on. A stash of hundreds of files — a dependency folder stashed with its
+  untracked files — opens 200 files at a time, with **Show 200 more of N**
+  under them, and costs nothing while it is closed. The separate
+  Stashes view is gone; the Command Palette has **Apply Stash…**, **Pop
+  Stash…**, **Drop Stash…** and **Create Branch from Stash…**, which ask
+  which stash.
+- **Drag between your changes and your stashes.** Drag a stash onto your
+  changes (or "Working tree clean") to apply it — hold Alt (Option on a
+  Mac) as you let go to pop it instead. It comes back as it was stashed,
+  staged changes staged, so your changes light up as one place rather than
+  Staged or Unstaged alone. Drag a stash's files (or the ones you've
+  selected, or a folder of them) there to move them out of the stash — Alt
+  or Option copies them. Drag changed files — one, your selection, or a
+  folder — anywhere onto the **Stashes** group to stash exactly those: the
+  whole group lights up, never one stash as if the files were joining it
+  (git can't add to a stash — they become a new one), and its words stay in
+  sight at the top of a long list. The place
+  under the pointer lights up and says what letting go does ("Drop to
+  apply · Hold Option to pop"), on a line of its own under the verb in a
+  narrow sidebar rather than cut off. It runs what the menus run, so Stash & Retry,
+  the staging question, conflicts and Undo work as they do there. This
+  replaces the "Drop to stash" box.
+- **Checkout puts you on the pull request's own branch.** **Checkout** on a
+  pull request — in the list, on its page, or in the Command Palette — checks
+  out its real branch (`feature`, not a `pr/37` copy), tracking it where it
+  lives and pushing there, so a fix you commit and push reaches the pull
+  request, as `gh pr checkout` does. A pull request from a fork adds the
+  fork's remote, named after its owner, the first time (and says so). A
+  branch of that name that isn't the pull request's — your own `main` beside
+  a fork's `main`, or one that tracks something else — is never taken over:
+  you are asked, and offered **Checkout as alice-main**, **Use main**, or
+  **Cancel** (Cancel changes nothing, and the remote it added goes again).
+  Checked out as `alice-main`, it is pushed with GitStudio's **Push**; git's
+  own `git push` refuses a branch named unlike the one it tracks, so the
+  choice and the message after it give the command that works (`git push
+  alice HEAD:main`). A
+  branch with commits the pull request doesn't have is never moved without
+  asking; your own commits on top of it are left as they are, and counted.
+  Uncommitted changes in the way are offered **Stash & Retry**. A pull
+  request whose branch is gone is checked out at its last commit as
+  `pr/37`, and it says a push from there can't reach it; one whose author
+  doesn't let maintainers edit it says a push will be refused.
+- **New pull request is one form.** **New pull request** — in the Pull
+  Requests view's title bar, its empty list, or the Command Palette — opens a
+  form in an editor tab, with everything on one screen and nothing sent
+  until **Create pull request**: the repository it opens on (a fork's parent,
+  with your fork one click away); **Into** — that repository's default
+  branch, or any other, picked or typed; **from** — the branch checked out,
+  or any other; the title GitHub would propose; the description from the
+  repository's pull request template when it has one (else the commit's
+  message, or the commits as a list), with **Commit list** and **Draft with
+  AI** beside it; **Create as draft**; **Reviewers**, **Assignees** (with
+  **Assign yourself**) and **Labels**, when your access to the repository
+  lets you set them — and it says so when it doesn't. Below, the commits and
+  the files the pull request will have, compared with the base as GitHub has
+  it now; a file opens its diff. A branch that isn't pushed yet, or has
+  commits that aren't, is pushed first — the button says **Push and create
+  pull request**. It goes where git pushes it, except a branch started from
+  the base (`git switch -c feature upstream/main`), which goes to your fork
+  when the clone has a remote for it, as `gh pr create` does — not into the
+  repository you may not push to; **Push to another remote** picks any of
+  the clone's GitHub remotes. A commit, a pull or a push made while the form
+  is open shows in it at once (git is read again, GitHub isn't asked), and
+  **Create** reads the branch once more before it pushes, so the pull
+  request has every commit; **Refresh** at the top reads the branches and
+  GitHub again. A branch that already has an open pull request says so,
+  with **Open #44**, and anything else that stops it (nothing to compare, a
+  branch that has diverged from its remote) is said beside the button. What
+  you type is never replaced. Once created, the pull request joins the list
+  and its page opens in the form's place. It replaces the six questions
+  Create Pull Request asked in the Changes view, and is drawn for Dark,
+  Light and both High Contrast themes.
+- **A page for each pull request.** Opening a pull request — from the list,
+  the Command Palette, or a link in another one — opens its own editor tab,
+  titled with its repository and number (`acme/app#37`); opening it again
+  brings that tab forward. The page says what the pull request is and where
+  it stands: its state, who wants to merge what into where, whether its
+  branch is the one checked out, and a status box for its reviews, its checks
+  and whether it can be merged — with the one thing that helps when it can't:
+  **Update branch** when the base has moved on, **Checkout to resolve** for
+  conflicts, **Mark ready** for a draft. Its actions are the ones its state
+  allows: **Merge**, **Mark ready** or **Reopen pull request** first, then
+  **Checkout**, **Approve** (not on your own), **Review** and **More actions**
+  (Update branch, Close pull request, Copy link), with Refresh and Open on
+  GitHub beside them — the GitStudio desktop app's words and icons. Four
+  tabs:
+  - **Conversation**: the description as GitHub draws it — tables, task lists,
+    images, code, collapsible sections — with `#12`, `owner/repo#12` and
+    `@people` as links (a pull request of the same repository opens its own
+    page); every comment, review (with its verdict) and event; review threads
+    under their review, with **Reply** and **Resolve conversation**; and a box
+    to comment. Reviewers with their verdicts, assignees and labels sit
+    beside it.
+  - **Commits**, each opening to its changed files, and each file to that
+    commit's diff.
+  - **Checks**: every check on the latest commit, failing first, with how long
+    it took (or has been running), whether it is required, and **Details**.
+  - **Files**: the changed files as a tree, with their line counts and
+    how many conversations each has; a file opens VS Code's diff, and a
+    renamed one is compared with its old name.
+  What you change there shows at once and is then sent; if GitHub refuses it,
+  the page goes back and says why, with what to do. While checks run, the page
+  keeps itself up to date. It replaces the old description panel, and is drawn
+  for Dark, Light and both High Contrast themes.
+- **Merge from the pull request's page.** **Merge** lists only the methods
+  the repository allows, the one set in `gitstudio.pr.defaultMergeMethod`
+  first, each saying what it does ("The 4 commits become one commit on
+  main."), with the commit title to use and an option to delete the branch on
+  GitHub afterwards; **Confirm merge**, **Confirm squash and merge** or
+  **Confirm rebase and merge** sends it. GitHub refuses the merge if the
+  branch has moved on since the page read it, and the page says so. The
+  list's **Merge…** opens this box, on a page that is still loading too;
+  when the pull request can't be merged (a draft, blocked, read-only, already
+  merged) the box doesn't open, and the keyboard lands on the status line
+  that says why. Closing a box (Escape, Cancel) puts the keyboard back on the
+  button that opened it. Nothing is asked in the Changes view any more.
+- **Review in the editor, submit from the page.** A pull request's diffs take
+  comments as soon as its page has read it — only on the lines GitHub accepts
+  — and your first comment starts your review. A commit's own diff (from the
+  **Commits** tab) takes none: its lines are that commit's change, not the
+  pull request's. GitHub's own threads show on
+  the diff too, with **Reply** and **Resolve Conversation**. Your pending
+  comments are listed on the page (each opens where it is) and counted on the
+  **Review** button, the **Files** tab, each file and the status bar
+  ("Reviewing #37 · 3 pending"). They are kept with the workspace, so
+  reloading the window keeps them. Submit them from the page's **Review** box
+  as **Comment**, **Approve** or **Request changes**, with a summary (the
+  header's **Approve** opens it with Approve chosen) — Approve
+  and Request changes aren't offered on your own pull request — or **Discard**
+  them there. Reviews of several pull requests can be under way at once, and
+  comments written before the pull request moved on say so, and are sent on
+  the commit they were written on.
+- **A new Pull Requests list.** The Pull Requests view is rebuilt as a list
+  like the GitStudio desktop app's. **Open**, **Merged**, **Closed** and
+  **All** sit at the top with how many each holds; a search box finds pull
+  requests by their words, and **Filter** narrows them by **Author**,
+  **Review requested** (your teams' requests included), **Assignee** or
+  **Label** — "you" is one click, anyone else can be typed — with each filter
+  shown as a chip you can remove. Each row gives the title and number, who
+  opened it (with their picture), its branch and the branch it goes into (a
+  fork's shows whose), how long since it last changed, its checks (Passed,
+  Failed, Running), its reviews (Approved, Changes requested, Review
+  required), its comments, Draft, its labels in their colours, and
+  **Checked out** on the one whose branch you have checked out. Rows come 30 at
+  a time, and more load as you reach the end (or with **Load more**). Click a
+  row to open its page; hover it (or move to it with the keyboard) for
+  **Checkout**, **Open on GitHub** and **More actions** — Review, Merge, Copy
+  link, offered only where they apply; right-click or Shift+F10
+  opens the same menu. **Up/Down** move through the rows, and Down from the
+  search box gets you there. The list keeps its rows while it refreshes, with
+  a thin bar to show it — every row you paged in, not just the first hundred
+  — and a merge, close or reopen from a page moves that row at once, in that
+  repository's lists only (your fork's own #37 is another pull request).
+  Checking out a fork's pull request adds its remote without resetting the
+  list: your filters and rows stay. In a narrow sidebar the search box says
+  **Search**, never "Search pull reque". It says what to do when there is
+  nothing to show —
+  **Sign in to GitHub**, **Sign in again**, **Retry**, **Authorize on
+  GitHub**, **New pull request** or **Clear filters**. It is drawn for
+  Dark, Light and both High Contrast themes.
+- **Pull requests of the repository your fork came from.** When `origin` is a
+  fork, the Pull Requests list shows the pull requests of the repository it
+  was forked from — as github.com's own Pull requests button does — with your
+  fork (and any other GitHub remote) one click away in the repository menu at
+  the top. Your choice is remembered for the workspace, and **New pull
+  request** and the Command Palette's pull request commands use it too —
+  even before the Pull Requests view has been opened.
+- **Worktrees, rebuilt: a row per worktree, as a stash's row.** Each
+  worktree wears VS Code's own worktree icon and two lines: its folder, and
+  under it, quieter, the branch it has checked out (after git's branch
+  symbol; *detached at 1a2b3c4* after a commit's) and the one state that
+  matters most, in words: *merge in progress*, *rebase stopped*,
+  *2 conflicts*, *folder missing*, *not a worktree*, *5 changed*,
+  *2 to push*, *1 to pull*, *diverged*, *3 unpublished* (a branch with no
+  upstream), *2 not on main* (a repository with no remote),
+  *upstream gone*, *locked*. The branch and the state read quieter than the
+  folder's name in every theme — Light Modern's too, whose own
+  "description" colour is its text colour. Something stopped halfway, or a
+  folder that is gone, is in the warning colour (in High Contrast, full ink
+  and heavier). Everything else — where the folder is, a lock's reason, how
+  many changes are staged, the main worktree, both sides of a divergence —
+  is in the row's tooltip, which names the folder once. The worktree this
+  window has open is its bold name, and comes first, then the main one, the
+  rest by name and the missing ones last; past eight worktrees a filter
+  appears. In a narrow sidebar the state is never cut: the branch shortens
+  first, a state that needs attention then says one word (*merging*,
+  *rebasing*, *missing*), and then the branch goes; a long name gives way
+  in its middle, keeping the end that tells it from its neighbours
+  (*wf_4b6…cc2-3*), so no two rows ever read alike.
+- **Open a worktree's row to see what it has — and only that.** Click it (or
+  press Enter or →) and it opens on a soft card: its uncommitted files,
+  grouped as Source Control groups them, under small-capital captions with
+  their counts (*CONFLICTS*, *STAGED CHANGES 2*, *CHANGES 3*), each opening its diff read
+  from that worktree, not this window's; its commits not pushed (not on its
+  upstream; with no upstream, not on any remote, as the push review counts
+  them; with no remote at all, not on the default branch); and what it has
+  to pull. A list with nothing in it isn't shown; with nothing at all, the
+  row says *Nothing to commit or push.* Each commit opens to the files it
+  changed, as in the push review.
+- **Pull and Push… for any worktree.** An open worktree shows **Pull** and
+  **Push…** under what they would move — only when there is something to
+  pull or push, never greyed out — and its menu has them too. **Pull** runs in that
+  worktree's own folder, with the questions every Pull asks (Stash & Retry,
+  Merge or Rebase); a stop is said naming the worktree, with **Open in New
+  Window**. **Push…** opens the push review for that worktree — its commits,
+  its files, "From the worktree …" — and pushes its branch. Where either
+  can't work (a detached HEAD, a merge in progress, no upstream, no remote,
+  nothing to push) it isn't offered.
+- **Every worktree action says what it does.** Hovering a row shows two
+  buttons at its end: **Open in New Window** and **More**. More — the
+  row's right-click menu too — lists what that worktree can do now: Open in
+  This Window, Open in New Window, Reveal in Finder, Open in Terminal, Copy
+  Path, Pull, Push…, Lock… (or Unlock), Remove Worktree… (or Forget
+  Worktree… when its folder is gone, or isn't a worktree any more). What it
+  can't do isn't listed: the main worktree has no Remove, the one this
+  window has open no Open. The whole list works from the keyboard (arrows,
+  Home/End, Enter, the context-menu key, Delete — on a Mac also
+  Cmd+Delete), and a screen reader hears an open worktree's files and
+  commits as that worktree's, and each row's tooltip as its name. Unlock
+  shows at once, and comes back if git refuses. A row busy with an action
+  says so ("Removing…") without fading its words — hovered too, and its
+  menu doesn't open until the action is done — and while a row is open,
+  a status landing for it (or for any other row) leaves its open commits
+  and the keyboard where they are. Nothing hovered or open is drawn with a
+  line — a soft fill, in every theme, High Contrast too.
+- **Stash & Remove.** Removing a worktree with uncommitted changes offers
+  **Stash & Remove** first: its changes go into a stash you can apply from
+  any worktree, then its folder is deleted. **Discard Changes and Remove** is
+  still there, second. When its branch is fully merged into the default
+  branch, the question also offers **Also delete the branch**, unchecked;
+  it is deleted only if it is still fully merged when you answer — a commit
+  made on it meanwhile (an agent at work in the worktree) keeps it, and the
+  report says why. Undo (Ctrl/Cmd+Alt+G Z) brings a deleted branch back.
+- **Prune missing worktrees.** When worktrees' folders are gone (or
+  aren't worktrees any more), a quiet **Prune 2 missing worktrees…** link
+  sits under the list, where those rows are — the words of the view's own
+  **Prune Missing Worktrees…** and of the question it asks; it asks first,
+  naming them, and says that a locked one is kept.
+- **New Worktree suggests where the folder goes**: beside your project,
+  named `<project>-<branch>` (`app-feature-login`), in the question itself,
+  ready to edit — a relative folder lands beside the project, `~` is home.
+  With the repository in a hidden folder inside the project (`project/.bare`,
+  its worktrees beside it) it suggests `project/feature-login`. It no longer
+  opens a system folder picker. A folder that is taken is asked for again
+  with why. The `gitstudio.worktrees.prefixWithProjectName` setting is no
+  longer used.
+- **The push review's commits open to their files.** Click a commit in the
+  review (or press Enter or →) to see the files that commit changed; click
+  one for what that commit did to it. The list of every file changed is
+  still below.
+- Worktrees reads only the rows you can see: a repository with dozens of
+  worktrees lists them all at once, and reads each one's changes as it
+  scrolls into view — and nothing while the view is collapsed.
 - **Select several commits.** In the Commit Graph and the Commits list,
   **Cmd/Ctrl+click** adds or removes a commit, **Shift+click** selects
   everything from the last one you clicked, and **Shift+Up/Down** extends the
@@ -73,8 +346,36 @@ All notable changes to **GitStudio** are documented here. This project adheres t
   from the keyboard; from there or from the star, the branch moves to or from
   Favorites at once, and stays there. (#32)
 - **GitStudio: Branches…** in the Command Palette opens the branch menu, as
-  the branch name in the Changes view and the status bar do — bind a key to it
-  to open the menu without the mouse.
+  the branch name in the Changes view and the status bar do — and so does
+  **Ctrl/Cmd+Alt+G G**, in the same chord as GitStudio's other keys.
+- **The branch menu finds the branch you meant.** Letters can be scattered,
+  as long as each follows the one before or starts a word: `rel21` finds
+  `release/2.1`, `fl` finds `feature/login`. An exact name or a prefix always
+  ranks above a scattered match. With a query, the highlight — what Enter
+  runs — is on the best match of all, and a branch wins a tie with an action:
+  `fe` + Enter opens `feature`'s actions instead of fetching, while `fetch`
+  still fetches. Every matched letter is marked, on the highlighted row too,
+  and a long name whose match is past the row's end is cut in the middle
+  instead (`feature/…/billing-address-val…`) — scattered letters too, the
+  name's start kept (`fval`: `feature/…validation-for…`) — the whole name in
+  its tooltip.
+  A query that matches no branch or tag offers to make it — *New Branch
+  'fix/login'…* — or to check it out as a revision — *Checkout Revision
+  'a1b2c3d'…* — each opening its dialog with what you typed. (#32)
+- **A branch's actions fit a sidebar.** Where there is no room beside the
+  branch menu, a branch's actions open in the menu itself, under a back row
+  naming the branch (**‹ feature**); the back row, Left and Escape return to
+  the list where you left it, and typing returns to it and searches. Where
+  there is room, they open beside the menu as before — every branch of one
+  menu the same way — and resizing the sidebar moves them between the two.
+  The same action stays highlighted through a resize or a refresh, also one
+  that adds or removes actions above it (an upstream pruned by a fetch). A
+  screen reader hears the back row as a button, *Back to the branches*, and
+  each group's heading in words: *Remote origin, 56 branches*. (#32)
+- **Remote branches are grouped by remote** in the branch menu — origin,
+  upstream, a fork's — each under its own heading with its count, its rows
+  named without the remote, and shown 40 at a time with **Show more**. A
+  group's heading stays pinned at the top while its rows scroll under it.
 - **Reset a branch to its remote.** A local branch that tracks a remote branch
   has **Reset to 'origin/feature'…** in its branch-menu actions. GitStudio
   fetches first, then says exactly what the reset would take away — the commits
@@ -103,8 +404,132 @@ All notable changes to **GitStudio** are documented here. This project adheres t
   says why instead of letting the rebase fail. The editor that opens for a
   `git rebase -i` run in a terminal does the same in git's own order, oldest
   at the top, so there a commit folds into the kept one above it. (#32)
+- **The Changes list from the keyboard.** The list is one tab stop now, and
+  the arrow keys walk it: **Up**/**Down** (and **Home**, **End**, **PageUp**,
+  **PageDown**) move through what is showing, **Right** and **Left** open and
+  close a group, a folder or a file's changes — or step into and out of one —
+  **Enter** opens a file's diff, **Space** ticks a file (or a single change)
+  in the checkbox view, **Shift+Up/Down** extends the selection and
+  **Ctrl/Cmd+A** selects every file. **Shift+F10** (or the menu key) opens
+  the menu of a file, a folder or a group — with everything its buttons do:
+  Stage, Unstage and Discard, Stage Folder, Stage All, Unstage All and
+  Discard All — and a right-click on a folder or a group opens the same
+  menu. **Up** and **Down** move through a menu, and choosing from it or
+  pressing **Escape** puts you back on the row. A screen reader hears a tree:
+  each row is its file and what happened to it ("README.md, Modified"),
+  whether it is ticked, and whether a group or folder is open — not every
+  button on the row read out together. **Tab** reaches the first row you can
+  see, also when nothing is staged. When a file you are on leaves the list
+  (staged — from its menu too — or discarded), the keyboard moves to the next
+  one. The Stashes group is part of the same tree: the arrows walk on from
+  your changes into it, **Right** opens a stash and steps into its files, and
+  **Delete** on a stash asks to drop it. The push review's files are
+  reachable with **Tab** (**Enter** opens one's diff), and **Tab** stays in
+  the dialog. A button reached with **Tab** shows its tip, as it does under
+  the pointer.
+- **GitStudio's settings in groups.** In the Settings editor they are no
+  longer one list sorted with fourteen AI settings first: *General*, *Changes
+  & Staging*, *Commit & Sync*, *Blame*, *Merge & Diff*, *AI* and *Advanced*,
+  each with the setting people reach for first at the top. Every setting keeps
+  its name, so what you have set keeps working.
+- **Get Started shows each step.** Every step of the walkthrough showed the
+  GitStudio logo; each now shows what it leads to — the Commit Graph, a commit
+  opened from a blamed line, the Changes view with a file's changes ticked,
+  Line History, the merge editor on a conflict, the AI settings — in your
+  theme, high contrast included. Staging or committing in the Changes view now
+  checks off "Stage changes & commit" (only the editor's Stage Hunk did).
+
+### Changed
+- **Whatever you picked is lit, never lined.** A selected thing is marked by
+  a tint of the theme's accent, with a soft glow on a tab, a pill or a
+  button, and no longer by a line. That covers the selected commit in the
+  graph and in the Commits list (the commit the keyboard is on is lit a shade
+  deeper), selected files in Changes and in a stash (a little stronger under
+  the pointer, and the row under the pointer no longer grows a coloured
+  rail), a question's highlighted choice, the rebase selection and the action
+  it is set to, the Compare panel's tabs, a pull request's tab, verdict and
+  merge method, and the pull request checked out here. Search matches in the
+  graph and the Commits list are washed a soft yellow; a result you select
+  stays selected, its selection fill touched with that yellow, and a
+  selected commit the search does not match no longer fades with the rest.
+  The branch you're on, open in its pill, the row whose actions are open
+  beside a wide branch menu, and the merge editor's pressed Synchronized
+  scrolling toggle are lit too. Before, many of these were marked by a bar
+  down an edge, an underline or an accent outline. The words on every tint
+  are at least 4.5:1, under the pointer too. High Contrast themes keep VS
+  Code's own whole ring around a selection (dashed on a selected file), and
+  the keyboard's focus ring is unchanged.
+- **The branch menu's highlighted row is lit, not outlined.** The row the
+  arrow keys or the pointer are on — an action, a branch, one of a branch's
+  actions, a Delete — is a soft tint of your theme's accent with its words
+  at full strength, the same under the pointer as from the keyboard, and
+  only one row is lit at a time. Under the pointer, an item used to turn
+  grey inside a blue outline with its words faded. A row's own menu (a
+  file's, a stash's) highlights its items the same way. High contrast
+  themes keep their border. A tooltip now shows only when it adds
+  something — a name that is cut short, or an explanation — never the words
+  already on the row (a file at the root no longer shows its own name), and
+  one too wide for a narrow sidebar wraps between its words.
+- **A branch's actions are in one order for every kind of ref** — the
+  branch you're on, any other, a remote branch, a tag: checkout and what
+  starts from it, then compare, merge and rebase, then push and the tracked
+  branch, then rename, copy and favorite, then reset and delete — with a
+  separator only between those groups. A branch whose upstream was deleted
+  from its remote starts with **Set Tracked Branch…**. The branch you're on
+  has **Tracked Branch…** too, and offers no pull when it tracks nothing, or
+  a branch deleted from its remote — in its own actions and at the top of
+  the menu alike; searching for Pull then says why.
+- **On a detached HEAD the branch menu offers no Pull or Push**, which had
+  no branch to act on; one line says so where they were — *Detached at
+  a1b2c3d — check out a branch to pull or push* — with the search box empty,
+  or when you search for Pull or Push, and is read out with the search box.
+- The branch menu's words: **Update (pull)** is **Pull**, as the Changes
+  view and the status bar call it (typing "update" still finds it), and
+  Rebase no longer wears the pull-request icon.
+- A branch row in the branch menu names its upstream by the remote alone
+  (**origin**) when it tracks the branch of the same name there, and in full
+  otherwise — or when that branch is gone from the remote, struck through;
+  ↑/↓ counts past 999 read **999+** (the tooltip has the number).
+  An empty favorite star shows only on the row under the pointer or the
+  highlight — a set one always — and every row's chevron is shown, saying it
+  has actions. On the highlighted row, the ↑/↓ counts take the selection's
+  colour, so they stay readable in Light themes.
+- **Pull requests speak the GitStudio desktop app's words.** The list, a pull
+  request's page and the new form use the desktop's words and icons for the
+  same things — **Checkout**, **Approve**, **Review**, **Merge**, **Mark
+  ready**, **Update branch**, **Close pull request**, **Copy link**, **More
+  actions**, **New pull request**, and the tabs Conversation, Commits, Checks
+  and Files. In the Command Palette, *Create Pull Request* is now **New Pull
+  Request**, *Check Out Pull Request* is **Checkout Pull Request**, and *Start
+  Review* is **Review Pull Request**.
 
 ### Fixed
+- **GitStudio reads in Cursor.** Cursor's own dark theme draws its focus
+  colour at 15% white, and GitStudio's accent was that colour: a selected
+  file was a 3% white wash, a drop target barely changed, and the band of
+  words over your changes let the rows show through. Where a theme's focus
+  colour is see-through, GitStudio's accent is now that theme's own button
+  colour (Cursor's light blue); every other theme looks as it did. The AI
+  settings' open form glows in their violet again.
+- **A dialog's main button always reads.** Its label took the theme's
+  button text and its fill the focus colour — near-black on dark grey in
+  Cursor, and under the 4.5:1 contrast bar in Dark+, Light+ and High
+  Contrast Dark. It is GitStudio's violet with white now, as Push and
+  Commit & Push are, and darkens under the pointer instead of washing out.
+- **Apply/Pop Unstaged says what git does.** Without its staging, git brings
+  a stash's changes back unstaged — all but a new file and a renamed file's
+  new name, which it adds back staged. The choice now says so when the
+  stash holds one; and when all a stash had staged is new files, nothing is
+  asked, because the answer would change nothing.
+- **Checkout Tag or Revision… no longer hands git an option.** A revision
+  typed as `-f` was read by git as its force flag and threw away every
+  uncommitted change. A revision starting with "-" is refused, in the dialog
+  and before git sees it. A tag or branch picked from its list is checked
+  out as exactly that ref, even when a tag and a branch share its name —
+  git took the branch.
+- A branch's actions closed by typing in the branch menu no longer open again
+  when the view refreshes, and a tag's actions stay on the tag's row when it
+  refreshes — also when a branch has the same name.
 - **Undo puts back what the operation changed — and only that.** Undo used to
   reset whichever branch you were on to the commit HEAD had been at. Undoing
   *Checkout feature* moved `feature` onto your previous branch's commit
@@ -301,15 +726,18 @@ All notable changes to **GitStudio** are documented here. This project adheres t
   They now find the stash you picked just before git runs; if it has left the
   list, they say so and change nothing. The Drop question names the stash by
   its message.
-- **A stash of new files opened as an empty document.** Clicking a stash made
-  with untracked files (the Stash dialog makes one whenever a new file is
-  ticked) left those files out, so a stash of only new files looked empty.
-  They are shown now, beside the edits.
+- **A stash of new files opened as an empty document.** A stash made with
+  untracked files (the Stash dialog makes one whenever a new file is ticked)
+  left those files out of its document, so a stash of only new files looked
+  empty. They are shown now, beside the edits.
 - **Apply and Pop keep what the stash had staged.** Its staged changes came
   back unstaged, and popping a file that was staged and then edited further
   lost the staged version for good. They come back staged now. When your own
   staged changes are in the way, or the staged part no longer applies, it asks
-  first whether to apply the stash unstaged.
+  first whether to apply the stash unstaged — and says a staged version is
+  lost only where one is. A change you had staged and then undone in the file
+  before stashing comes back unstaged too; git alone brought nothing of it
+  back.
 - **The Stash dialog listed a partly staged file twice**, and unticking one of
   its two rows still stashed it. Each file has one row now.
 - **Create Branch from a stash asks about changes in its way.** Over an
@@ -319,23 +747,26 @@ All notable changes to **GitStudio** are documented here. This project adheres t
   your stash. Now it asks first, Stash & Retry or Cancel, as Apply and Pop do,
   naming the branch it is in the way of, and a name a branch already has is
   said before anything runs.
-- **The Stashes view: Cancel on a Drop no longer freezes every row for six
-  seconds.** Only the row you pressed waits — its right-click menu too — and
-  only until its action is over.
-- **The Stashes view keeps your place.** Every file save redrew all the rows
-  and threw keyboard focus out of the list; now only rows that changed are
-  touched, and a stash popped or dropped from its buttons or its menu hands
-  the keyboard to the next one. Up, Down, Home and End move between stashes,
-  and Delete (on a Mac, the delete key or Cmd+Delete) asks to drop one. A
-  click previews a stash without taking the keyboard, and a double-click
-  opens its menu without opening the stash twice.
-- Apply and Pop in the Stashes view use the stash-apply and stash-pop icons,
-  and the empty view says "Stash", not "Shelve".
+- **Undo names a stash by its message.** "Pop stash@{0} — done." named
+  whichever stash was on top by the time you read it, in the toast and in
+  Undo History; it reads "Pop “my work” — done." now, and the Drop question
+  says how many files leave the list. Undo's own question says the same —
+  "Put the stash “my work” back where it was in the stash list", not git's
+  "On main: my work" and a stash@{n}.
+- **The Changes view keeps the keyboard where it was.** Opening a group or a
+  folder with Enter, or anything that redrew the list, dropped the keyboard
+  to the top of the view; the same row keeps it now. When the last stash
+  leaves, the row above the Stashes group takes the keyboard.
+- The Changes toolbar's title stays on one line in the tree view at sidebar
+  width, and its Stash buttons wear the stash icon the stashes do.
+- The branch menu's last **Show more** row says its number once: "Show 5
+  more", not "Show 5 more of 5".
 - **Removing a locked worktree works.** Remove asked twice and then failed
   with git's "cannot remove a locked working tree". It now asks once, quoting
   the lock's reason, and **Unlock and Remove** removes it.
 - **Removing a worktree says what goes with it.** The question names the
-  worktree by its branch, lists the uncommitted files that are deleted (five,
+  worktree by its folder, as the list does, and its branch in the body; it
+  lists the uncommitted files that are deleted (five,
   then how many more) and says the branch and its commits stay; the button
   reads **Discard Changes and Remove** when there are any. A worktree that
   changed before you answered — an agent still at work in it — is asked about
@@ -353,25 +784,37 @@ All notable changes to **GitStudio** are documented here. This project adheres t
   has one). For a locked one the question says that a folder on a drive that
   isn't connected is no longer a worktree when the drive comes back. It used
   to open a window onto the missing folder.
+- **A worktree folder whose `.git` is gone** — still listed by git, but no
+  longer a worktree — reads *Not a worktree*, and is never read, opened,
+  pulled, pushed or removed as one: git in that folder reads the repository
+  around it, which for a worktree nested in your project (as agents'
+  `.claude/worktrees/…` are) is your main worktree. Its only actions are
+  Reveal and **Forget Worktree…**, which clears git's record of that one
+  worktree and leaves the folder and its files alone, and **Prune** counts
+  it. Removing one used to fail with git's "validation failed". The
+  **GitStudio: Forget Worktree…** command offers only the worktrees there is
+  something to forget for, and never deletes a folder.
 - **New Worktree no longer leaves a stray branch behind when it fails**, so
   trying again with the same name works. Folders are named for the whole
-  branch (`feature/login` → `feature-login`), so `bugfix/login` beside it no
-  longer lands in the same folder; a folder that already exists is refused
+  branch (`feature/login` → `app-feature-login`), so `bugfix/login` beside it
+  no longer lands in the same folder; a folder that already exists is refused
   before anything runs, and so is one git still keeps for a worktree whose
   folder is gone (with where to forget it); a branch name that's taken is
   asked for again; and a branch another worktree has checked out goes
-  straight to a new branch from it, saying where it's checked out. The folder
-  picker names the folder it creates.
-- The *current* marker in Worktrees survives opening the repository through a
-  symlink, and clicking the current worktree no longer offers to reopen it.
-- **Lock Worktree…** asks why (optional); the reason shows in the row's tooltip
-  and in the Remove question.
+  straight to a new branch from it, saying where it's checked out.
+- *This window* in Worktrees survives opening the repository through a
+  symlink, and the worktree this window has open no longer offers to open
+  itself again.
+- **Lock Worktree…** asks why (optional); the reason shows in the row's
+  tooltip and in the Remove question.
 - **Prune Worktrees** says which worktrees it pruned, or that there was nothing
   to prune — it reported success either way.
-- Worktree and branch tooltips show paths and upstream names without stray
-  backslashes, and a detached worktree's row uses the commit icon its tooltip
-  does.
-- A worktree row's inline button is **Open in New Window**, and it opens the
+- Branch tooltips show upstream names without stray backslashes.
+- **The push review and Compare name every file as it is on disk.** A file
+  whose name had an accent (`été.txt`) or a tab was listed in git's quoted
+  form ("\303\251t\303\251.txt"), without its line counts, and opening it
+  showed nothing.
+- A worktree row's button is **Open in New Window**, and it opens the
   worktree straight away; **Open in This Window** is in the row's menu. The
   button was *Open Worktree* and asked which window first.
 - **Removing a worktree that is stopped in a merge, rebase, cherry-pick or
@@ -403,7 +846,7 @@ All notable changes to **GitStudio** are documented here. This project adheres t
   'current branch', and so does the question Merge or Rebase then asks,
   which says the result is on no branch rather than warning about a push.
 - The branch menu keeps its width while you type — the width its branches
-  need, also when they arrive after the menu opened or the sidebar is widened
+  need, also when they arrive after the menu opened or the sidebar is resized
   under it — and a new search starts at the top of the list with its first
   group heading in view.
 - A branch's name keeps its room in the branch menu: in a narrow sidebar the
@@ -429,23 +872,22 @@ All notable changes to **GitStudio** are documented here. This project adheres t
   Actions, whether its runs had failed or passed. They read the runs now, with
   any legacy statuses: a failure reads as failed, a pass as passed, "No
   checks" only when there are none. Every row shows it — drafts too, not just
-  the first eight — as its icon, a mark of its own in a colour of its own for
-  passed, failed and running, with the words in its tooltip; rows no longer
-  show the literal text `$(check)`, `$(x)` or `$(circle-filled)`.
-- **Create Pull Request: Draft creates a draft.** Every pull request was
+  the first eight — as a mark of its own in a colour of its own, with the word
+  beside it (Passed, Failed, Running); rows no longer show the literal text
+  `$(check)`, `$(x)` or `$(circle-filled)`.
+- **Creating a pull request: Draft creates a draft.** Every pull request was
   created ready for review, whichever you picked. A branch that lives in your
   fork is now sent to GitHub as `owner:branch` — as a bare name, GitHub looked
   for it in the target repository. The branch is pushed to the remote git
   pushes it to, under its own name: one started from `origin/main` tracks
-  `main`, and Create Pull Request pushed its commits into `main` — or, with a
+  `main`, and creating the pull request pushed its commits into `main` — or, with a
   push remote set to your fork, into the original repository's `main`, and
-  nothing reached the fork. It asks to push only when the branch isn't there
-  yet or has commits that aren't, and leaves what the branch tracks alone.
-  The title proposed is the branch's one commit subject, or with several
-  commits the branch name, as GitHub proposes it (it was the newest commit's
-  subject). The base branch question offers only branches the remote has
-  (`master` and `develop` were offered everywhere) and says which repository
-  the pull request opens on. "A pull request already exists" opens that pull
+  nothing reached the fork. It is pushed only when it isn't there yet or has
+  commits that aren't, and what the branch tracks is left alone. The title
+  proposed is the branch's one commit subject, or with several commits the
+  branch name, as GitHub proposes it (it was the newest commit's subject).
+  The base branches offered are the repository's own (`master` and `develop`
+  were offered everywhere). "A pull request already exists" opens that pull
   request, not the list.
 - **Renamed files in a pull request** diff against the file as it was, under
   its old name — the whole file showed as added — and the page says what each
@@ -469,25 +911,26 @@ All notable changes to **GitStudio** are documented here. This project adheres t
   threw and deleted nothing. A comment already posted to GitHub no longer
   offers it.
 - **Pending review comments are no longer thrown away.** Starting a review of
-  another pull request, or Cancel Review, asks first — submit them, discard
-  them, or keep reviewing — and a pull request whose files fail to load leaves
-  your queued comments alone. The question counts the comments that are
-  pending, and discarding them leaves the ones already posted.
-- **Check Out on a pull request you already have** brings `pr/<n>` up to
-  date. It failed while `pr/<n>` was checked out, and it silently threw away
-  any commits you had made on it; now a `pr/<n>` with commits the pull request
-  doesn't have is never moved without asking. On the pull request's own
-  branch already, it says so instead of moving you to a `pr/<n>` copy. The
-  progress notification ends before "Checked out" appears, and its Open
-  Description opens that pull request even after you have switched
-  repositories (it opened the same number in the repository active then).
+  another pull request leaves the one you were writing as it was — each pull
+  request keeps its own — and **Discard Pending Review** asks first, counting
+  the comments that are pending; discarding them leaves the ones already
+  posted. A pull request whose files fail to load leaves your queued comments
+  alone.
+- **Checkout on a pull request you already have** brings its branch up to
+  date. It failed while the branch was checked out, and it silently threw
+  away any commits you had made on it; now a branch with commits the pull
+  request doesn't have is never moved without asking. On the pull request's
+  own branch already, it says so. The progress notification ends before
+  "Checked out" appears, and its Open Pull Request opens that pull request
+  even after you have switched repositories (it opened the same number in the
+  repository active then).
 - **A pull request's page:** label chips wear their colours (the page's own
   security policy dropped them, and every label was grey); a merged pull
   request reads **Merged** in purple and one closed without merging reads
-  **Closed** in red (both read a purple "Closed"); after **Merge…** the page
+  **Closed** in red (both read a purple "Closed"); after **Merge** the page
   flips to Merged at once, and the row leaves the list, without a reload or a
   second Merge — and stays Merged when a Refresh was still loading as the
-  merge landed. Merge… offers only the methods the repository allows, and
+  merge landed. Merge offers only the methods the repository allows, and
   isn't offered on a draft. A same-repository branch reads without its owner,
   and a file's line counts no longer show a red "−0".
 - **The Pull Requests list no longer asks GitHub on every file save**, even
@@ -503,10 +946,10 @@ All notable changes to **GitStudio** are documented here. This project adheres t
   arrives after you have switched repositories is not shown over the other
   repository's list. Rows show when each pull request was last updated, the
   order they are in.
-- **No more silent 100-item limits.** Up to 1,000 open pull requests are
-  listed, not the first 100, and the list says when there are more; every
-  changed file is listed (GitHub lists up to 3,000), each one commentable in
-  a review. A page's "Changed files" count is the pull request's own, and a
+- **No more silent 100-item limits.** The Pull Requests list reaches every
+  pull request, a page at a time, and says how many there are; every changed
+  file is listed (GitHub lists up to 3,000), each one commentable in a
+  review. A page's "Changed files" count is the pull request's own, and a
   list that is partial, or failed to load, says so.
 - **github.com under another name.** Remotes using an SSH host alias
   (`git@github.com-work:…`, or any `~/.ssh/config` Host whose HostName is
@@ -542,6 +985,61 @@ All notable changes to **GitStudio** are documented here. This project adheres t
   "unrecognised plan entry", and the rebase editor showed part of each id in
   front of the commit's title. They run now, and a reworded commit gets its
   new message — also when the rebase is continued after a conflict.
+- **The operation banner reads right.** A stopped merge, rebase or
+  cherry-pick was drawn conflict-red whatever its state, so "Every conflict
+  is resolved." sat in an error box. It is amber while something is in the
+  way (files still conflicted, or a stop git can't continue from) and your
+  theme's accent once nothing is, with a pause or a tick for its icon. It no
+  longer says things twice — "Rebasing feature onto main" is the title and
+  "Commit 2 of 5: …" the line under it, without a "feature → onto → main"
+  line repeating it — and at a sidebar's width its buttons sit on two rows,
+  not three: the action it is waiting for on its own, the rest beside each
+  other by their first word ("Continue", "Skip", "Abort").
+- **Staging in a long list is instant.** Each Stage, Unstage or tick rebuilt
+  every row of the Changes list — thousands of elements on a big change, and
+  your place, hover and tooltip lost each time. Only the rows that changed are
+  rebuilt now.
+- **Saving a file no longer reloads the Commit Graph, blame and the
+  Timeline.** Every save and every window focus made the graph (in the
+  sidebar and the panel) re-read its history, blame forget every file and the
+  Timeline empty. They reload when a branch, a tag or HEAD moves, an operation
+  starts or stops, or you switch repositories; a save only updates the
+  graph's *Uncommitted changes* row when it appears or goes (and its files, if
+  it is open).
+- **A narrow header keeps the branch's name.** With several repositories at
+  sidebar width the branch was down to "fea…" while "Push 2" and "Pull 3" kept
+  their full width. The repository's name still gives way first; then the
+  Push and Pull pills keep their arrow and count.
+- **Changed Files counts files.** A partly staged file — in Staged and in
+  Unstaged — counted twice. The checkbox view's *Changes* tick shows as
+  partly ticked when a file is partly staged, instead of empty.
+- **Only where they can act.** *Open Changes* and *Stage with Ticks* were in
+  the title bar of every file in a repository, a clean one too; they show on a
+  file with changes now, as in Merge Studio. GitStudio's six items in the
+  editor's right-click menu are one **GitStudio** submenu, its staging items
+  (and the gutter's *Stage or Unstage the Change at This Line*) only on a file
+  with changes, and *Annotate with Git Blame* shows whether it is on.
+- **One symbol, one meaning.** *Review changes with AI* wore the same icon as
+  the checkbox view and *Stage with Ticks*, and the Compare panel's unified
+  diff the same as the Staged/Unstaged view. Each has its own now.
+- The Compare panel shows an arrow between the two refs instead of git's
+  `..` / `...` (the buttons beside them already say which comparison it is).
+- **The AI settings panel wears your theme.** It was drawn in the desktop
+  app's own dark palette under every dark theme, with no high-contrast look,
+  and a dark theme drew the providers' names black on near-black. It uses the
+  editor's colours now, high contrast included.
+- **Notifications speak with one voice.** The same failure read "Push failed:
+  …" from the status bar and "GitStudio: push failed — …" from the Changes
+  view; "no repository" was said four ways; the graph's failures read
+  "Cherry-pick failed: error: …" or "git branch failed: …", and a failed
+  branch action (rename, delete, publish, push, fetch, tags, remotes) showed
+  git's words alone. The status bar, the Changes view, the branch actions,
+  Undo, file and line history, rebase, blame, the graph and Compare now say
+  things one way: a notification starts "GitStudio:", a failure names what
+  failed and then git's reason — "GitStudio: Delete branch failed — …" — and
+  a copy is confirmed in the status bar, as the graph's always was (blame's
+  was a notification). The push review gives a commit's age as the rest of
+  GitStudio does ("3h", not "3h ago").
 
 ## [1.14.0] - 2026-09-25
 

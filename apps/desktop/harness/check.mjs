@@ -36,6 +36,10 @@ const CASES = [
   ["menu-closes-siblings", "issues~text:Author~text:Label"],
   ["palette-selects-first", "code~palette~type:gitstudio"],
   ["palette-selection-visible", "code~palette~type:gitstudio"],
+  // …and in light, and on the bare "GO TO" list the owner's screenshot showed.
+  ["palette-selection-visible", "code~palette~type:gitstudio", { theme: "light" }],
+  ["palette-selection-visible", "code~palette"],
+  ["palette-selection-visible", "code~palette", { theme: "light" }],
   ["palette-min-chars", "code~palette~type:gi"],
   ["facet-labels-humanized", "notifications~text:Reason"],
   ["facet-labels-aligned", "notifications~text:Reason"],
@@ -664,6 +668,8 @@ const CASES = [
   ["a-stash-page-holds-one-commit", "branches~click:.gh-seg-btn:nth-child(4)~click:.sec-row"],
   ["a-stash-page-applies-and-pops-with-the-stash-glyphs", "branches~click:.gh-seg-btn:nth-child(4)~click:.sec-row"],
   ["a-stash-rows-pop-wears-the-stash-glyph", "branches~click:.gh-seg-btn:nth-child(4)"],
+  ["every-stash-control-wears-the-stash-glyph", "branches~click:.gh-seg-btn:nth-child(4)"],
+  ["every-stash-control-wears-the-stash-glyph", "changes"],
   ["a-pop-that-keeps-its-stash-says-applied", "branches~click:.gh-seg-btn:nth-child(4)", { extra: "stashkept=1" }],
   ["a-pop-that-keeps-its-stash-leaves-its-page-open", "branches~click:.gh-seg-btn:nth-child(4)~click:.sec-row", { extra: "stashkept=1" }],
   ["the-palette-keeps-your-place-when-results-arrive", "branches~palette"],
@@ -818,6 +824,19 @@ const CASES = [
   ["the-tab-row-fits-a-narrow-window", "changes", { extra: "tabs=9&active=9", width: 880, theme: "light" }],
   ["opening-a-repository-that-has-a-tab-switches-to-it", "branches", { extra: "tabs=2" }],
   ["an-open-lands-in-the-new-tab-and-the-old-one-stays-put", "repositories", { extra: "tabs=1" }],
+  // The top bar of the tab in front is filled for THAT tab, whichever door
+  // brought it there — with every read answering after the next move.
+  ["a-tabs-top-bar-fills-however-it-came-to-the-front", "repositories", { extra: "tabs=1&slow=head:get:700,refs:list:700,sync:status:700", arg: "repositories" }],
+  ["a-tabs-top-bar-fills-however-it-came-to-the-front", "repositories", { extra: "tabs=1&slow=head:get:700,refs:list:700,sync:status:700", arg: "clone" }],
+  ["a-tabs-top-bar-fills-however-it-came-to-the-front", "dashboard", { extra: "tabs=1&slow=head:get:700,refs:list:700,sync:status:700", arg: "home" }],
+  ["a-tabs-top-bar-fills-however-it-came-to-the-front", "changes", { extra: "tabs=1&slow=head:get:700,refs:list:700,sync:status:700", arg: "open" }],
+  ["a-tabs-top-bar-fills-however-it-came-to-the-front", "changes", { extra: "tabs=1&slow=head:get:700,refs:list:700,sync:status:700", arg: "recent" }],
+  ["a-tabs-top-bar-fills-however-it-came-to-the-front", "branches~click:.gh-seg-btn:nth-child(5)", { extra: "tabs=1&slow=head:get:700,refs:list:700,sync:status:700", arg: "worktree" }],
+  ["a-tabs-top-bar-fills-however-it-came-to-the-front", "changes", { extra: "tabs=3&slow=head:get:700,refs:list:700,sync:status:700", arg: "switch" }],
+  ["a-tabs-top-bar-fills-however-it-came-to-the-front", "changes", { extra: "tabs=2&latetabs=1&slow=head:get:2000,refs:list:2000,sync:status:2000", arg: "launch" }],
+  // …and from a window with no tab at all: a fresh launch, or the last tab closed.
+  ["a-tabs-top-bar-fills-however-it-came-to-the-front", "repositories", { extra: "norepo=1&slow=head:get:700,refs:list:700,sync:status:700", arg: "repositories" }],
+  ["a-tabs-top-bar-fills-however-it-came-to-the-front", "dashboard", { extra: "norepo=1&slow=head:get:700,refs:list:700,sync:status:700", arg: "home" }],
   ["a-background-tabs-disk-event-leaves-the-front-tab-alone", "changes", { extra: "tabs=2" }],
   ["a-stopped-operation-stays-with-its-tab", "changes", { extra: "tabs=2&op=cherry-pick&conflicts=1" }],
   ["each-tab-has-its-own-terminal-dock", "changes", { extra: "tabs=2" }],
@@ -867,6 +886,87 @@ const CASES = [
   ["a-cloned-repository-says-so-in-its-new-tab", "code~palette~type:clone~text:Clone%20repository%E2%80%A6", { extra: "tabs=1" }],
   ["a-live-page-keeps-polling-after-a-tab-round-trip", "actions~open9101", { extra: "tabs=2", arg: "actions:runDetail", budget: 40000 }],
   ["a-live-page-keeps-polling-after-a-tab-round-trip", "actions~open9101~click:.gh-job-log", { extra: "tabs=2", arg: "actions:jobLogChunk|windows", budget: 40000 }],
+  // The owner's rule, swept: nothing selected is marked with a line (a bar, a
+  // rule, an underline, an accent outline, a gradient stripe, a child bar) —
+  // only a tinted fill and a glow — and every word on that tint reads (AA).
+  // `arg` is the surface each scene exists to reach, so a scene that stops
+  // reaching it fails rather than passing over nothing (the rail's own
+  // .nav-item.active used to satisfy "something is selected" everywhere).
+  // Every scene runs in BOTH themes: a tint that clears AA in one does not in
+  // the other.
+  ...[
+    ["dashboard", ".nav-item.active"],
+    ["repositories", ".gh-seg-btn.active"],
+    ["repositories~click:.gh-seg-btn:nth-child(2)", ".gh-seg-btn.active"],
+    ["branches", ".gh-seg-btn.active"],
+    ["branches~text:Worktrees", ".ab-pill.current"],
+    ["changes", ".repo-tab.is-active", "tabs=3"],
+    ["changes~modclick:.dc-file", ".dc-file.is-selected"],
+    ["changes~click:.dock-chevron", ".term-tab.active"],
+    ["changes~click:.dock-chevron", ".term-side-row.active"],
+    ["changes~text:Sign%20off", ".dc-toggle.is-on"],
+    ["code", ".nav-item.active"],
+    ["code~palette", ".cmdk-row.is-selected"],
+    ["code~palette~type:gitstudio", ".cmdk-row.is-selected"],
+    ["code~palette~type:clone~text:Clone%20repository%E2%80%A6", ".gh-seg-btn.active"],
+    ["code~bell", ".gh-seg-btn.active"],
+    ["code~click:.topbar-branch", ".dropdown-item.is-current"],
+    ["graph~click:.chip%5Bdata-ref%5D", ".row-landed"],
+    ["compare", ".cmp-seg-btn.active"],
+    ["compare~text:Changed%20files", ".cmp-mode-btn.active"],
+    ["rebase", ".rb-row.is-selected", "rbmany=1"],
+    ["issues", ".gh-seg-btn.active"],
+    ["issues~text:Author", ".gh-seg-btn.active"],
+    ["issues~text:Author~text:@mira-holt", ".gh-facet-btn.is-active"],
+    ["issues~open31", ".gh-reaction.is-mine"],
+    ["prs", ".gh-seg-btn.active"],
+    ["prs~open106", ".gh-subtab.active"],
+    ["prs~open106~text:Files", ".file-row.active"],
+    ["prs~open106~text:Approve", ".review-verdict.is-selected"],
+    ["prs~open106~text:Commits~text:issues%3A%20full-page%20detail", ".cmt-file.is-current"],
+    ["mywork", ".gh-seg-btn.active"],
+    ["notifications", ".gh-seg-btn.active"],
+    ["explore", ".explore-tab.active"],
+    ["explore~type:git~key:Enter", ".explore-tab.active"],
+    ["explore~type:git~key:Enter~text:GitStudioHQ/gitstudio~text:Go%20to%20file", ".gotofile-row.is-sel"],
+    ["actions", ".gh-seg-btn.active"],
+    ["actions~open9101~click:.gh-job-log", ".joblog-job.is-current"],
+    ["releases", ".gh-seg-btn.active"],
+    ["projects~click:.gh-card.clickable", ".md-tab.is-active"],
+    ["orgs", ".gh-subtab.active"],
+    ["gists~click:.sec-row:nth-of-type(2)", ".gh-subtab.active"],
+    ["settings", ".settings-seg-btn.active"],
+    ["assistant~click:.topbar-assistant", ".topbar-assistant.is-current"],
+  ].flatMap(([scene, arg, extra]) => [
+    ["no-selection-is-drawn-as-a-line", scene, { arg, extra }],
+    ["no-selection-is-drawn-as-a-line", scene, { arg, extra, theme: "light" }],
+  ]),
+  // The shared views (packages/webview-ui, in shadow roots the light-DOM
+  // sweep cannot see): the Commits view's selected commit (it wore a 2px
+  // accent bar down its left edge) and the branch popover's active preset
+  // (an accent outline), both lit now, with every word on them read at
+  // rest and under the pointer.
+  ...[
+    ["graph~click:.row%20.subject", ".row.selected"],
+    ["graph~click:.gh-branches", ".gh-preset.active"],
+  ].flatMap(([scene, arg]) => [
+    ["no-selection-is-drawn-as-a-line-in-shared-views", scene, { arg }],
+    ["no-selection-is-drawn-as-a-line-in-shared-views", scene, { arg, theme: "light" }],
+  ]),
+  // The line guard sees every shape a line can take (and none that is not).
+  ["the-line-guard-sees-every-shape", "dashboard"],
+  ["the-line-guard-sees-every-shape", "dashboard", { theme: "light" }],
+  // A segmented control's selected pill keeps its shape without a line — in
+  // light it had lost it (1.03:1 off its neighbour).
+  ...[
+    ["repositories", ".gh-seg-btn.active"],
+    ["settings", ".settings-seg-btn.active"],
+    ["compare", ".cmp-seg-btn.active"],
+    ["explore~type:git~key:Enter", ".explore-tab.active"],
+  ].flatMap(([scene, arg]) => [
+    ["the-selected-segment-reads-as-a-pill", scene, { arg }],
+    ["the-selected-segment-reads-as-a-pill", scene, { arg, theme: "light" }],
+  ]),
 ];
 
 function run(scene, checkId, opts = {}) {
@@ -888,6 +988,10 @@ function run(scene, checkId, opts = {}) {
       headlessChromeArgs([
         "--disable-gpu",
         "--hide-scrollbars",
+        // The page is file://, and a file:// page cannot read its own
+        // stylesheet's rules without this: the selection sweeps rewrite its
+        // :hover rules to measure a lit thing under the pointer.
+        "--allow-file-access-from-files",
         profile.flag,
         `--window-size=${width},${height}`,
         // A case that has to watch a poller across a tab round trip needs

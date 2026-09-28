@@ -1,4 +1,7 @@
 import * as vscode from "vscode";
+import { failed, NO_REPOSITORY, notifyCopied } from "../ui/notify";
+import { relativeTime } from "../util/relativeTime";
+import { markWalkthrough } from "../ui/walkthroughProgress";
 import type { GitRef } from "@gitstudio/git-service/index";
 import { pushUnseenMessage, type PullResult } from "@gitstudio/git-service/SyncOps";
 import { askPullMode, settlePullDetached, settlePullStop, settlePushUnseen } from "../git/pullMode";
@@ -9,7 +12,7 @@ import { headBranchName } from "@gitstudio/git-service/RefProvider";
 import { listChangeBlocks, setBlockStaged } from "@gitstudio/git-service/blockStaging";
 import { isWorkingTreeFileOf } from "../util/repoScope";
 import { slowStateChanged, type SlowState } from "./slowState";
-import { branchActionWords, branchesPayload, withFavorites, type BranchesPayload } from "./branchMenuData";
+import { branchActionWords, branchesPayload, pickedRefName, withFavorites, type BranchesPayload } from "./branchMenuData";
 import type { RepoManager, RepoEntry } from "../git/repoManager";
 import { repoName as repoNameOf, switchRepository, workspacePathOf } from "../git/repoPicker";
 import { pruneOnFetch } from "../git/fetchOptions";
@@ -43,6 +46,10 @@ import {
 // the ".css": "text" loader). Injected into the webview <style> so this surface
 // consumes the SAME token system as every bundled webview — one source, no drift.
 import tokensCss from "../../../../packages/webview-ui/src/styles/tokens.css";
+// The push review's commit and file rows — the same ones the Worktrees view
+// draws (webview-ui/changeRows): their stylesheet inlined here, their script
+// loaded as dist/webview/change-rows.js (window.GsChangeRows).
+import changeRowsCss from "../../../../packages/webview-ui/src/changeRows/changeRows.css";
 import {
   openChangeDiff,
   relativePath,
@@ -55,10 +62,24 @@ import {
   collectCompareFiles,
   type CompareFile,
 } from "../compare/refCompare";
-import { toRevisionUri } from "../history/revisionContentProvider";
+import { commitChangeSides, openSidesDiff, toRevisionUri } from "../history/revisionContentProvider";
 import { operationBanner, type OperationBannerData } from "./operationBanner";
 import { stoppedByThisCommand, type DetectedOperation } from "../git/pausedForUser";
 import { detectOperation, notifyPaused } from "../git/pauseNotice";
+import { isStashSha, stashTitle } from "@gitstudio/git-service/StashProvider";
+import { stashRows, type StashRow } from "./stashRows";
+import {
+  applyStash,
+  branchFromStash,
+  copyStashFiles,
+  dropStash,
+  moveStashFiles,
+  openStashFile,
+  popStash,
+  showStash,
+  stashFileSides,
+  type StashOutcome,
+} from "../views/stashesView";
 
 // The unified Commit window: ONE WebviewView ("Commit", viewId gitstudio.commit)
 // that renders BOTH the commit message box AND the working-tree changes —
@@ -140,6 +161,12 @@ interface StatePayload {
    * review and a refused push use (detachedPushReason). The Push button's tip.
    */
   detachedReason?: string;
+  /**
+   * The stash list, newest first — the Stashes group. Absent when not read
+   * yet for this repository (the page keeps what it shows); empty when there
+   * are none (no group).
+   */
+  stashes?: StashRow[];
 }
 
 interface FromWebview {
@@ -179,18 +206,33 @@ interface FromWebview {
     | "discardLocalCommits"
     | "newBranchFromPush"
     | "openPushFileDiff"
+    | "pushCommitFiles"
+    | "openPushCommitFile"
     | "openFolder"
     | "openGraph"
     | "resolveConflicts"
     | "operation"
     | "switchRepo"
+    | "stashAct"
+    | "stashFiles"
+    | "stashOpenFile"
+    | "stashOpenAll"
+    | "stashReadFiles"
     | "dialogResult";
+  /**
+   * A full sha: the stash (stashAct, stashFiles, stashOpenFile, stashOpenAll,
+   * stashReadFiles), or the push review's commit (pushCommitFiles,
+   * openPushCommitFile).
+   */
+  sha?: string;
   /** operation: which verb the banner's button asked for. */
   verb?: "continue" | "skip" | "abort";
   /** Correlation id for a `dialogResult` reply (see DialogHost below). */
   dialogId?: string;
   /** The dialog's answer: text, a choice id, checked ids, or "ok". */
   dialogValue?: string | string[];
+  /** A pick's or a confirm's checked options ("Also delete the branch"). */
+  dialogOptions?: string[];
   path?: string;
   /** Original path for a renamed file (push-modal file diff). */
   oldPath?: string;
@@ -213,7 +255,8 @@ interface FromWebview {
   author?: string;
   push?: boolean;
   /** Branch-menu sub-action: new | checkoutRef | pull | pullRebase | push |
-   *  fetch | pullFf | copyName | favorite. (Checkouts go via branchRefCommand.) */
+   *  fetch | pullFf | copyName | favorite. (Checkouts go via branchRefCommand.)
+   *  stashAct: apply | pop | drop | branch. stashFiles: copy | move. */
   action?: string;
   /** The ref a branch action targets (branch name or "remote/branch"). */
   ref?: string;
@@ -221,6 +264,10 @@ interface FromWebview {
   command?: string;
   /** The kind of ref the submenu command targets: "head" (local) | "remote" | "tag". */
   refType?: "head" | "remote" | "tag";
+  /** openPushCommitFile: the commit's first parent (absent for a root commit). */
+  parent?: string;
+  /** openPushCommitFile: git's letter for what the commit did to the file. */
+  status?: string;
 }
 
 /**
@@ -368,6 +415,12 @@ export class CommitViewProvider
   private lastOperation: OperationBannerData | undefined;
   /** The conflicted paths last pushed, and for which repository — a row click routes on them. */
   private lastMergePaths: { root: string; paths: Set<string> } | undefined;
+  /**
+   * The stash list last read, for which repository, carried by the instant
+   * first post as the branch list is. Cleared by a stash action, so the post
+   * right after it never shows the list from before it.
+   */
+  private lastStashes: { root: string; rows: StashRow[]; sig: string; stale?: true } | undefined;
   /** Bumped by invalidateRefs so an in-flight listRefs cannot re-cache stale refs. */
   private refsEpoch = 0;
 
@@ -379,7 +432,7 @@ export class CommitViewProvider
    * the star toggles; branch operations call {@link invalidateRefs} so a
    * checkout / new / delete still reflects immediately.
    */
-  private refsCache: { root: string; at: number; refs: GitRef[] } | undefined;
+  private refsCache: { root: string; at: number; refs: GitRef[]; remotes: string[] } | undefined;
   private static readonly REFS_TTL_MS = 1500;
 
   constructor(
@@ -639,7 +692,11 @@ export class CommitViewProvider
     return answered;
   }
 
-  private resolveDialog(id: string | undefined, value: string | string[] | undefined): void {
+  private resolveDialog(
+    id: string | undefined,
+    value: string | string[] | undefined,
+    options?: unknown,
+  ): void {
     if (!id) {
       return;
     }
@@ -648,7 +705,8 @@ export class CommitViewProvider
       return; // already settled (a dismissal that raced a reload)
     }
     this.dialogWaiters.delete(id);
-    resolve(value === undefined ? undefined : { value });
+    const checked = Array.isArray(options) ? options.filter((o): o is string => typeof o === "string") : undefined;
+    resolve(value === undefined ? undefined : checked ? { value, options: checked } : { value });
   }
 
   /** Settle every pending dialog as dismissed (view reloaded or disposed). */
@@ -686,6 +744,11 @@ export class CommitViewProvider
     void this.pushState();
   }
 
+  /** A stash was made, applied or dropped elsewhere (the palette): re-read the Stashes group. */
+  stashesChanged(): void {
+    void this.refreshStashes();
+  }
+
   /**
    * Reveal the Changes view and open its branch menu — the branch surface this
    * extension already has, reached from the status bar.
@@ -718,7 +781,7 @@ export class CommitViewProvider
         await this.pushState(!!msg.amend);
         return;
       case "dialogResult":
-        this.resolveDialog(msg.dialogId, msg.dialogValue);
+        this.resolveDialog(msg.dialogId, msg.dialogValue, msg.dialogOptions);
         return;
       case "branchAction":
         await this.handleBranchAction(msg);
@@ -727,7 +790,15 @@ export class CommitViewProvider
         await this.handleBranchRefCommand(msg);
         return;
       case "requestPushPreview":
+        // The view's own Push: this window's repository.
+        this.setPushTarget(undefined);
         await this.sendPushPreview();
+        return;
+      case "pushCommitFiles":
+        await this.sendPushCommitFiles(msg.sha ?? "");
+        return;
+      case "openPushCommitFile":
+        await this.openPushCommitFile(msg);
         return;
       case "confirmPush":
         await this.confirmPush(!!msg.force);
@@ -751,6 +822,23 @@ export class CommitViewProvider
         // The header's repository control — the same picker as the palette's
         // Switch Repository…, answered in this view's own dialog.
         await switchRepository(this.repos);
+        return;
+      case "stashAct":
+        await this.doStashAct(msg.sha ?? "", msg.action ?? "");
+        return;
+      case "stashFiles":
+        await this.doStashFiles(msg.sha ?? "", msg.action ?? "", msg.paths ?? []);
+        return;
+      case "stashOpenFile":
+        if (!(await openStashFile(this.repos, msg.sha ?? "", msg.path ?? "", !!msg.staged))) {
+          await this.refreshStashes();
+        }
+        return;
+      case "stashOpenAll":
+        await this.openWholeStash(msg.sha ?? "");
+        return;
+      case "stashReadFiles":
+        await this.readStashFiles(msg.sha ?? "");
         return;
       case "resolveConflicts": {
         const entry = this.repos.getActive();
@@ -910,6 +998,141 @@ export class CommitViewProvider
     }
   }
 
+  // ── The Stashes group ──────────────────────────────────────────────────────
+
+  /**
+   * Every stash, file by file (StashProvider.files, read once per stash),
+   * newest first. Empty on a read git refuses: the group then says nothing
+   * rather than something wrong.
+   */
+  private async collectStashes(entry: RepoEntry): Promise<StashRow[]> {
+    let list;
+    try {
+      list = await entry.ctx.stashes.list();
+    } catch {
+      return [];
+    }
+    const files = await Promise.all(list.map((e) => entry.ctx.stashes.files(e.sha).catch(() => undefined)));
+    return stashRows(list, files);
+  }
+
+  /**
+   * A stash's files, for the page that opened one the list carried as a
+   * count (stashRows). StashProvider keeps what it read, so this is the read
+   * the list already made. `files: null` when there is nothing to read — not
+   * a stash's sha, or git could not read it — and the page says so.
+   */
+  private async readStashFiles(sha: string): Promise<void> {
+    const entry = this.repos.getActive();
+    const files =
+      entry && isStashSha(sha) ? await entry.ctx.stashes.files(sha).catch(() => undefined) : undefined;
+    void this.view?.webview.postMessage({ type: "stashFilesRead", sha, files: files ?? null });
+  }
+
+  /**
+   * The list carried by the next instant post may be from before a stash
+   * action: it carries none then (the page keeps what it shows, with its own
+   * patches), and the read after it answers.
+   */
+  private markStashesStale(): void {
+    if (this.lastStashes) {
+      this.lastStashes.stale = true;
+    }
+  }
+
+  /** Re-read the list and repaint, after a stash action or a stash that left. */
+  private async refreshStashes(): Promise<void> {
+    this.markStashesStale();
+    await this.refreshFromDisk();
+  }
+
+  /**
+   * A stash row's Apply / Pop / Drop… / Create Branch…. The page moved the
+   * row at the click; "stashPending" says the question was answered (Drop,
+   * Create Branch), and "stashDone" what became of it, so the page keeps the
+   * row gone or puts it back.
+   */
+  private async doStashAct(sha: string, action: string): Promise<void> {
+    const refresh = (): void => void this.refreshStashes();
+    const hooks = {
+      onConfirmed: () => void this.view?.webview.postMessage({ type: "stashPending", sha, action }),
+    };
+    let outcome: StashOutcome = { kind: "kept" };
+    try {
+      switch (action) {
+        case "apply":
+          outcome = await applyStash(this.repos, sha, refresh);
+          break;
+        case "pop":
+          outcome = await popStash(this.repos, sha, refresh);
+          break;
+        case "drop":
+          outcome = await dropStash(this.repos, sha, refresh, hooks);
+          break;
+        case "branch":
+          outcome = await branchFromStash(this.repos, sha, refresh, hooks);
+          if (outcome.kind === "done") this.invalidateRefs();
+          break;
+      }
+    } finally {
+      this.markStashesStale();
+      void this.view?.webview.postMessage({ type: "stashDone", sha, action, outcome });
+    }
+  }
+
+  /** Copy to Changes / Move to Changes for some of a stash's files. */
+  private async doStashFiles(sha: string, action: string, paths: string[]): Promise<void> {
+    const refresh = (): void => void this.refreshStashes();
+    const wanted = paths.filter((p) => p.length > 0);
+    let outcome: StashOutcome = { kind: "kept" };
+    try {
+      if (wanted.length > 0 && (action === "copy" || action === "move")) {
+        outcome =
+          action === "move"
+            ? await moveStashFiles(this.repos, sha, wanted, refresh)
+            : await copyStashFiles(this.repos, sha, wanted, refresh);
+      }
+    } finally {
+      this.markStashesStale();
+      void this.view?.webview.postMessage({ type: "stashDone", sha, action, paths: wanted, outcome });
+    }
+  }
+
+  /**
+   * Open All Changes: every file of the stash in one multi-file diff where
+   * VS Code has one (`vscode.changes`), else the stash as one patch. Binary
+   * files have no text to compare, so they are left out of the multi-diff.
+   */
+  private async openWholeStash(sha: string): Promise<void> {
+    const entry = this.repos.getActive();
+    if (!entry || !sha) {
+      return;
+    }
+    const stash = (await entry.ctx.stashes.list()).find((e) => e.sha === sha);
+    const files = stash ? await entry.ctx.stashes.files(sha) : undefined;
+    if (!stash || !files) {
+      void vscode.window.showInformationMessage("GitStudio: That stash is no longer in the list.");
+      await this.refreshStashes();
+      return;
+    }
+    const commands = await vscode.commands.getCommands(true);
+    if (!commands.includes("vscode.changes")) {
+      await showStash(this.repos, sha);
+      return;
+    }
+    const resources = files
+      .filter((f) => !f.binary)
+      .map((f) => {
+        const { left, right } = stashFileSides(stash, f, f.onlyStaged === true);
+        return [
+          vscode.Uri.joinPath(vscode.Uri.file(entry.root), f.path),
+          toRevisionUri(entry.root, left.rev, f.path, left.path),
+          toRevisionUri(entry.root, right.rev, f.path, right.path),
+        ] as const;
+      });
+    await vscode.commands.executeCommand("vscode.changes", `Stash “${stashTitle(stash.message).text}”`, resources);
+  }
+
   /**
    * Stage `paths`, holding back the unmerged files that still carry conflict
    * markers.
@@ -1004,6 +1227,9 @@ export class CommitViewProvider
       await entry.repo?.status?.();
     } catch {
       // status() is best-effort; the firehose still reconciles eventually.
+    }
+    if (failure === undefined && what?.verb === "stage") {
+      markWalkthrough("staged");
     }
     this.onCommitted();
     await this.pushState();
@@ -1466,9 +1692,7 @@ export class CommitViewProvider
   private async doCommit(msg: FromWebview): Promise<void> {
     const entry = this.repos.getActive();
     if (!entry) {
-      void vscode.window.showInformationMessage(
-        "GitStudio: no Git repository is active.",
-      );
+      void vscode.window.showInformationMessage(NO_REPOSITORY);
       return;
     }
     const message = (msg.message ?? "").trim();
@@ -1547,9 +1771,7 @@ export class CommitViewProvider
           stderr ||
           result.stdout.trim() ||
           "git refused the commit without saying why. If this repository has a pre-commit hook, check its output.";
-        void vscode.window.showErrorMessage(
-          `GitStudio: commit failed — ${detail}`,
-        );
+        void vscode.window.showErrorMessage(failed("Commit", detail));
         void this.view?.webview.postMessage({
           type: "commitDone",
           ok: false,
@@ -1559,6 +1781,7 @@ export class CommitViewProvider
       }
 
       void vscode.window.setStatusBarMessage("$(check) Committed", 3000);
+      markWalkthrough("committed");
 
       // Clear the box and refresh the views. The commit spinner clears on
       // commitDone; for a Commit & Push the modal then opens for the push step.
@@ -1571,6 +1794,7 @@ export class CommitViewProvider
       // other push route uses, so the user confirms exactly what's about to be
       // pushed (and can still undo the commit) before it leaves their machine.
       if (msg.push) {
+        this.setPushTarget(undefined);
         await this.sendPushPreview();
       }
     } finally {
@@ -1652,8 +1876,8 @@ export class CommitViewProvider
 
   /** Local branches (with favorites), remotes, recents, and tags for the branch menu. */
   private async collectBranches(entry: RepoEntry): Promise<BranchesPayload> {
-    const refs = await this.listRefsCached(entry);
-    return branchesPayload(refs, this.favorites(entry), this.memento.get<string[]>(this.recentKey(entry), []));
+    const { refs, remotes } = await this.listRefsCached(entry);
+    return branchesPayload(refs, this.favorites(entry), this.memento.get<string[]>(this.recentKey(entry), []), remotes);
   }
 
   /**
@@ -1661,9 +1885,11 @@ export class CommitViewProvider
    * state push. Serves cached refs within REFS_TTL_MS so a staging burst (or the
    * onDidChange firehose) doesn't re-list every branch each tick; branch
    * operations call {@link invalidateRefs} so real ref changes still show at
-   * once. On error, falls back to the last-known refs for this repo.
+   * once. On error, falls back to the last-known refs for this repo. The
+   * remotes' names ride along (the menu groups remote branches by remote),
+   * read in parallel and cached the same.
    */
-  private async listRefsCached(entry: RepoEntry): Promise<GitRef[]> {
+  private async listRefsCached(entry: RepoEntry): Promise<{ refs: GitRef[]; remotes: string[] }> {
     const now = Date.now();
     const cached = this.refsCache;
     if (
@@ -1671,7 +1897,7 @@ export class CommitViewProvider
       cached.root === entry.root &&
       now - cached.at < CommitViewProvider.REFS_TTL_MS
     ) {
-      return cached.refs;
+      return cached;
     }
     // Which invalidation era this read belongs to. A branch op calls
     // invalidateRefs() and then pushes state — but a listRefs() that was ALREADY
@@ -1681,16 +1907,16 @@ export class CommitViewProvider
     // its old state for over a second. The firehose makes a push routinely
     // in-flight across a branch action, so this is not a narrow window.
     const era = this.refsEpoch;
-    let refs: GitRef[];
-    try {
-      refs = await entry.ctx.refs.listRefs();
-    } catch {
-      refs = cached && cached.root === entry.root ? cached.refs : [];
-    }
+    const known = cached && cached.root === entry.root ? cached : undefined;
+    const [refs, remotes] = await Promise.all([
+      entry.ctx.refs.listRefs().catch(() => known?.refs ?? []),
+      entry.ctx.remotes.names().catch(() => known?.remotes ?? []),
+    ]);
+    const read = { root: entry.root, at: now, refs, remotes };
     if (era === this.refsEpoch) {
-      this.refsCache = { root: entry.root, at: now, refs };
+      this.refsCache = read;
     }
-    return refs;
+    return read;
   }
 
   /** Drop the cached ref list so the next push re-lists (post branch op). */
@@ -1717,7 +1943,7 @@ export class CommitViewProvider
     // Copy is clipboard-only — no git op, no state refresh.
     if (msg.action === "copyName") {
       await vscode.env.clipboard.writeText(ref);
-      vscode.window.setStatusBarMessage(`Copied “${ref}”`, 2000);
+      notifyCopied(`“${ref}”`);
       return;
     }
     // `diverged` is how SyncOps.pull answers "both sides moved and nobody said
@@ -1763,9 +1989,31 @@ export class CommitViewProvider
         case "checkoutRef": {
           const r = (msg.ref ?? "").trim();
           if (!r) return;
+          // git would read it as one of its own options: "-f" after
+          // --detach discards every uncommitted change.
+          if (r.startsWith("-")) {
+            result = { ok: false, stderr: `'${r}' is not a revision: it starts with '-'.` };
+            break;
+          }
+          // Picked from the dialog's list — a branch, a remote branch, a tag —
+          // it is checked out as that ref, by its full name: the short name
+          // can be another ref's too by now (a tag made with a branch's name),
+          // and git would take the branch. Typed, it goes as typed: a
+          // revision git reads for itself (a sha, origin/main~3).
+          let target = r;
+          const picked = msg.refType;
+          if (picked === "head" || picked === "remote" || picked === "tag") {
+            const full = pickedRefName(await entry.ctx.refs.listRefs(), r, picked);
+            if (!full) {
+              const word = picked === "head" ? "branch" : picked === "remote" ? "remote branch" : "tag";
+              result = { ok: false, stderr: `there is no ${word} '${r}' any more.` };
+              break;
+            }
+            target = full;
+          }
           // Through the shared door: uncommitted work in the checkout's way is
           // said, with Stash & Retry, rather than as git's refusal in red.
-          const applied = await applyOrAsk(entry.ctx, checkoutOp(["checkout", "--detach", r]));
+          const applied = await applyOrAsk(entry.ctx, checkoutOp(["checkout", "--detach", target]));
           if (applied.cancelled) {
             cancelled = true;
             break;
@@ -1983,7 +2231,7 @@ export class CommitViewProvider
     needsForce: boolean;
     additions: number;
     deletions: number;
-    commits: Array<{ sha: string; subject: string; author: string; date: number }>;
+    commits: Array<{ sha: string; parents: string[]; subject: string; author: string; date: number; rel: string }>;
     files: CompareFile[];
   } | null> {
     const head = await entry.ctx.refs.getHead();
@@ -2083,17 +2331,63 @@ export class CommitViewProvider
       deletions,
       commits: commitRecords.map((c) => ({
         sha: c.sha,
+        // The first is what the commit's own files are diffed against when
+        // its row opens (the shared change rows).
+        parents: c.parents,
         subject: c.subject || "(no message)",
         author: c.author,
         date: c.authorDate,
+        // The age as every other GitStudio list says it ("3h", "2d"): the
+        // review had its own formatter and said "3h ago" beside a rail
+        // saying "3h" for the same commit.
+        rel: relativeTime(c.authorDate),
       })),
       files,
     };
   }
 
+  /**
+   * The worktree the open push review is for, when it is not this window's
+   * repository (the Worktrees view's Push…): every action the review takes —
+   * Push, Undo commits…, New branch…, a file's diff — runs in THAT folder.
+   * Undefined: the active repository.
+   */
+  private pushTarget: { entry: RepoEntry; name: string; shownPath: string; release(): void } | undefined;
+
+  /**
+   * The review now acts on `t`. The one it acted on before is NOT disposed
+   * here: disposing a context kills its running git, and a push from the
+   * previous review may still be running when another review opens. An idle
+   * context holds nothing but itself; the last one is disposed with the view.
+   */
+  private setPushTarget(t: CommitViewProvider["pushTarget"]): void {
+    this.pushTarget = t;
+  }
+
+  /** The repository the push review acts on. */
+  private reviewEntry(): RepoEntry | undefined {
+    return this.pushTarget?.entry ?? this.repos.getActive();
+  }
+
+  /**
+   * Open the push review for a worktree — the Worktrees view's Push… — in
+   * this view, where every push is reviewed. Its commits and files are that
+   * worktree's, and the review says whose they are. Without a target: this
+   * window's repository, as the view's own Push.
+   */
+  async openPushReview(target?: { entry: RepoEntry; name: string; shownPath: string; release(): void }): Promise<void> {
+    await vscode.commands.executeCommand("gitstudio.commit.focus");
+    for (let i = 0; i < 20 && !this.view; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    await Promise.race([this.webviewReady ?? Promise.resolve(), new Promise<void>((r) => setTimeout(r, 3000))]);
+    this.setPushTarget(target);
+    await this.sendPushPreview();
+  }
+
   /** Gather the preview and open the confirm-push modal in the webview. */
   private async sendPushPreview(): Promise<void> {
-    const entry = this.repos.getActive();
+    const entry = this.reviewEntry();
     if (!entry) {
       return;
     }
@@ -2109,14 +2403,54 @@ export class CommitViewProvider
       return;
     }
     if (!data) {
-      vscode.window.setStatusBarMessage("$(check) Nothing to push — up to date", 2500);
+      vscode.window.setStatusBarMessage(
+        this.pushTarget
+          ? `$(check) Nothing to push from ${this.pushTarget.name} — up to date`
+          : "$(check) Nothing to push — up to date",
+        2500,
+      );
       // Clear any spinner the trigger may have started.
       void this.view?.webview.postMessage({ type: "pushDone", ok: true, nothing: true });
       return;
     }
     // Remember the diff base so a click on a file row can open its committed diff.
     this.lastPushBase = data.base;
-    void this.view?.webview.postMessage({ type: "pushPreview", ...data });
+    void this.view?.webview.postMessage({
+      type: "pushPreview",
+      ...data,
+      ...(this.pushTarget ? { worktree: { name: this.pushTarget.name, shownPath: this.pushTarget.shownPath } } : {}),
+    });
+  }
+
+  /** A commit in the push review opened: the files it changed, against its first parent. */
+  private async sendPushCommitFiles(sha: string): Promise<void> {
+    const entry = this.reviewEntry();
+    if (!entry || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(sha)) {
+      return;
+    }
+    // null when git can't read the commit: getCommitFiles reads an unknown
+    // sha as no files at all, and the review would say "No file changes".
+    let files: CompareFile[] | null;
+    try {
+      const parents = await entry.ctx.process.run(["rev-list", "--parents", "-n", "1", sha]);
+      files = parents.code === 0 ? await entry.ctx.commitDetails.getCommitFiles(sha, parents.stdout.trim().split(" ")[1]) : null;
+    } catch {
+      files = null;
+    }
+    void this.view?.webview.postMessage({ type: "pushCommitFiles", sha, files });
+  }
+
+  /** A file under a commit in the push review: what THAT commit did to it. */
+  private async openPushCommitFile(msg: FromWebview): Promise<void> {
+    const entry = this.reviewEntry();
+    const sha = msg.sha ?? "";
+    if (!entry || !msg.path || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(sha)) {
+      return;
+    }
+    const parent = msg.parent && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(msg.parent) ? msg.parent : COMMIT_EMPTY_TREE;
+    const sides = commitChangeSides({ sha, parent, path: msg.path, oldPath: msg.oldPath, status: msg.status });
+    const name = msg.path.split("/").pop() ?? msg.path;
+    await openSidesDiff(entry.root, msg.path, sides, `${name} (${sha.slice(0, 7)})`);
   }
 
   /** The base ref of the last push preview (left side of committed file diffs). */
@@ -2129,7 +2463,9 @@ export class CommitViewProvider
    * about to be pushed introduce.
    */
   private async openPushFileDiff(path: string, oldPath?: string): Promise<void> {
-    const entry = this.repos.getActive();
+    // The review's worktree: its HEAD is the right side (revision URIs read
+    // the root they name — see RevisionContentProvider).
+    const entry = this.reviewEntry();
     if (!entry || !path) {
       return;
     }
@@ -2189,7 +2525,7 @@ export class CommitViewProvider
   }
 
   private async confirmPush(force = false): Promise<void> {
-    const entry = this.repos.getActive();
+    const entry = this.reviewEntry();
     if (!entry) {
       return;
     }
@@ -2225,9 +2561,7 @@ export class CommitViewProvider
     if (result.ok) {
       vscode.window.setStatusBarMessage("$(check) Pushed", 3000);
     } else if (!settlePushUnseen(result)) {
-      void vscode.window.showErrorMessage(
-        `GitStudio: push failed${result.stderr ? ` — ${result.stderr.trim()}` : ""}`,
-      );
+      void vscode.window.showErrorMessage(failed("Push", result.stderr));
     }
     this.invalidateRefs();
     void entry.repo?.status?.();
@@ -2248,7 +2582,7 @@ export class CommitViewProvider
    * nothing is lost, the commits are just "un-made".
    */
   private async discardLocalCommits(): Promise<void> {
-    const entry = this.repos.getActive();
+    const entry = this.reviewEntry();
     if (!entry) {
       return;
     }
@@ -2343,7 +2677,7 @@ export class CommitViewProvider
    * leaves the modal open; success closes it (the push target changed).
    */
   private async newBranchFromPush(nameFromView?: string): Promise<void> {
-    const entry = this.repos.getActive();
+    const entry = this.reviewEntry();
     if (!entry) {
       return;
     }
@@ -2552,11 +2886,19 @@ export class CommitViewProvider
         this.lastBranchesSig = JSON.stringify(starred);
       }
     }
+    // The stash list as last read for this repository. Right after a stash
+    // action it may be from before it: none is carried, and the page keeps
+    // what it shows until the read below answers. Another repository's list
+    // is never shown here — an empty one is, until this one's is read.
+    const lastForHere = active && this.lastStashes?.root === active.root ? this.lastStashes : undefined;
+    const knownStashes = lastForHere && !lastForHere.stale ? lastForHere : undefined;
+    const firstStashes: StashRow[] | undefined = !hasRepo ? [] : lastForHere ? knownStashes?.rows : [];
     const sent: SlowState = {
       aiEnabled: this.lastAiEnabled,
       branchesSig: sameRepo ? this.lastBranchesSig : undefined,
       unpushed: upstream ? (ahead ?? 0) : undefined,
       canPublish: upstream ? true : undefined,
+      stashesSig: knownStashes?.sig,
     };
     const base: StatePayload = {
       type: "state",
@@ -2587,6 +2929,7 @@ export class CommitViewProvider
       aiOff: vscode.workspace.getConfiguration("gitstudio").get<string>("ai.provider") === "off",
       layout,
       busy: this.busy,
+      stashes: firstStashes,
     };
     void this.view.webview.postMessage(base);
     this.updateBadge(staged, unstaged, behind);
@@ -2598,7 +2941,7 @@ export class CommitViewProvider
     // button + branch menu without a re-render; but it is still the whole
     // payload crossing the webview boundary, and during a staging burst or the
     // onDidChange firehose the answer is the one already on screen.
-    const [aiEnabled, listed, pushInfo, operation] = await Promise.all([
+    const [aiEnabled, listed, pushInfo, operation, stashRows] = await Promise.all([
       this.generator
         ? this.generator.isEnabled().catch(() => false)
         : Promise.resolve(false),
@@ -2607,15 +2950,19 @@ export class CommitViewProvider
         ? this.countUnpushed(active, upstream, ahead, !!detached)
         : Promise.resolve({ unpushed: 0, canPublish: false }),
       active ? this.readOperation(active) : Promise.resolve(undefined),
+      active && hasRepo ? this.collectStashes(active) : Promise.resolve([] as StashRow[]),
     ]);
     // A star set while the rest was being read is on it too.
     const branches = listed && active ? withFavorites(listed, this.favorites(active)) : listed;
+    const stashesSig = JSON.stringify(stashRows);
     const resolved: SlowState = {
       aiEnabled,
       branchesSig: branches ? JSON.stringify(branches) : undefined,
       unpushed: pushInfo.unpushed,
       canPublish: pushInfo.canPublish,
+      stashesSig,
     };
+    this.lastStashes = active ? { root: active.root, rows: stashRows, sig: stashesSig } : undefined;
     this.lastAiEnabled = aiEnabled;
     this.lastBranches = branches;
     this.lastBranchesSig = resolved.branchesSig;
@@ -2633,6 +2980,7 @@ export class CommitViewProvider
       canPublish: pushInfo.canPublish,
       operation,
       detachedReason: base.detached ? detachedPushReason(operation) : undefined,
+      stashes: stashRows,
     });
   }
 
@@ -2693,13 +3041,17 @@ export class CommitViewProvider
     const codiconUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.extensionUri, "dist", "codicons", "codicon.css"),
     );
+    const changeRowsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, "dist", "webview", "change-rows.js"),
+    );
     const csp = [
       `default-src 'none'`,
       // cspSource: the codicon stylesheet; nonce: our own inline <style>.
       `style-src 'nonce-${nonce}' ${webview.cspSource}`,
       // cspSource: the codicon.ttf the stylesheet @font-face references.
       `font-src ${webview.cspSource}`,
-      `script-src 'nonce-${nonce}'`,
+      // nonce: our inline script and change-rows.js (the push review's rows).
+      `script-src 'nonce-${nonce}' ${webview.cspSource}`,
     ].join("; ");
 
     // String.raw so the inline script's regex backslashes (\s, \[, \{, \\) survive
@@ -2723,6 +3075,7 @@ export class CommitViewProvider
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link href="${codiconUri}" rel="stylesheet" />
   <style nonce="${nonce}">${tokensCss}</style>
+  <style nonce="${nonce}">${changeRowsCss}</style>
   <style nonce="${nonce}">
     /* Surface-specific styling only. The --gs-* token scale and the .gs-*
        utility classes come from the shared tokens.css injected above — this
@@ -2807,9 +3160,12 @@ export class CommitViewProvider
       letter-spacing: 0.005em;
     }
     .branch .branch-caret { font-size: 12px; opacity: 0.8; margin-left: -1px; }
+    /* Open: lit, the pill's own edge unchanged. Recolouring that edge in the
+       accent drew a ring around the open state, a line by the owner's rule;
+       it glows softly instead. */
     .branch[aria-expanded="true"] {
       background: color-mix(in srgb, var(--gs-accent) 22%, transparent);
-      border-color: color-mix(in srgb, var(--gs-accent) 55%, transparent);
+      box-shadow: var(--gs-sel-glow-soft);
     }
     /* The repository, when the workspace holds more than one (issue #32): the
        branch pill's shape and type, in the neutral foreground so the branch
@@ -2900,6 +3256,12 @@ export class CommitViewProvider
     }
     .sync-clean.visible { display: inline-flex; }
     .sync-clean svg { width: 12px; height: 12px; }
+    /* Short of room for the branch's name, the pills keep their arrow and
+       count and let the verb go ("up to date" keeps its tick): the name and
+       tip of each still say Push or Pull. */
+    .sync.compact .sync-verb,
+    .sync.compact .sync-clean span { display: none; }
+    .sync.compact .sync-pill { padding: 0 6px 0 4px; }
 
     /* ---- Branch + actions menu (popover; folds in the Branches view) ---- */
     .branch-menu {
@@ -2933,7 +3295,10 @@ export class CommitViewProvider
       outline: none;
     }
     .bm-search input:focus { border-color: var(--gs-accent); box-shadow: var(--gs-glow); }
-    .bm-list { overflow-y: auto; padding: 3px; }
+    /* A row brought into view from below stops under its group's heading,
+       which stays pinned at the top while its rows scroll (below). */
+    .bm-list { overflow-y: auto; padding: 0 3px 3px; scroll-padding-top: 26px; }
+    .bm-list > .bm-action:first-child { margin-top: 3px; }
     .bm-action, .bm-branch {
       display: flex;
       align-items: center;
@@ -2950,17 +3315,28 @@ export class CommitViewProvider
       cursor: pointer;
     }
     .bm-action .codicon, .bm-bicon { font-size: 14px; color: var(--gs-fg-muted); flex: 0 0 auto; }
-    .bm-action:hover, .bm-branch:hover { background: var(--gs-hover-strong); }
-    /* A collapsible category header: chevron + label + count, full-width button. */
+    /* No hover colour of its own: the pointer MOVES the highlight (the
+       list's mousemove), so a row under the pointer is the lit row, and
+       there is never a second, differently lit one (see .is-active). */
+    /* A collapsible category header: chevron + label + count, full-width
+       button. It stays pinned at the top of the list while its group's rows
+       scroll under it — the next group's heading pushes it off, because each
+       heading sticks only inside its own group (.bm-group). Opaque, or the
+       rows would show through it. */
+    .bm-group { position: relative; }
     .bm-sep {
+      position: sticky;
+      top: 0;
+      z-index: 1;
       display: flex;
       align-items: center;
       gap: 6px;
       width: 100%;
-      margin: 4px 0 1px;
-      padding: 4px 8px;
+      height: 26px;
+      margin: 0;
+      padding: 7px 8px 3px;
       border: none;
-      background: transparent;
+      background: var(--vscode-menu-background, var(--gs-surface));
       font-size: 10px;
       font-weight: 600;
       letter-spacing: 0.06em;
@@ -2972,14 +3348,24 @@ export class CommitViewProvider
     .bm-sep:hover { color: var(--gs-fg); }
     .bm-sep .codicon { font-size: 13px; transition: transform 120ms var(--gs-ease); }
     .bm-sep.collapsed .codicon { transform: rotate(-90deg); }
-    .bm-sep-label { flex: 1 1 auto; }
+    .bm-sep-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* A remote's own name, as git spells it, beside the word Remote. */
+    .bm-sep-remote { margin-left: 5px; text-transform: none; letter-spacing: 0; font-size: 11px; color: var(--gs-fg); }
     .bm-sep-count {
       flex: 0 0 auto;
       font-variant-numeric: tabular-nums;
       letter-spacing: 0;
       color: var(--gs-fg-muted);
     }
-    .bm-hl { background: color-mix(in srgb, var(--gs-accent) 34%, transparent); color: inherit; border-radius: 2px; }
+    /* The letters a search matched, the way VS Code's lists mark them — in
+       the list's match colour and bolder — on a faint band of that colour,
+       so they still show on the current branch, whose whole name is bold. */
+    .bm-hl {
+      background: color-mix(in srgb, var(--vscode-list-highlightForeground, var(--gs-accent)) 16%, transparent);
+      color: var(--vscode-list-highlightForeground, var(--gs-accent-text));
+      font-weight: 600;
+      border-radius: 2px;
+    }
     .bm-branch { padding: 4px 8px 4px 4px; }
     .bm-branch.is-current .bm-bname { color: var(--gs-accent-text); font-weight: 600; }
     .bm-branch.is-current .bm-bicon { color: var(--gs-accent-text); }
@@ -3003,6 +3389,17 @@ export class CommitViewProvider
     .bm-ab.down { color: var(--gs-status-modified); background: color-mix(in srgb, var(--gs-status-modified) 16%, transparent); }
     /* A row too narrow for its name and its counts: the counts go, whole. */
     .bm-branch.is-cramped .bm-ab { display: none; }
+    /* On the highlighted row the counts take the selection's colour, as the
+       rest of the row does: green or blue on the selection's blue is lost. */
+    .bm-branch.is-active .bm-ab {
+      color: inherit;
+      background: color-mix(in srgb, currentColor 20%, transparent);
+    }
+    /* Light+'s ink on its own band over the tint read 3.87:1: deepened, as
+       a search's letters are on the lit row. */
+    body.vscode-light .bm-branch.is-active .bm-ab {
+      color: color-mix(in srgb, var(--gs-fg) 60%, #000000);
+    }
     /* In-flight items keep the normal cursor — the spinner lives IN the item. */
     .bm-action.is-busy, .bm-subaction.is-busy { opacity: 0.8; cursor: default; }
     /* The upstream starts from nothing and grows into the room the name left,
@@ -3013,52 +3410,101 @@ export class CommitViewProvider
        stays when the row is too narrow for the name beside it. */
     .bm-bup.is-gone { text-decoration: line-through; }
     .bm-gone { flex: 0 0 auto; font-size: 10.5px; color: var(--gs-fg-muted); }
-    .bm-bmore { flex: 0 0 auto; font-size: 13px; color: var(--gs-fg-subtle); opacity: 0; transition: opacity 100ms; }
-    .bm-branch:hover .bm-bmore { opacity: 0.8; }
+    /* Every branch row opens a list of its actions, and says so the way a
+       menu does: a chevron at its end, always there, in the secondary
+       colour — the room it takes is the hint. */
+    .bm-bmore { flex: 0 0 auto; font-size: 13px; color: var(--gs-fg-muted); }
 
-    /* The keyboard highlight: the one row the arrow keys have reached (and
-       the mouse, which moves it too). VS Code's own colours for a focused
-       selection, plus the focus outline, because the high-contrast themes
-       give a selection no background at all and draw it with that outline. */
+    /* The highlight: the one row the arrow keys or the pointer have reached
+       (the pointer moves it), and in a row's own menu the item that has the
+       keyboard (which the pointer moves too). ONE look for both: a tint of
+       the accent, rounded, and the words and icon at the menu's full ink —
+       no outline, and no second colour for a hover. It used to be VS Code's
+       selection blue with the focus outline around it; under the pointer a
+       submenu item took the hover's grey instead but kept the selection's
+       white words, which read faded, inside a blue ring. Declared on body,
+       where the theme's class is: --gs-danger is the light theme's deeper
+       red there, and a custom property resolves where it is declared. */
+    body {
+      --bm-lit: color-mix(in srgb, var(--gs-accent) 26%, transparent);
+      --bm-lit-soft: color-mix(in srgb, var(--gs-accent) 13%, transparent);
+      --bm-lit-danger: color-mix(in srgb, var(--vscode-errorForeground, #e15a5a) 14%, transparent);
+      --bm-danger-ink: var(--gs-danger, var(--vscode-errorForeground, #e15a5a));
+    }
+    body.vscode-light {
+      --bm-lit: color-mix(in srgb, var(--gs-accent) 18%, transparent);
+      --bm-lit-soft: color-mix(in srgb, var(--gs-accent) 9%, transparent);
+    }
     .bm-action.is-active,
     .bm-branch.is-active,
     .bm-more.is-active,
-    .bm-subaction.is-active {
-      background: var(--vscode-list-activeSelectionBackground, var(--gs-hover-strong));
-      color: var(--vscode-list-activeSelectionForeground, var(--gs-fg));
-      outline: 1px solid var(--vscode-list-focusOutline, var(--vscode-focusBorder, transparent));
-      outline-offset: -1px;
+    .bm-subaction.is-active,
+    .action-menu .bm-subaction:focus {
+      background: var(--bm-lit);
+      color: var(--gs-fg);
+      outline: none;
     }
     .bm-action.is-active .codicon,
     .bm-branch.is-active .bm-bicon,
     .bm-branch.is-active.is-current .bm-bname,
     .bm-branch.is-active .bm-bup,
     .bm-branch.is-active .bm-gone,
-    .bm-subaction.is-active .codicon { color: inherit; }
-    .bm-branch.is-active .bm-bmore { opacity: 0.9; color: inherit; }
+    .bm-subaction.is-active .codicon,
+    .action-menu .bm-subaction:focus .codicon { color: inherit; }
+    .bm-branch.is-active .bm-bmore { color: inherit; }
     .bm-branch.is-active .bm-star:not(.on) { color: inherit; }
-    /* A match on the highlighted row: the accent band would be blue on the
-       blue selection, so the letters are marked instead, in the colour VS
-       Code gives a match on a focused list row. */
+    /* A search's letters on the lit row: the row's own ink, bold, on a band
+       of the match colour — the match colour itself read 3–4:1 on the tint. */
     .bm-action.is-active .bm-hl,
     .bm-branch.is-active .bm-hl {
-      background: transparent;
-      color: var(--vscode-list-focusHighlightForeground, inherit);
-      font-weight: 600;
+      color: inherit;
+      background: color-mix(in srgb, var(--vscode-list-highlightForeground, var(--gs-accent)) 26%, transparent);
     }
-    /* The row whose submenu holds the highlight stays marked, as VS Code
-       marks a selection whose list is not the focused one. */
-    .bm-branch.is-open {
-      background: var(--vscode-list-inactiveSelectionBackground, var(--gs-hover));
-      outline: 1px dashed var(--vscode-contrastActiveBorder, transparent);
+    /* Light+'s ink (#616161) is too pale for a band on a tint: deepened. */
+    body.vscode-light .bm-action.is-active .bm-hl,
+    body.vscode-light .bm-branch.is-active .bm-hl {
+      color: color-mix(in srgb, var(--gs-fg) 60%, #000000);
+      background: color-mix(in srgb, var(--vscode-list-highlightForeground, var(--gs-accent)) 20%, transparent);
+    }
+    /* The row whose submenu holds the highlight stays lit, more softly. */
+    .bm-branch.is-open { background: var(--bm-lit-soft); }
+    /* Its words read on that tint (AA): the quiet ones take full ink, and
+       the coloured ones (the current branch, a search's letters, the
+       counts) lean away from the ground. In their own colours they read
+       2.7 to 4.4:1 on it. */
+    .bm-branch.is-open .bm-bmore,
+    .bm-branch.is-open .bm-bicon,
+    .bm-branch.is-open .bm-bup,
+    .bm-branch.is-open .bm-gone { color: var(--gs-fg); }
+    .bm-branch.is-open.is-current .bm-bname,
+    .bm-branch.is-open.is-current .bm-bicon { color: var(--gs-sel-ink); }
+    .bm-branch.is-open .bm-hl {
+      color: color-mix(in srgb, var(--vscode-list-highlightForeground, var(--gs-accent)) 58%, var(--gs-sel-lift));
+    }
+    .bm-branch.is-open .bm-ab.up { color: color-mix(in srgb, var(--gs-status-added) 55%, var(--gs-sel-lift)); }
+    .bm-branch.is-open .bm-ab.down { color: color-mix(in srgb, var(--gs-status-modified) 55%, var(--gs-sel-lift)); }
+    /* A destructive item keeps its colour when highlighted: red on a red tint. */
+    .bm-subaction.danger.is-active,
+    .action-menu .bm-subaction.danger:focus {
+      background: var(--bm-lit-danger);
+      color: var(--bm-danger-ink);
+    }
+    .bm-subaction.danger.is-active .codicon,
+    .action-menu .bm-subaction.danger:focus .codicon { color: inherit; }
+    /* The high-contrast themes paint a selection with no fill of its own but
+       VS Code's contrast border, drawn whole: there, and only there, the
+       highlight keeps that ring (dashed for the row whose submenu is open). */
+    body.vscode-high-contrast .bm-action.is-active,
+    body.vscode-high-contrast .bm-branch.is-active,
+    body.vscode-high-contrast .bm-more.is-active,
+    body.vscode-high-contrast .bm-subaction.is-active,
+    body.vscode-high-contrast .action-menu .bm-subaction:focus {
+      outline: 1px solid var(--vscode-contrastActiveBorder, var(--gs-accent));
       outline-offset: -1px;
     }
-    .bm-branch.is-open .bm-bmore { opacity: 0.8; }
-    /* A destructive item keeps its colour when highlighted: red on red tint. */
-    .bm-subaction.danger.is-active {
-      background: color-mix(in srgb, var(--vscode-errorForeground, #e15a5a) 20%, transparent);
-      color: var(--vscode-errorForeground, #e15a5a);
-      outline-color: var(--vscode-errorForeground, #e15a5a);
+    body.vscode-high-contrast .bm-branch.is-open {
+      outline: 1px dashed var(--vscode-contrastActiveBorder, var(--gs-accent));
+      outline-offset: -1px;
     }
 
     /* Per-branch action submenu (flyout). */
@@ -3106,6 +3552,9 @@ export class CommitViewProvider
     /* The list scrolls, so it clips: a focus ring drawn outside an item
        would lose three sides. Drawn just inside, it keeps all four. */
     .bm-subaction:focus-visible { outline-offset: -1px; }
+    /* In a row's own menu the focused item IS the highlight (lit, above):
+       no ring on top of it, but in high contrast. */
+    body:not(.vscode-high-contrast) .action-menu .bm-subaction:focus-visible { outline: none; }
     .bm-subaction {
       display: flex; align-items: center; gap: 9px;
       width: 100%;
@@ -3121,13 +3570,53 @@ export class CommitViewProvider
     }
     .bm-subaction .codicon { font-size: 14px; color: var(--gs-fg-muted); flex: 0 0 auto; }
     .bm-subaction span { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .bm-subaction:hover { background: var(--gs-hover-strong); }
-    .bm-subaction.danger { color: var(--vscode-errorForeground, #e15a5a); }
-    .bm-subaction.danger .codicon { color: var(--vscode-errorForeground, #e15a5a); }
-    .bm-subaction.danger:hover { background: color-mix(in srgb, var(--vscode-errorForeground, #e15a5a) 14%, transparent); }
+    /* No :hover colour: the pointer moves the highlight here too. */
+    .bm-subaction.danger { color: var(--bm-danger-ink); }
+    .bm-subaction.danger .codicon { color: var(--bm-danger-ink); }
     .bm-subsep { height: 1px; margin: 4px 6px; background: var(--gs-border); }
-    /* An empty star is a control on every local row, so it is drawn at a
-       control's contrast (3:1) in the muted text colour, not the subtle one. */
+    /* Drilled in: a sidebar with no room beside the menu for a branch's
+       actions shows them IN the menu, in place of the list, under a back row
+       that names the branch ('‹ feature'). The search box stays; typing, the
+       back row, Left and Escape all return to the list. */
+    .branch-menu.is-drilled > .bm-list { display: none; }
+    .branch-submenu.is-drilled {
+      position: static;
+      z-index: auto;
+      flex: 1 1 auto;
+      min-height: 0;
+      min-width: 0;
+      max-width: none;
+      max-height: none;
+      padding: 0 3px 3px;
+      background: transparent;
+      border: none;
+      border-top: 1px solid var(--vscode-menu-separatorBackground, var(--gs-border));
+      border-radius: 0;
+      box-shadow: none;
+    }
+    /* The back row is a row of the menu: the pointer lights it as it
+       lights any row — the same tint, and the item below goes dark — with
+       no hover colour of its own and no rule under it. */
+    .branch-submenu.is-drilled .bm-subhead {
+      margin: 0 -3px 3px;
+      padding: 6px 10px 6px 6px;
+      border-radius: 0;
+      border-bottom: none;
+      cursor: pointer;
+    }
+    .branch-submenu.is-drilled .bm-subhead.is-active { background: var(--bm-lit); }
+    body.vscode-high-contrast .branch-submenu.is-drilled .bm-subhead.is-active {
+      outline: 1px solid var(--vscode-contrastActiveBorder, var(--gs-accent));
+      outline-offset: -1px;
+    }
+    .bm-subhead .bm-back { font-size: 14px; color: var(--gs-fg); }
+    /* Words for a screen reader only: in the page, not on screen. */
+    .bm-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+    /* A set star is always shown. An empty one is a control that only the
+       row under the pointer or the highlight offers — a column of 200 hollow
+       stars read as 200 things to do — drawn then at a control's contrast
+       (3:1), in the muted text colour. Its room is kept either way, so the
+       names stay in one column. */
     .bm-star, .bm-star-spacer {
       flex: 0 0 auto;
       width: 22px; height: 22px;
@@ -3135,10 +3624,22 @@ export class CommitViewProvider
       border: none; background: transparent; border-radius: var(--gs-radius-sm);
       color: var(--gs-fg-muted); cursor: pointer; padding: 0;
     }
+    .bm-star:not(.on) { visibility: hidden; }
+    .bm-branch:hover .bm-star, .bm-branch.is-active .bm-star { visibility: visible; }
     .bm-star:hover { background: color-mix(in srgb, var(--gs-fg) 10%, transparent); color: var(--gs-fg); }
     .bm-star.on { color: var(--vscode-charts-yellow, #d7ba00); }
     .bm-star .codicon { font-size: 13px; }
     .bm-empty { padding: 10px 8px; color: var(--gs-fg-muted); font-size: 12px; text-align: center; }
+    /* A line that says why an action is missing (Pull and Push on a detached
+       HEAD). Not a row the arrows visit: it is read out with the search box. */
+    .bm-why {
+      display: flex; align-items: flex-start; gap: 8px;
+      padding: 5px 8px; font-size: 12px; line-height: 16px;
+      color: var(--gs-fg-muted);
+    }
+    .bm-why .codicon { font-size: 14px; flex: 0 0 auto; line-height: 16px; }
+    /* An action's label, which a long query can make longer than the row. */
+    .bm-action > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .bm-loading { display: flex; align-items: center; justify-content: center; gap: 6px; }
     .bm-loading .codicon { font-size: 13px; }
     .bm-note { padding: 4px 8px 6px 34px; color: var(--gs-fg-subtle); font-size: 11px; font-style: italic; }
@@ -3213,8 +3714,20 @@ export class CommitViewProvider
     .rp-row .codicon { font-size: 12px; opacity: 0.8; flex: 0 0 auto; }
     .rp-row .rp-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .rp-row .rp-kind { margin-left: auto; font-size: 10px; color: var(--gs-fg-subtle); }
-    .rp-row:hover, .rp-row.sel { background: var(--gs-hover); }
-    .rp-row.sel { box-shadow: inset 2px 0 0 var(--gs-accent); }
+    /* The keyboard's row is lit with the accent's tint, rounded inside the
+       list, and plainly not a hovered row. It used to be the hover's grey
+       with a 2px accent bar down its edge, and the bar was the only
+       difference. High contrast has no tints: VS Code's whole ring there. */
+    .rp-row { margin: 0 4px; border-radius: var(--gs-radius-sm); }
+    .rp-row:hover { background: var(--gs-hover); }
+    .rp-row.sel { background: var(--gs-sel-fill); }
+    /* Words on the tint take full ink: the muted description read 3.3:1 in
+       Light+. */
+    .rp-row.sel .rp-kind, .rp-row.sel .rp-choice-desc, .rp-row.sel .rp-choice-detail { color: var(--gs-fg); }
+    body.vscode-high-contrast .rp-row.sel {
+      outline: 1px solid var(--vscode-contrastActiveBorder, var(--gs-accent));
+      outline-offset: -1px;
+    }
     .rp-empty { padding: 8px 11px; font-size: 11px; color: var(--gs-fg-subtle); }
     .rp-foot {
       display: flex; justify-content: flex-end; gap: 6px;
@@ -3224,9 +3737,13 @@ export class CommitViewProvider
       padding: 4px 11px; font-size: 12px; border-radius: 5px; cursor: pointer;
       border: 1px solid var(--gs-border); background: transparent; color: var(--gs-fg);
     }
+    /* GitStudio's own pair, as Push and Commit & Push: the theme's focusBorder
+       is no fill (Cursor Dark's is 15% white) and its button label pairs
+       only with its own button colour — together they read 1.4:1 in Cursor,
+       and white on focusBorder blue was under 4.5:1 even in Dark+. */
     .rp-foot button.primary {
-      background: var(--gs-accent); border-color: var(--gs-accent);
-      color: var(--vscode-button-foreground, #fff);
+      background: var(--gs-brand); border-color: var(--gs-brand);
+      color: var(--gs-brand-fg);
     }
     /* A FILL for a destructive button. --gs-danger is the theme's error TEXT
        colour (Dark+: #f48771), and a white label on it read 2.5:1; darkened
@@ -3234,8 +3751,20 @@ export class CommitViewProvider
     :root { --gs-danger-fill: color-mix(in srgb, var(--vscode-errorForeground, #f14c4c) 62%, #000000); }
     .rp-foot button.primary.danger {
       background: var(--gs-danger-fill); border-color: var(--gs-danger-fill);
+      color: #fff;
     }
     .rp-foot button:disabled { opacity: 0.5; cursor: default; }
+    /* Under the pointer a filled button darkens: the global button.primary
+       brightening took the violet to #8061ff, white on it 4.1:1. */
+    .rp-foot button.primary:not(:disabled):hover { filter: none; }
+    .rp-foot button.primary:not(.danger):not(:disabled):hover {
+      background: color-mix(in srgb, var(--gs-brand) 82%, #000);
+      border-color: color-mix(in srgb, var(--gs-brand) 82%, #000);
+    }
+    .rp-foot button.primary.danger:not(:disabled):hover {
+      background: color-mix(in srgb, var(--gs-danger-fill) 88%, #000);
+      border-color: color-mix(in srgb, var(--gs-danger-fill) 88%, #000);
+    }
     /* A multi-line answer (a PR body, a review summary). Same frame as the
        single-line input so the dialog doesn't change shape between kinds. */
     .rp-inputwrap textarea {
@@ -3255,6 +3784,14 @@ export class CommitViewProvider
     .rp-choice-detail { margin-left: auto; padding-left: 10px; font-size: 10px; color: var(--gs-fg-subtle); flex: 0 0 auto; }
     .rp-choice.danger .rp-choice-label, .rp-choice.danger .codicon { color: var(--gs-danger, #f14c4c); }
     .rp-check { flex: 0 0 auto; margin: 1px 0 0; accent-color: var(--gs-accent); }
+    /* A question's checkboxes ("Also delete the branch"), between the choices
+       and the footer. */
+    .rp-options { padding: 6px 11px 8px; border-top: 1px solid var(--gs-border-soft); }
+    .rp-option { display: flex; align-items: flex-start; gap: 8px; margin: 0 -6px; padding: 3px 6px; border-radius: var(--gs-radius-sm); font-size: 12px; cursor: pointer; }
+    .rp-option .rp-check { margin-top: 2px; }
+    /* The option the keyboard is on is lit, not underlined. */
+    .rp-option:has(.rp-check:focus-visible) { background: var(--gs-sel-fill); }
+    .rp-option:has(.rp-check:focus-visible) .rp-choice-desc { color: var(--gs-fg); }
     /* A confirm has no list and no input — just the question. */
     .rp-msg { padding: 2px 11px 11px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
     /* Reads as an action, not a footnote — it is the only way to reach the
@@ -3263,7 +3800,7 @@ export class CommitViewProvider
       padding: 5px 8px 6px 34px; color: var(--gs-accent-text);
       font-size: 11px; cursor: pointer; user-select: none;
     }
-    .bm-more:hover { background: var(--gs-hover); text-decoration: underline; }
+    /* Under the pointer it is the highlighted row (lit, above) — never underlined. */
     .bm-more:focus-visible { outline: 1px solid var(--gs-accent); outline-offset: -1px; }
 
     /* ---- Message composer -------------------------------------------------
@@ -3562,6 +4099,12 @@ export class CommitViewProvider
       letter-spacing: 0.06em;
       text-transform: uppercase;
       color: var(--gs-fg-muted);
+      /* One line, cut short when the toolbar is full (the tree layout adds
+         Collapse All) — it wrapped to two and pushed the list down. */
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .changes-total {
       display: none;
@@ -3580,7 +4123,8 @@ export class CommitViewProvider
     }
     .changes-total.visible { display: inline-flex; }
     .changes-toolbar .toolbar-spacer { flex: 1 1 auto; }
-    .changes-toolbar .toolbar-actions { display: inline-flex; align-items: center; gap: 1px; }
+    .changes-toolbar .toolbar-actions { display: inline-flex; align-items: center; gap: 1px; flex: 0 0 auto; }
+    .changes-toolbar .changes-total { flex: 0 0 auto; }
     .icon-btn {
       display: inline-flex;
       align-items: center;
@@ -3642,16 +4186,35 @@ export class CommitViewProvider
     .groups { margin: 0 0 2px; }
 
     /* ---- Multi-selection, drag-to-stash ---------------------------------- */
-    /* Defined after the :hover rules below so a selected row stays visibly
-       selected while the pointer is over it. */
-    .row.is-file.is-selected { background: var(--vscode-list-inactiveSelectionBackground); }
-    .row.is-file.is-selected:hover { background: var(--vscode-list-hoverBackground); }
-    .row.is-file.is-selected::after {
-      content: "";
-      position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
-      background: var(--vscode-focusBorder);
+    /* A selected row is lit, never barred: a tint of the accent that stands
+       apart from the view in every theme (the list's own inactive-selection
+       grey did not in Light+, and high contrast paints none), stronger under
+       the pointer; high contrast rings it, dashed, as its lists do. A 2px
+       bar down the left edge used to mark it. Declared on body, where the
+       theme's class is. */
+    body {
+      --sel-fill: color-mix(in srgb, var(--gs-accent) 22%, transparent);
+      --sel-fill-hover: color-mix(in srgb, var(--gs-accent) 28%, transparent);
     }
-    body.is-dragging-files .row.is-file { cursor: grabbing; }
+    body.vscode-light {
+      --sel-fill: color-mix(in srgb, var(--gs-accent) 15%, transparent);
+      --sel-fill-hover: color-mix(in srgb, var(--gs-accent) 18%, transparent);
+    }
+    .row.is-file.is-selected { background: var(--sel-fill); }
+    .row.is-file.is-selected:hover { background: var(--sel-fill-hover); }
+    /* Its words read on the tint (AA), at rest and under the pointer: the
+       name and the folder lean a little further from the ground (Light+'s
+       folder read 3.7:1), and the status letter keeps its hue, lifted toward
+       white in dark and black in light (Light+'s blue M read 2.75:1). */
+    .row.is-file.is-selected .name,
+    .row.is-file.is-selected .dir { color: color-mix(in srgb, var(--gs-fg) 72%, var(--gs-sel-lift)); }
+    .row.is-file.is-selected.is-deleted .name { opacity: 1; }
+    .row.is-file.is-selected .status { color: color-mix(in srgb, var(--gs-row-accent, var(--gs-fg-muted)) 62%, var(--gs-sel-lift)); }
+    body.vscode-high-contrast .row.is-file.is-selected {
+      outline: 1px dashed var(--vscode-contrastActiveBorder, var(--gs-accent));
+      outline-offset: -1px;
+    }
+    body.vscode-high-contrast .row.is-file.is-selected:focus-visible { outline-style: solid; }
 
     .selbar {
       display: flex; align-items: center; gap: 8px;
@@ -3670,23 +4233,94 @@ export class CommitViewProvider
     .selbar-btn:hover { background: var(--vscode-toolbar-hoverBackground); }
     .selbar-btn:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
 
-    /* The drop target only exists mid-drag. A permanently visible strip would
-       cost vertical space in a view that is already short. */
-    .stash-drop {
-      display: flex; align-items: center; justify-content: center; gap: 8px;
-      margin: 6px 0; padding: 14px 10px;
-      border: 1px dashed var(--vscode-focusBorder);
-      border-radius: 6px;
-      color: var(--vscode-descriptionForeground);
-      font-size: 12px;
+    /* ---- Drag and drop: the working tree and the Stashes group ---------
+       One mechanism, both ways. A stash, some of its files or one of its
+       folders dragged onto the working tree (or the clean tree's note) comes
+       back, as it was stashed; working-tree files dragged onto the Stashes
+       header are stashed. While a drag is on, each place it can go is
+       faintly tinted; the one under the pointer is lit and says what a drop
+       does, and Alt/Option picks the other verb. No outline, no dashed box:
+       a tinted fill. */
+    body {
+      --drop-ready: color-mix(in srgb, var(--gs-accent) 7%, transparent);
+      --drop-over: color-mix(in srgb, var(--gs-accent) 20%, transparent);
+      --drop-over-solid: color-mix(in srgb, var(--gs-accent) 20%, var(--vscode-sideBar-background, var(--gs-bg)));
     }
-    .stash-drop[hidden] { display: none; }
-    .stash-drop.is-over {
-      background: var(--vscode-list-dropBackground, var(--vscode-list-hoverBackground));
-      color: var(--vscode-foreground);
-      border-style: solid;
+    body.vscode-light {
+      --drop-ready: color-mix(in srgb, var(--gs-accent) 5%, transparent);
+      --drop-over: color-mix(in srgb, var(--gs-accent) 14%, transparent);
+      --drop-over-solid: color-mix(in srgb, var(--gs-accent) 14%, var(--vscode-sideBar-background, var(--gs-bg)));
+    }
+    body.is-dragging { cursor: grabbing; }
+    .row.is-dragged { opacity: 0.55; }
+    .is-drop-ready { background: var(--drop-ready); border-radius: var(--gs-radius); }
+    .is-drop-over { background: var(--drop-over); border-radius: var(--gs-radius); }
+    /* Its words: what a drop does, and — where Alt/Option picks the other
+       verb — how. Each is whole or, where it cannot fit even on a line of
+       its own, cut at its end. */
+    .drop-hint { display: none; }
+    .drop-verb, .drop-alt {
+      flex: 0 1 auto; min-width: 0;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      color: var(--gs-fg);
+    }
+    .drop-verb { font-size: 12px; font-weight: 600; }
+    .drop-alt { font-size: 11px; font-weight: 400; }
+    /* The Stashes header: the words in place of its name, count and buttons. */
+    .group-header.is-drop-over > .drop-hint {
+      display: flex; align-items: baseline; gap: 10px;
+      flex: 1 1 auto; min-width: 0; overflow: hidden;
+    }
+    .group-header.is-drop-over .glabel,
+    .group-header.is-drop-over .gcount,
+    .group-header.is-drop-over .group-actions { display: none; }
+    /* The group is the lit place; its header only speaks — one ring, and its
+       tint made solid, held in sight at the top while the group is: let go
+       over a stash far down a long list, the words are still there. */
+    .group--stashes.is-drop-over > .group-header.is-drop-over {
+      position: sticky; top: 0; z-index: 3;
+      background: var(--drop-over-solid); outline: none;
+    }
+    /* The working tree, every group of it one place: the words in a band
+       held at its top — in sight however far the list is scrolled — laid
+       over its first group's header on the lit tint made solid. The band
+       takes no room (nothing moves under the pointer). Too narrow for both
+       side by side, "Hold Option to pop" goes on a line of its own under
+       the verb rather than lose its end. */
+    #groups.is-drop-over > .drop-hint {
+      display: block;
+      position: sticky; top: 0; z-index: 3;
+      height: 0;
+    }
+    #groups.is-drop-over > .drop-hint > .drop-words {
+      position: absolute; left: 0; right: 0; top: 0;
+      box-sizing: border-box; min-height: 26px;
+      display: flex; flex-wrap: wrap; align-items: baseline; align-content: center;
+      justify-content: space-between; column-gap: 10px; row-gap: 1px;
+      padding: 5px 8px 5px 10px;
+      line-height: 16px;
+      background: var(--drop-over-solid);
+      border-radius: var(--gs-radius);
+    }
+    /* The clean tree's note: the words take the place of "No changes to
+       commit.", one under the other. */
+    #empty-state.is-drop-over .es { display: none; }
+    #empty-state.is-drop-over > .drop-hint {
+      display: flex; flex-direction: column; align-items: center; gap: 2px;
+      max-width: 100%;
+    }
+    #empty-state.is-drop-over > .drop-hint > .drop-alt { white-space: normal; text-align: center; }
+    /* High contrast paints no tints: there the target is ringed, as VS Code
+       rings a drop target — just outside it, where the band of words held
+       in sight cannot paint over it. */
+    body.vscode-high-contrast .is-drop-over {
+      outline: 1px dashed var(--vscode-contrastActiveBorder, var(--gs-accent));
+      outline-offset: 1px;
     }
     .group { margin-top: 4px; }
+    /* An empty group is not drawn; the tree's keyboard skips it too (see
+       shownItem in the script). Hide a treeitem another way, and teach
+       shownItem the same rule. */
     .group.empty { display: none; }
     /* Checkbox model (gitstudio.changes.stagingModel = "checkboxes"). The tick
        is the only staging affordance in this mode, so it gets a real hit area
@@ -3888,19 +4522,10 @@ export class CommitViewProvider
       cursor: pointer;
       user-select: none;
     }
-    /* Status accent rail, revealed on hover/focus for a tactile pointer. */
-    .row::before {
-      content: "";
-      position: absolute;
-      left: 0; top: 3px; bottom: 3px;
-      width: 2px;
-      border-radius: 2px;
-      background: transparent;
-      transition: background var(--gs-motion-fast) var(--gs-ease);
-    }
-    .row.is-file:hover::before { background: var(--gs-row-accent, var(--gs-accent)); }
+    /* The row under the pointer: its fill, and no rail down its edge. */
     .row:hover { background: var(--gs-hover); }
-    .row:focus-visible { outline: 1px solid var(--gs-accent); outline-offset: -1px; }
+    .row:focus-visible,
+    .group-header:focus-visible { outline: 1px solid var(--vscode-list-focusOutline, var(--gs-accent)); outline-offset: -1px; }
     .row .indent { flex: 0 0 auto; }
     .row .twisty {
       width: 16px; height: 16px;
@@ -3970,8 +4595,8 @@ export class CommitViewProvider
     .row .row-actions .codicon,
     .group-actions .icon-btn .codicon { font-size: 17px; }
     /* Status letter: plain colored monospace, not a filled pill. Each row
-       already carries its status via the tinted icon and the hover rail — a
-       third, filled badge per row was the busiest signal in the list. The fixed
+       already carries its status via the tinted icon — a second, filled
+       badge per row was the busiest signal in the list. The fixed
        width keeps the letters column-aligned. */
     .row .status {
       display: inline-flex;
@@ -3993,6 +4618,135 @@ export class CommitViewProvider
     .st-T { --gs-row-accent: var(--gs-status-modified); }
     .st-I { --gs-row-accent: var(--gs-status-ignored); }
     .row.is-conflict { --gs-row-accent: var(--gs-status-conflict); }
+
+    /* ---- Stashes group (after the file groups) ------------------------- */
+    /* The header is the Staged / Changes header; the dot is the brand's. */
+    .group--stashes .gdot { background: var(--gs-brand); }
+    /* A stash row is two lines — its words, then where and when it was made
+       and how many files it holds — so neither is cut to make room for the
+       other at sidebar width. Its twisty, icon and buttons are centred on
+       the two lines. */
+    .row.stash-row { height: 38px; align-items: center; }
+    .row.stash-row .stash-icon { color: var(--gs-fg-muted); }
+    .stash-text {
+      flex: 1 1 auto;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+    .stash-msg,
+    .stash-meta {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .stash-msg { line-height: 17px; }
+    .stash-meta {
+      font-size: 11.5px;
+      line-height: 15px;
+      color: var(--gs-fg-muted);
+    }
+    /* In flight (Apply, a Copy): the row stays, dimmed, until git answers. */
+    .row.stash-row.is-busy,
+    .row.stash-file.is-busy { opacity: 0.6; }
+    .row.stash-row.is-busy .row-actions { visibility: hidden; }
+    /* Where an open stash's files would be, while they are read or when they
+       could not be: a note in a file row's place, not something to press. */
+    .row.stash-note { color: var(--gs-fg-muted); cursor: default; }
+    .row.stash-note:hover { background: none; }
+    .row.stash-note .file-icon { color: var(--gs-fg-muted); }
+    /* "Show 200 more of N": it reads as an action, as the branch menu's
+       "Show more" does — its words in the link colour (the row's hover fill
+       under the pointer; never an underline). */
+    .row.stash-more { color: var(--gs-accent-text); }
+    /* A stash's verbs, and its files' and folders', are WORDS — Apply and
+       Pop, Move and Copy: their two glyphs read alike ("apply and pop have
+       the same icon, it's confusing"). Small, calm and filled, shown on the
+       row the pointer or the keyboard is on; the tip says what each does. */
+    .row .row-actions .word-btn {
+      flex: 0 0 auto;
+      height: 20px;
+      margin-left: 3px;
+      padding: 0 7px;
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 20px;
+      color: var(--word-ink);
+      background: var(--word-fill);
+      border: none;
+      border-radius: var(--gs-radius-sm);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .row .row-actions .word-btn:hover { background: var(--word-fill-hover); }
+    /* A fill of the ink darkens the ground in a light theme and lightens it
+       in a dark one — towards the ink either way — so the words are inked
+       past the view's own text colour, never faded by their button: 4.5:1
+       or more on the button at rest and under the pointer, and the button
+       stands apart from the row it is on. */
+    body {
+      --word-ink: color-mix(in srgb, var(--gs-fg) 55%, #ffffff);
+      --word-fill: color-mix(in srgb, var(--gs-fg) 11%, transparent);
+      --word-fill-hover: color-mix(in srgb, var(--gs-fg) 18%, transparent);
+    }
+    body.vscode-light {
+      --word-ink: color-mix(in srgb, var(--gs-fg) 55%, #000000);
+      --word-fill: color-mix(in srgb, var(--gs-fg) 13%, transparent);
+      --word-fill-hover: color-mix(in srgb, var(--gs-fg) 21%, transparent);
+    }
+    body.vscode-high-contrast { --word-ink: var(--gs-fg); }
+    body.vscode-high-contrast .row .row-actions .word-btn {
+      outline: 1px solid var(--vscode-contrastBorder, transparent);
+      outline-offset: -1px;
+    }
+    .row .row-actions .word-btn { display: none; }
+    .row:hover .row-actions .word-btn,
+    .row:focus-within .row-actions .word-btn { display: inline-block; }
+    /* "staged" / "partly staged": the stash had it staged, in words. */
+    .stash-staged {
+      flex: 0 0 auto;
+      font-size: 11px;
+      color: var(--gs-fg-muted);
+      white-space: nowrap;
+    }
+    /* At the narrowest widths the words that name things keep their room: a
+       stash row keeps only More Actions (its menu has Apply and Pop), a file
+       or folder row its name (its menu has Move and Copy, and it can be
+       dragged), and a file row drops the staged word (its status letter's
+       tip says it). The row is the container, so a deep row in the tree
+       gives way sooner. */
+    .row.stash-row,
+    .row.stash-file,
+    .row.stash-folder { container-type: inline-size; }
+    @container (max-width: 249px) {
+      .row.stash-row .row-actions .word-btn.stash-quick { display: none; }
+    }
+    @container (max-width: 229px) {
+      .row.stash-file .row-actions .word-btn.word-btn,
+      .row.stash-folder .row-actions .word-btn.word-btn { display: none; }
+    }
+    @container (max-width: 199px) {
+      .stash-file .stash-staged { display: none; }
+    }
+    .selbar-count {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .selbar-btn { white-space: nowrap; }
+    /* A stash's files: which stash, and Clear, on the first line; Move to
+       Changes and Copy to Changes share the second — at sidebar width the
+       four did not fit on one. */
+    .selbar.is-stash { flex-wrap: wrap; row-gap: 2px; padding-top: 5px; padding-bottom: 6px; }
+    .selbar.is-stash .selbar-actions { display: contents; }
+    .selbar.is-stash .selbar-count { flex: 1 1 0; order: 0; }
+    .selbar.is-stash #selbar-clear { order: 1; }
+    .selbar.is-stash::after { content: ""; order: 2; flex-basis: 100%; height: 0; }
+    .selbar.is-stash #selbar-move,
+    .selbar.is-stash #selbar-copy { order: 3; flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
     /* ---- Empty state --------------------------------------------------- */
     .empty-state {
@@ -4169,40 +4923,16 @@ export class CommitViewProvider
       display: inline-flex; align-items: center; gap: 4px;
     }
     .pm-behind .codicon { color: var(--gs-amber); font-size: 12px; }
+    /* The commit and file rows are the shared ones (changeRows.css, inlined
+       above): .cr-section-label, .cr-commit, .cr-file. */
     .pm-body { overflow-y: auto; padding: 4px 6px 8px; }
-    .pm-section-label {
-      font-size: 10px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
-      color: var(--gs-fg-muted); padding: 9px 8px 4px;
+    .pm-where {
+      display: flex; align-items: center; gap: 6px;
+      padding: 7px 14px; font-size: 11.5px; color: var(--gs-fg-muted);
+      border-bottom: 1px solid var(--gs-border-soft);
     }
-    .pm-commit {
-      display: flex; align-items: baseline; gap: 8px;
-      padding: 4px 8px; border-radius: var(--gs-radius-sm);
-    }
-    .pm-commit:hover { background: var(--gs-hover); }
-    .pm-commit .sha {
-      flex: 0 0 auto; font-family: var(--gs-font-mono); font-size: 11px;
-      color: var(--gs-fg-subtle);
-    }
-    .pm-commit .subj { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .pm-commit .meta { flex: 0 0 auto; font-size: 11px; color: var(--gs-fg-muted); }
-    .pm-file {
-      display: flex; align-items: center; gap: 8px;
-      padding: 4px 8px; border-radius: var(--gs-radius-sm);
-    }
-    .pm-file:hover { background: var(--gs-hover-strong); }
-    .pm-file.clickable { cursor: pointer; }
-    .pm-file.clickable:hover .name { text-decoration: underline; text-underline-offset: 2px; }
-    .pm-file .st { flex: 0 0 auto; width: 13px; text-align: center; font-family: var(--gs-font-mono); font-weight: 700; font-size: 11px; }
-    .pm-file .name { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .pm-file .dir { flex: 1 1 0; min-width: 0; font-size: 11px; color: var(--gs-fg-muted);
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
-    .pm-file .nums { flex: 0 0 auto; font-family: var(--gs-font-mono); font-size: 11px; font-variant-numeric: tabular-nums; }
-    .pm-file .nums .add { color: var(--gs-status-added); }
-    .pm-file .nums .del { color: var(--gs-status-deleted); margin-left: 5px; }
-    .pm-file.st-A .st { color: var(--gs-status-added); }
-    .pm-file.st-M .st { color: var(--gs-status-modified); }
-    .pm-file.st-D .st { color: var(--gs-status-deleted); }
-    .pm-file.st-R .st { color: var(--gs-status-renamed); }
+    .pm-where span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .pm-where .codicon { flex: 0 0 auto; font-size: 13px; }
     .pm-error {
       margin: 4px 8px 0; padding: 7px 9px; font-size: 11.5px;
       color: var(--vscode-errorForeground, #e15a5a);
@@ -4298,18 +5028,27 @@ export class CommitViewProvider
     }
     .pm-btn .codicon { font-size: 13px; }
     .pm-btn .codicon-modifier-spin { animation: codicon-spin 1s steps(12) infinite; }
-    .pm-empty-note { padding: 14px 10px; text-align: center; color: var(--gs-fg-muted); font-size: 12px; }
 
     /* ---- Operation banner: a stopped merge / rebase / cherry-pick ------- */
+    /* Toned by what the stop needs: amber while something is in the way
+       (conflicts, or a stop git cannot continue from), the accent once
+       nothing is. It was conflict-red in every state — "Every conflict is
+       resolved." sat in an error box. */
     .op-banner {
+      --op-tone: var(--gs-amber);
       display: flex;
       flex-direction: column;
-      gap: 6px;
+      gap: 4px;
       margin: 0 2px 10px;
-      padding: 8px 10px;
+      padding: 8px 10px 10px;
       border-radius: var(--gs-radius-sm);
-      border: 1px solid color-mix(in srgb, var(--gs-status-conflict) 45%, transparent);
-      background: color-mix(in srgb, var(--gs-status-conflict) 9%, transparent);
+      border: 1px solid color-mix(in srgb, var(--op-tone) 50%, transparent);
+      background: color-mix(in srgb, var(--op-tone) 9%, transparent);
+    }
+    .op-banner.tone-ready { --op-tone: var(--gs-accent); }
+    body.vscode-high-contrast .op-banner {
+      background: transparent;
+      border-color: var(--vscode-contrastBorder, var(--op-tone));
     }
     .op-banner[hidden] { display: none; }
     .op-title {
@@ -4321,16 +5060,46 @@ export class CommitViewProvider
       line-height: 1.35;
       overflow-wrap: anywhere;
     }
-    .op-title .codicon { flex: 0 0 auto; margin-top: 1px; color: var(--gs-status-conflict); }
+    .op-title .codicon { flex: 0 0 auto; margin-top: 1px; color: var(--op-tone); }
+    .op-banner.tone-ready .op-title .codicon { color: var(--gs-accent-text); }
+    /* The step, the direction and the note sit under the title's text, not
+       under its icon. */
+    .op-step,
     .op-direction,
     .op-note {
+      padding-left: 22px;
       font-size: 11.5px;
       line-height: 1.35;
-      color: var(--gs-fg);
       overflow-wrap: anywhere;
     }
-    .op-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-    .op-actions button.gs-commit { flex: 0 1 auto; height: 24px; padding: 0 10px; font-size: 12px; }
+    .op-step { color: var(--gs-fg-muted); }
+    .op-direction,
+    .op-note { color: var(--gs-fg); }
+    .op-actions {
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 6px;
+      margin-top: 4px;
+    }
+    .op-actions button.gs-commit {
+      flex: 0 0 auto;
+      min-width: 0;
+      height: 24px;
+      padding: 0 10px;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .op-actions .lbl-short { display: none; }
+    .op-actions .lbl-long,
+    .op-actions .lbl-short { overflow: hidden; text-overflow: ellipsis; }
+    /* Too narrow for them all: the lead on its own row, the rest sharing the
+       next one equally, by their first word. */
+    .op-actions.stacked { flex-wrap: wrap; }
+    .op-actions.stacked .op-lead { flex: 1 0 100%; }
+    /* Equal shares while there is room; never less than a word needs. */
+    .op-actions.stacked button.gs-commit:not(.op-lead) { flex: 1 1 0; min-width: max-content; }
+    .op-actions.stacked button.gs-commit:not(.op-lead) .lbl-long { display: none; }
+    .op-actions.stacked button.gs-commit:not(.op-lead) .lbl-short { display: inline; }
   </style>
 </head>
 <body class="layout-list">
@@ -4359,7 +5128,7 @@ export class CommitViewProvider
         <span class="sync-verb">Pull</span>
         <span id="behind-n">0</span>
       </button>
-      <span class="sync-clean" id="sync-clean" title="Up to date with upstream">
+      <span class="sync-clean" id="sync-clean" title="Up to date with upstream" role="img" aria-label="Up to date with upstream">
         <i class="codicon codicon-check" aria-hidden="true"></i>
         <span>up to date</span>
       </span>
@@ -4382,7 +5151,7 @@ export class CommitViewProvider
     <button class="sparkle review" id="review" type="button"
       title="Review changes with AI"
       aria-label="Review changes with AI">
-      <i class="codicon codicon-checklist glyph" aria-hidden="true"></i>
+      <i class="codicon codicon-code-review glyph" aria-hidden="true"></i>
     </button>
     <button class="sparkle connect" id="connect-ai" type="button"
       title="Connect an AI provider — powers commit messages &amp; code review"
@@ -4445,7 +5214,7 @@ export class CommitViewProvider
       </button>
       <button class="icon-btn stash-btn" id="stash-changes" type="button"
         title="Stash all changes…" aria-label="Stash all changes…">
-        <i class="codicon codicon-archive" aria-hidden="true"></i>
+        <i class="codicon codicon-git-stash" aria-hidden="true"></i>
       </button>
       <button class="icon-btn collapse-all" id="collapse-all" type="button"
         title="Collapse All Folders" aria-label="Collapse All Folders">
@@ -4458,7 +5227,12 @@ export class CommitViewProvider
     </span>
   </div>
 
-  <div class="groups" id="groups"></div>
+  <!-- One tree: group headers, folders, files and a file's changes are its
+       treeitems, with ONE tab stop that the arrow keys move (a roving
+       tabindex). The row buttons stay for the pointer; the keyboard reaches
+       the same actions through the row's menu (Shift+F10). The Stashes
+       group below the clean-tree note is part of it (aria-owns). -->
+  <div class="groups" id="groups" role="tree" aria-label="Changed files" aria-multiselectable="true" aria-owns="stashes"></div>
 
   <!-- Selection bar: only present while a multi-selection exists, so the view
        is unchanged for anyone who never selects. -->
@@ -4467,15 +5241,10 @@ export class CommitViewProvider
     <span class="selbar-actions">
       <button type="button" class="selbar-btn" id="selbar-stash">Stash</button>
       <button type="button" class="selbar-btn" id="selbar-stage">Stage</button>
+      <button type="button" class="selbar-btn" id="selbar-move" hidden>Move to Changes</button>
+      <button type="button" class="selbar-btn" id="selbar-copy" hidden>Copy to Changes</button>
       <button type="button" class="selbar-btn" id="selbar-clear">Clear</button>
     </span>
-  </div>
-
-  <!-- The stash drop target. Hidden until a drag starts, so it costs no layout
-       until it means something. -->
-  <div class="stash-drop" id="stash-drop" hidden>
-    <i class="codicon codicon-archive" aria-hidden="true"></i>
-    <span id="stash-drop-label">Drop to stash</span>
   </div>
 
   <div class="empty-state" id="empty-state">
@@ -4492,6 +5261,12 @@ export class CommitViewProvider
     </span>
     <span class="et" id="loading-text">Reading changes…</span>
   </div>
+
+  <!-- The Stashes group: after the file groups and the clean-tree note, so a
+       clean tree still reads "Working tree clean" first. No stashes, no group.
+       Its rows are treeitems of the list's tree (#groups owns it), and share
+       its one tab stop and its arrows. -->
+  <div class="groups stash-groups" id="stashes" role="none" hidden></div>
 
   <div class="no-repo" id="no-repo">
     <span class="badge">
@@ -4511,6 +5286,7 @@ export class CommitViewProvider
     </div>
   </div>
 
+  <script nonce="${nonce}" src="${changeRowsUri}"></script>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     const $ = (id) => document.getElementById(id);
@@ -4526,10 +5302,13 @@ export class CommitViewProvider
     const commitLabel = $("commit-label");
     const authorToggle = $("author-toggle");
     const groupsEl = $("groups");
+    const stashesEl = $("stashes");
     const selbarEl = $("selbar");
     const selbarCount = $("selbar-count");
-    const stashDropEl = $("stash-drop");
-    const stashDropLabel = $("stash-drop-label");
+    const selbarStashBtn = $("selbar-stash");
+    const selbarStageBtn = $("selbar-stage");
+    const selbarMoveBtn = $("selbar-move");
+    const selbarCopyBtn = $("selbar-copy");
     const emptyEl = $("empty-state");
     const loadingEl = $("loading-state");
     const loadingText = $("loading-text");
@@ -4619,19 +5398,251 @@ export class CommitViewProvider
     // covers what the user actually sees — tree or flat, one group or three.
     let rowOrder = [];
     const rowKey = (kind, path) => kind + ":" + path;
+    // A stash's files select the same way, keyed "stash:<sha>:<path>", in
+    // their own order. A selection lives in ONE place — the working tree's
+    // rows, or one stash's files — because what can be done with it differs:
+    // clicking into the other place starts a new selection there.
+    let stashRowOrder = [];
+    const stashKey = (sha, path) => "stash:" + sha + ":" + path;
+    function selScope(key) {
+      return key.indexOf("stash:") === 0 ? key.slice(0, key.indexOf(":", 6)) : "tree";
+    }
+    function orderOf(key) {
+      return key.indexOf("stash:") === 0 ? stashRowOrder : rowOrder;
+    }
+
+    // ---- Keyed rows: the list is PATCHED, never rebuilt -----------------
+    //
+    // Every click that moves a file (Stage, Unstage, a tick) used to clear the
+    // whole list and build every row again — 55,000 elements at 5,000 files,
+    // and the focused row, its hover and its tooltip timer thrown away each
+    // time. Now each row is kept by a key and a signature of everything its
+    // DOM and its handlers were built from: a render reuses the row whose
+    // signature still matches, builds only the rows that changed, and moves
+    // nodes into place — so one Stage builds one row, not the list.
+    //
+    // What changes without rebuilding (selection, a group's count, whether a
+    // group or folder is open) is painted onto the kept row on every render.
+    let rowCache = new Map();
+    let nextRowCache = new Map();
+    function keep(key, sig, build) {
+      const hit = rowCache.get(key);
+      const node = hit && hit.sig === sig ? hit.node : build();
+      nextRowCache.set(key, { sig: sig, node: node });
+      return node;
+    }
+    /** Make parent's children exactly nodes, in order, moving only what is out of place. */
+    function patchChildren(parent, nodes) {
+      let cur = parent.firstChild;
+      for (let i = 0; i < nodes.length; i++) {
+        const n = nodes[i];
+        if (n === cur) { cur = cur.nextSibling; continue; }
+        parent.insertBefore(n, cur);
+      }
+      while (cur) {
+        const next = cur.nextSibling;
+        parent.removeChild(cur);
+        cur = next;
+      }
+    }
+    function setAttr(node, name, value) {
+      if (node.getAttribute(name) !== value) node.setAttribute(name, value);
+    }
+    function countWords(n, one, many) {
+      return n === 1 ? "1 " + (one || "file") : n + " " + (many || "files");
+    }
+
+    // ---- The tree from the keyboard: one tab stop, arrows move it ---------
+    //
+    // Every row, tick and row button was its own tab stop — 46 of them for six
+    // files — and no arrow key did anything. The list is a tree now: Tab
+    // reaches it once, Up/Down/Home/End move through what is showing,
+    // Right/Left open and close a group, a folder or a file's changes (or step
+    // in and out of one), Enter opens, Space ticks in the checkbox model,
+    // Shift+Up/Down extends the selection and Shift+F10 opens a row's menu.
+    let activeTKey = null;  // the treeitem that holds the one tab stop
+    let rovingEl = null;
+    function itemOf(node) {
+      return node && node.closest ? node.closest('[role="treeitem"]') : null;
+    }
+    /**
+     * Whether a person can see this treeitem: not inside a closed group, and
+     * not in an empty one — an empty group is not drawn (.group.empty), but
+     * its header is still in the DOM. Counting that header put the list's
+     * only tab stop on something nobody could see whenever nothing was staged,
+     * so Tab never reached the list at all.
+     */
+    function shownItem(it) {
+      return !!it && !it.closest(".group.empty, .group.collapsed .group-body");
+    }
+    // The Stashes group is part of the same tree (the list's aria-owns): it
+    // sits after the "Working tree clean" note, so it has a box of its own,
+    // but the arrows walk from the last changed file into it and back.
+    const TREE_ITEMS = '#groups [role="treeitem"], #stashes [role="treeitem"]';
+    const treeEls = [groupsEl, stashesEl];
+    /** The treeitems a person can see, top to bottom. */
+    function treeItems() {
+      const all = document.querySelectorAll(TREE_ITEMS);
+      const out = [];
+      for (let i = 0; i < all.length; i++) {
+        if (shownItem(all[i])) out.push(all[i]);
+      }
+      return out;
+    }
+    function itemByTKey(tkey) {
+      if (!tkey) return null;
+      const sel = '[data-tkey="' + CSS.escape(tkey) + '"]';
+      return groupsEl.querySelector(sel) || stashesEl.querySelector(sel);
+    }
+    function levelOf(it) { return Number(it.getAttribute("aria-level") || "1"); }
+    /**
+     * Put the one tab stop on the active item — or its closed group's
+     * header, or, when neither can be seen, the first item that can. With
+     * nothing to see, the list has no tab stop.
+     */
+    function applyRoving() {
+      let target = itemByTKey(activeTKey);
+      if (target && target.closest(".group.collapsed .group-body")) {
+        target = target.closest(".group").querySelector(".group-header");
+      }
+      if (!shownItem(target)) target = treeItems()[0] || null;
+      if (rovingEl && rovingEl !== target) rovingEl.tabIndex = -1;
+      rovingEl = target;
+      if (target && target.tabIndex !== 0) target.tabIndex = 0;
+    }
+    function focusItem(it) {
+      if (!it) return;
+      activeTKey = it.dataset.tkey || null;
+      applyRoving();
+      it.focus({ preventScroll: true });
+      it.scrollIntoView({ block: "nearest" });
+    }
+    treeEls.forEach((t) => t.addEventListener("focusin", (ev) => {
+      const it = itemOf(ev.target);
+      if (!it || it.dataset.tkey === activeTKey) return;
+      activeTKey = it.dataset.tkey || null;
+      applyRoving();
+    }));
+    // A click on a row's own button or tick acts, and leaves the keyboard on
+    // the row — never on a control that is not in the tab order.
+    treeEls.forEach((t) => t.addEventListener("mousedown", (ev) => {
+      const it = itemOf(ev.target);
+      if (!it || ev.target === it) return;
+      const ctl = ev.target.closest ? ev.target.closest("button, input") : null;
+      if (!ctl || !it.contains(ctl)) return;
+      ev.preventDefault();
+      activeTKey = it.dataset.tkey || null;
+      applyRoving();
+      it.focus({ preventScroll: true });
+    }));
+    /**
+     * Shift+Up/Down: the selection runs from its anchor to the file row the
+     * keyboard lands on — inside one place only (the working tree's rows, or
+     * one stash's files), as a Shift-click's range does.
+     */
+    function selectThrough(from, to) {
+      if (!to || !to.dataset.key) return;
+      const scope = selScope(to.dataset.key);
+      if (selectionAnchor && selScope(selectionAnchor) !== scope) selectionAnchor = null;
+      if (!selectionAnchor && from && from.dataset.key && selScope(from.dataset.key) === scope) {
+        selectionAnchor = from.dataset.key;
+      }
+      if (!selectionAnchor) selectionAnchor = to.dataset.key;
+      const order = orderOf(to.dataset.key);
+      const a = order.indexOf(selectionAnchor);
+      const b = order.indexOf(to.dataset.key);
+      if (a === -1 || b === -1) return;
+      selectedRows.clear();
+      for (let i = Math.min(a, b); i <= Math.max(a, b); i++) selectedRows.add(order[i]);
+      paintSelection();
+    }
+    function onTreeKey(ev) {
+      const it = itemOf(ev.target);
+      if (!it || ev.altKey) return;
+      const k = ev.key;
+      const mod = ev.ctrlKey || ev.metaKey;
+      if (k === "ArrowDown" || k === "ArrowUp" || k === "Home" || k === "End" ||
+          k === "PageDown" || k === "PageUp") {
+        const items = treeItems();
+        const i = items.indexOf(it);
+        // A page is what the view shows (the page scrolls, not the list).
+        const page = Math.max(1, Math.floor(window.innerHeight / 24) - 1);
+        const to = k === "ArrowDown" ? i + 1 : k === "ArrowUp" ? i - 1
+          : k === "Home" ? 0 : k === "End" ? items.length - 1
+          : k === "PageDown" ? i + page : i - page;
+        const next = items[Math.max(0, Math.min(items.length - 1, to))];
+        ev.preventDefault();
+        if (!next) return;
+        if (ev.shiftKey && (k === "ArrowDown" || k === "ArrowUp")) selectThrough(it, next);
+        focusItem(next);
+        return;
+      }
+      if (mod && (k === "a" || k === "A") && ev.target === it) {
+        ev.preventDefault();
+        // In the Stashes group: the files of the stash the keyboard is in.
+        if (stashesEl.contains(it)) {
+          if (it.dataset.sha) selectStashFiles(it.dataset.sha);
+          return;
+        }
+        selectedRows.clear();
+        for (let i = 0; i < rowOrder.length; i++) selectedRows.add(rowOrder[i]);
+        selectionAnchor = rowOrder.length ? rowOrder[0] : null;
+        paintSelection();
+        return;
+      }
+      // Enter, Space and the arrows sideways on a row's own button or tick
+      // belong to that control.
+      if (ev.target !== it || mod) return;
+      // Shift+F10 or the menu key: the row's menu — a file's, a folder's or
+      // a group's — which is the keyboard's way to the row's buttons.
+      if (k === "ContextMenu" || (ev.shiftKey && k === "F10")) {
+        if (it.__menu) it.__menu(ev);
+        else ev.preventDefault();
+        return;
+      }
+      const expanded = it.getAttribute("aria-expanded");
+      if (k === "ArrowRight") {
+        ev.preventDefault();
+        if (expanded === "false" && it.__expand) { it.__expand(true); return; }
+        if (expanded === "true") {
+          const items = treeItems();
+          const child = items[items.indexOf(it) + 1];
+          if (child && levelOf(child) > levelOf(it)) focusItem(child);
+        }
+        return;
+      }
+      if (k === "ArrowLeft") {
+        ev.preventDefault();
+        if (expanded === "true" && it.__expand) { it.__expand(false); return; }
+        const items = treeItems();
+        const lvl = levelOf(it);
+        for (let j = items.indexOf(it) - 1; j >= 0; j--) {
+          if (levelOf(items[j]) < lvl) { focusItem(items[j]); return; }
+        }
+        return;
+      }
+      if ((k === "Enter" || k === " ") && it.__activate) {
+        ev.preventDefault();
+        it.__activate(k === " " ? "space" : "enter");
+      }
+    }
+    treeEls.forEach((t) => t.addEventListener("keydown", onTreeKey));
 
     /** Paint selection onto the DOM without a full render(), so clicks feel instant. */
     function paintSelection() {
-      const rows = groupsEl.querySelectorAll(".row.is-file");
-      for (let i = 0; i < rows.length; i++) {
-        const r = rows[i];
-        const on = selectedRows.has(r.dataset.key);
-        r.classList.toggle("is-selected", on);
-        if (on) r.setAttribute("aria-selected", "true");
-        else r.removeAttribute("aria-selected");
-      }
+      const rows = document.querySelectorAll("#groups .row.is-file, #stashes .row.is-file");
+      for (let i = 0; i < rows.length; i++) paintRowSelected(rows[i]);
       updateSelectionBar();
       updateSelectionChrome();
+    }
+    /** One file row's selected state: its class, and what a screen reader hears. */
+    function paintRowSelected(r) {
+      const on = selectedRows.has(r.dataset.key);
+      if (r.classList.contains("is-selected") !== on) r.classList.toggle("is-selected", on);
+      // In a multi-select tree every selectable item says whether it is
+      // selected, not only the selected ones.
+      const want = on ? "true" : "false";
+      if (r.getAttribute("aria-selected") !== want) r.setAttribute("aria-selected", want);
     }
 
     function clearSelection() {
@@ -4671,13 +5682,25 @@ export class CommitViewProvider
      * so nothing about the view changes for anyone who never shift-clicks.
      */
     function handleSelectionClick(ev, key) {
+      // A selection gesture in the other place (the working tree's rows, or
+      // another stash's files) starts over there. The row a Shift-range runs
+      // from goes too, even with nothing selected: a plain click leaves it
+      // behind, and a range from it would run through two stashes — whose
+      // files the bar would then credit to one of them.
+      const scope = selScope(key);
+      if (selectionAnchor && selScope(selectionAnchor) !== scope) selectionAnchor = null;
+      if (selectedRows.size > 0 && (ev.shiftKey || ev.ctrlKey || ev.metaKey)) {
+        const first = selectedRows.values().next().value;
+        if (selScope(first) !== scope) selectedRows.clear();
+      }
       if (ev.shiftKey && selectionAnchor) {
-        const a = rowOrder.indexOf(selectionAnchor);
-        const b = rowOrder.indexOf(key);
+        const order = orderOf(key);
+        const a = order.indexOf(selectionAnchor);
+        const b = order.indexOf(key);
         if (a !== -1 && b !== -1) {
           selectedRows.clear();
           const lo = Math.min(a, b), hi = Math.max(a, b);
-          for (let i = lo; i <= hi; i++) selectedRows.add(rowOrder[i]);
+          for (let i = lo; i <= hi; i++) selectedRows.add(order[i]);
           paintSelection();
           return true;
         }
@@ -4698,9 +5721,6 @@ export class CommitViewProvider
       return false;
     }
 
-    /** Paths being dragged right now; empty when no drag is in progress. */
-    let dragPaths = [];
-
     /** The context menu for a multi-row selection. Counts are files, not rows. */
     function multiItems() {
       const entries = selectionEntries();
@@ -4710,7 +5730,7 @@ export class CommitViewProvider
       const stageable = entries.filter((en) => en.kind !== "staged");
       const unstageable = entries.filter((en) => en.kind === "staged");
       const items = [];
-      items.push({ icon: "archive", label: "Stash " + label,
+      items.push({ icon: "git-stash", label: "Stash " + label,
         fn: () => { vscode.postMessage({ type: "stashPaths", paths: paths }); clearSelection(); } });
       items.push({ sep: true });
       // ONE message per action, never one per file. Per-file messages ran
@@ -4754,43 +5774,278 @@ export class CommitViewProvider
       const n = selectedRows.size;
       selbarEl.hidden = n === 0;
       if (n === 0) return;
+      // A stash's files: the bar sits under the stash group and offers what
+      // can be done with them. The working tree's: under the file groups.
+      const st = stashSelection();
+      selbarEl.classList.toggle("is-stash", !!st);
+      selbarStashBtn.hidden = !!st;
+      selbarStageBtn.hidden = !!st;
+      selbarMoveBtn.hidden = !st;
+      selbarCopyBtn.hidden = !st;
+      if (st) {
+        const s = authStashes.find((x) => x.sha === st.sha);
+        selbarCount.textContent = (st.paths.length === 1 ? "1 file" : String(st.paths.length) + " files") +
+          (s ? " from “" + s.text + "”" : "");
+        // Their tips say where these files come back, as the rows' do.
+        const files = stashFilesOf({ sha: st.sha }, st.paths);
+        for (const [b, tip] of [[selbarMoveBtn, tipMove(files)], [selbarCopyBtn, tipCopy(files)]]) {
+          b.dataset.tip = tip;
+          b.setAttribute("aria-description", tip);
+        }
+        if (selbarEl.previousElementSibling !== stashesEl) stashesEl.after(selbarEl);
+        return;
+      }
+      if (selbarEl.previousElementSibling !== groupsEl) groupsEl.after(selbarEl);
       const files = selectionPaths().length;
       selbarCount.textContent = files === 1 ? "1 file selected" : String(files) + " files selected";
     }
 
     function updateSelectionChrome() { syncStashButtonLabel(); }
 
-    function showDropZone(count) {
-      stashDropLabel.textContent =
-        count === 1 ? "Drop to stash 1 file" : "Drop to stash " + count + " files";
-      stashDropEl.hidden = false;
+    // ---- Drag and drop: the working tree and the Stashes group ------------
+    // Stashes and changes share this view, so a drag goes straight from one
+    // to the other — the menus' Apply, Pop, Move, Copy and Stash, by hand:
+    //   a stash               → the working tree (or its clean note): Apply (Alt: Pop)
+    //   its files, a folder   → the same place: Move (Alt: Copy)
+    //   working-tree files    → the Stashes group: stash exactly those
+    // The working tree is ONE place, however many groups it shows: what
+    // comes back comes back as it was stashed (staged changes staged), so no
+    // one group — Staged, say — may look like it decides where.
+    // It posts what the menus post, so the same doors answer (Stash & Retry,
+    // the staging question, conflicts, Undo). A single stash takes nothing:
+    // git cannot add to a stash, so files go to the GROUP — lit whole, its
+    // words in its header — wherever in it they are let go, never to a row
+    // lit as if it were the one they joined. (The header alone was a 26px
+    // strip; let go over the stashes under it, a drop did nothing.)
+    // drag is what is being dragged (null: nothing of ours); dropKey the
+    // place under the pointer, by name — the renders rebuild the elements.
+    let drag = null;
+    let dropKey = null;
+    let dropAlt = false;
+    const ALT_NAME = /Mac|iPhone|iPad/.test(navigator.platform || "") ? "Option" : "Alt";
+
+    /** The working tree's rows being dragged: the selection when the row is in it, else that row. Never a conflicted file — it cannot be stashed. */
+    function treeDragPaths(key, own) {
+      const conflicted = new Set((lastState.merge || []).map((e) => e.path));
+      let paths;
+      if (key && selectedRows.has(key)) {
+        paths = [];
+        const entries = selectionEntries();
+        for (let i = 0; i < entries.length; i++) {
+          if (entries[i].kind !== "merge" && paths.indexOf(entries[i].path) === -1) paths.push(entries[i].path);
+        }
+      } else {
+        paths = own.slice();
+      }
+      return paths.filter((p) => !conflicted.has(p));
     }
 
-    function hideDropZone() {
-      stashDropEl.hidden = true;
-      stashDropEl.classList.remove("is-over");
+    /** The places the drag in hand can go, by name. */
+    function dropKeys() {
+      if (!drag) return [];
+      if (drag.kind === "tree") return drag.paths.length ? ["stashes"] : [];
+      return ["tree", "empty"];
     }
-
-    // dragover must be cancelled for a drop to be allowed at all — without the
-    // preventDefault the browser refuses the drop and the whole gesture silently
-    // does nothing.
-    stashDropEl.addEventListener("dragover", (ev) => {
+    /** Where a place shows its words. */
+    function dropEl(key) {
+      if (key === "stashes") return stashesEl.hidden ? null : stashesEl.querySelector(".group--stashes > .group-header");
+      if (key === "empty") return emptyEl.classList.contains("visible") ? emptyEl : null;
+      // The working tree: every group it shows, as one place.
+      return groupsEl.querySelector(":scope > .group:not(.empty)") ? groupsEl : null;
+    }
+    /** A place, whole: what takes the drop and is lit — the Stashes group with its rows. */
+    function dropArea(key) {
+      const t = dropEl(key);
+      return t && key === "stashes" ? t.parentElement : t;
+    }
+    /** The place a node is in, when the drag in hand can go there. */
+    function dropKeyAt(node) {
+      const keys = dropKeys();
+      for (let i = 0; i < keys.length; i++) {
+        const t = dropArea(keys[i]);
+        if (t && node && t.contains(node)) return keys[i];
+      }
+      return null;
+    }
+    /** What a drop does, in words: [the verb, how Alt/Option picks the other]. */
+    function dropWords() {
+      if (drag.kind === "tree") return ["Drop to stash " + countWords(drag.paths.length), ""];
+      if (drag.kind === "stash") {
+        return dropAlt
+          ? ["Drop to pop", "Release " + ALT_NAME + " to apply"]
+          : ["Drop to apply", "Hold " + ALT_NAME + " to pop"];
+      }
+      const n = countWords(drag.paths.length);
+      return dropAlt
+        ? ["Drop to copy " + n, "Release " + ALT_NAME + " to move"]
+        : ["Drop to move " + n, "Hold " + ALT_NAME + " to copy"];
+    }
+    /**
+     * Where a place shows its words: the Stashes header and the clean note in
+     * themselves; the working tree in a band held at the top of it, in sight
+     * however far the list is scrolled, laid over its first group's header.
+     */
+    function hintOf(t) {
+      const band = t === groupsEl;
+      let h = t.querySelector(":scope > .drop-hint");
+      if (!h) {
+        h = el(band ? "div" : "span", "drop-hint");
+        h.setAttribute("aria-hidden", "true");
+        const words = band ? el("span", "drop-words") : h;
+        words.append(el("span", "drop-verb"), el("span", "drop-alt"));
+        if (band) h.appendChild(words);
+      }
+      if (band) {
+        if (groupsEl.firstChild !== h) groupsEl.insertBefore(h, groupsEl.firstChild);
+      } else if (!h.parentNode) {
+        t.appendChild(h);
+      }
+      return h;
+    }
+    /** Paint the drag onto the view: every place it can go faintly, the one under the pointer lit, with its words. */
+    function paintDrop() {
+      const keys = dropKeys();
+      document.querySelectorAll(".is-drop-ready, .is-drop-over").forEach((n) => {
+        n.classList.remove("is-drop-ready", "is-drop-over");
+      });
+      document.body.classList.toggle("is-dragging", !!drag);
+      // The working tree's band is not one of its groups: out, unless lit.
+      const band = groupsEl.querySelector(":scope > .drop-hint");
+      if (band && !(drag && dropKey === "tree")) band.remove();
+      if (!drag) return;
+      for (let i = 0; i < keys.length; i++) {
+        const t = dropEl(keys[i]);
+        if (!t) continue;
+        const area = dropArea(keys[i]);
+        if (keys[i] !== dropKey) { area.classList.add("is-drop-ready"); continue; }
+        area.classList.add("is-drop-over");
+        // The Stashes group is lit whole; its header carries the words.
+        if (area !== t) t.classList.add("is-drop-over");
+        const h = hintOf(t);
+        const words = dropWords();
+        const verb = h.querySelector(".drop-verb");
+        const alt = h.querySelector(".drop-alt");
+        verb.textContent = words[0];
+        alt.textContent = words[1];
+        alt.hidden = !words[1];
+        if (t === groupsEl) fitBand(h.firstChild);
+      }
+    }
+    /**
+     * The working tree's band covers its first group's header; where its
+     * words take two lines (a narrow sidebar) it reaches down to the next
+     * row's edge, never leaving half a row showing under it.
+     */
+    function fitBand(words) {
+      words.style.minHeight = "";
+      const need = words.offsetHeight;
+      const top = groupsEl.getBoundingClientRect().top;
+      const edges = groupsEl.querySelectorAll(":scope > .group > .group-header, :scope > .group .row");
+      for (let i = 0; i < edges.length; i++) {
+        const r = edges[i].getBoundingClientRect();
+        if (!r.height || r.bottom - top < need - 0.5) continue;
+        words.style.minHeight = Math.ceil(r.bottom - top) + "px";
+        return;
+      }
+    }
+    function setDrop(key, alt) {
+      if (key === dropKey && !!alt === dropAlt) return;
+      dropKey = key;
+      dropAlt = !!alt;
+      paintDrop();
+    }
+    /**
+     * A drag of ours starts: what it carries, and the rows that go with it
+     * (dimmed). Files carry their paths as plain text too, so a drop in a
+     * terminal or an editor pastes something sensible; a stash carries only
+     * its sha, in a type of its own — let go over an editor by mistake, it
+     * must not type its message into a file.
+     */
+    function beginDrag(ev, what, rows, text) {
+      drag = what;
+      dropKey = null;
+      dropAlt = false;
+      if (ev.dataTransfer) {
+        ev.dataTransfer.effectAllowed = "copyMove";
+        if (what.kind === "stash") ev.dataTransfer.setData("application/x-gitstudio-stash", what.sha);
+        else ev.dataTransfer.setData("text/plain", text);
+      }
+      rows.forEach((r) => r.classList.add("is-dragged"));
+      // A drag of the working tree's files needs the Stashes header, even
+      // with no stash yet: it is where they go.
+      if (what.kind === "tree" && stashesEl.hidden) renderStashes();
+      paintDrop();
+    }
+    function endDrag() {
+      if (!drag) return;
+      const wasTree = drag.kind === "tree";
+      drag = null;
+      dropKey = null;
+      dropAlt = false;
+      document.querySelectorAll(".row.is-dragged").forEach((r) => r.classList.remove("is-dragged"));
+      paintDrop();
+      if (wasTree && shownStashes().length === 0) renderStashes();
+    }
+    /** The drag landed on key: do what the menus do. */
+    function dropOn(d, alt) {
+      if (d.kind === "tree") {
+        if (!d.paths.length) return;
+        vscode.postMessage({ type: "stashPaths", paths: d.paths });
+        if (d.selection) clearSelection();
+        return;
+      }
+      const s = authStashes.find((x) => x.sha === d.sha);
+      if (!s) return;
+      if (d.kind === "stash") stashAct(s, alt ? "pop" : "apply");
+      else stashFilesAct(s, d.paths, alt ? "copy" : "move");
+    }
+    /**
+     * The pointer's badge: copy where the source stays (Apply, Copy), move
+     * where it goes (Pop, Move, Stash) — but only an effect the drag still
+     * allows. A Mac narrows a drag to copy alone while Option is held, and
+     * the browser then refuses a drop that asks for move: an Option-drop to
+     * Pop did nothing at all. What a drop does is read from Alt at the drop,
+     * never from this.
+     */
+    function dropEffectFor(dt, want) {
+      const a = String(dt.effectAllowed || "all").toLowerCase();
+      const allows = (e) => a === "all" || a === "uninitialized" || a.indexOf(e) !== -1;
+      if (allows(want)) return want;
+      return ["copy", "move", "link"].find(allows) || want;
+    }
+    // dragover must be cancelled for a drop to be allowed at all: over a
+    // place the drag can go it is, and the pointer says copy or move; over
+    // anything else it is not, and the browser shows that nothing drops.
+    document.addEventListener("dragenter", (ev) => {
+      if (drag && dropKeyAt(ev.target)) ev.preventDefault();
+    });
+    document.addEventListener("dragover", (ev) => {
+      if (!drag) return;
+      const key = dropKeyAt(ev.target);
+      setDrop(key, ev.altKey);
+      if (!key) return;
       ev.preventDefault();
-      if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
-      stashDropEl.classList.add("is-over");
+      if (ev.dataTransfer) {
+        const keeps = drag.kind === "stash" ? !ev.altKey : drag.kind === "stashFiles" ? ev.altKey : false;
+        ev.dataTransfer.dropEffect = dropEffectFor(ev.dataTransfer, keeps ? "copy" : "move");
+      }
     });
-    stashDropEl.addEventListener("dragleave", () => {
-      stashDropEl.classList.remove("is-over");
+    document.addEventListener("dragleave", (ev) => {
+      // Out of the view altogether: nothing under the pointer is ours.
+      if (drag && !ev.relatedTarget && (ev.clientX <= 0 || ev.clientY <= 0 ||
+          ev.clientX >= window.innerWidth || ev.clientY >= window.innerHeight)) setDrop(null, false);
     });
-    stashDropEl.addEventListener("drop", (ev) => {
+    document.addEventListener("drop", (ev) => {
+      if (!drag) return;
       ev.preventDefault();
-      const paths = dragPaths.slice();
-      hideDropZone();
-      document.body.classList.remove("is-dragging-files");
-      if (paths.length === 0) return;
-      vscode.postMessage({ type: "stashPaths", paths: paths });
-      clearSelection();
+      const d = drag;
+      const key = dropKeyAt(ev.target);
+      endDrag();
+      if (key) dropOn(d, ev.altKey);
     });
+    // Its source's end: dropped (above), cancelled with Escape, or let go
+    // outside the view.
+    document.addEventListener("dragend", () => endDrag());
 
     // The selection bar's actions operate on the whole selection.
     $("selbar-stash").addEventListener("click", () => {
@@ -4868,6 +6123,11 @@ export class CommitViewProvider
     // carries none on its first post for a repository (see pushState).
     let branchesLoading = true;
     let lastBranchSig = "";
+    /** What an open branch menu shows, as one string: when it changes the menu repaints. */
+    function bmSig() {
+      const hs = lastHeaderState;
+      return JSON.stringify([branchesLoading, branchData, !!(hs && hs.detached), hs && hs.detached ? hs.branch : ""]);
+    }
 
     // path -> { action: "stage" | "unstage", at: ms }. An optimistic move that
     // git hasn't confirmed yet. Cleared once the authoritative state agrees, or
@@ -4996,6 +6256,16 @@ export class CommitViewProvider
     };
     function statusTitle(letter) {
       return STATUS_NAMES[letter] || "Modified";
+    }
+
+    /**
+     * The row that shows the next page of a long list — the branch menu's
+     * tags, a stash's files: "Show 40 more of 95" while more stay hidden
+     * after it, "Show 15 more" for the last page ("Show 15 more of 15" said
+     * the same number twice).
+     */
+    function showMoreLabel(hidden, page) {
+      return hidden > page ? "Show " + page + " more of " + hidden : "Show " + hidden + " more";
     }
 
     function el(tag, cls, html) {
@@ -5137,6 +6407,9 @@ export class CommitViewProvider
       const hasUpstream = !!state.upstream;
       aheadN.textContent = String(ahead);
       behindN.textContent = String(behind);
+      // The count in the name too: a folded pill shows only an arrow and it.
+      aheadEl.setAttribute("aria-label", "Push " + ahead + (ahead === 1 ? " commit" : " commits"));
+      behindEl.setAttribute("aria-label", "Pull " + behind + (behind === 1 ? " commit" : " commits"));
       aheadEl.classList.toggle("visible", ahead > 0);
       behindEl.classList.toggle("visible", behind > 0);
       syncClean.classList.toggle("visible", hasUpstream && ahead === 0 && behind === 0);
@@ -5160,11 +6433,22 @@ export class CommitViewProvider
     // (Windows' are narrower), with the branch already losing letters. So,
     // measured with the name shown each time: if the branch name is clipped,
     // the name folds away completely; with room again, it comes back.
+    //
+    // Then the sync pills' verbs: at a sidebar's width, "Push 2" and "Pull 3"
+    // kept their full width while the branch was down to "fea…". Folded,
+    // they are an arrow and a count (the pill's name and tip keep the word).
+    // Each pass starts from everything shown, so a wider sidebar gives it all
+    // back and the decision is the same whichever state it starts from.
     function fitRepoPill() {
-      if (repoPill.hidden) return;
+      const clipped = () => branchName.scrollWidth > branchName.clientWidth + 0.5;
       repoPill.classList.remove("folded");
-      const clipped = branchName.scrollWidth > branchName.clientWidth + 0.5;
-      repoPill.classList.toggle("folded", clipped);
+      syncEl.classList.remove("compact");
+      if (!clipped()) return;
+      if (!repoPill.hidden) {
+        repoPill.classList.add("folded");
+        if (!clipped()) return;
+      }
+      syncEl.classList.add("compact");
     }
     new ResizeObserver(() => fitRepoPill()).observe(repoPill.parentElement);
     if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitRepoPill);
@@ -5269,6 +6553,7 @@ export class CommitViewProvider
       applyLayoutClass();
       vscode.postMessage({ type: "setLayout", layout });
       render();
+      renderStashes();
     });
 
     // Staging model, beside the tree/list toggle because it is the same KIND of
@@ -5298,7 +6583,11 @@ export class CommitViewProvider
       for (const key of Object.keys(collapsed)) collapsed[key] = false;
       const folders = collectFolderKeys();
       for (const k of folders) collapsed[k] = true;
+      // And the folders of every open stash.
+      const stashFolders = stashesEl.querySelectorAll("[data-tkey^='stashfolder:']");
+      for (let i = 0; i < stashFolders.length; i++) collapsed[stashFolders[i].dataset.tkey] = true;
       render();
+      renderStashes();
     });
     stageAllTopBtn.addEventListener("click", () => {
       queueGroup("unstaged", "stage");
@@ -5334,13 +6623,26 @@ export class CommitViewProvider
     // ---- Branch + actions menu (folds in the old Branches view) ----------
     let branchMenu = null;
     let branchFilter = "";
-    // How many tags are rendered at once, and the current window. Paged rather
-    // than capped so every tag is reachable via "Show more".
-    const TAG_PAGE = 40;
-    let tagLimit = TAG_PAGE;
+    // The query as typed (branchFilter is it lower-cased): what "New Branch
+    // '<query>'…" fills its name with.
+    let branchQuery = "";
+    // How many rows a long group (Tags, and each remote) renders at once, and
+    // each group's current window, by its key. Paged rather than capped, so
+    // every ref is reachable via "Show more"; a new query starts over.
+    const PAGE = 40;
+    let pageLimits = Object.create(null);
     let branchSubmenu = null;
     // The width the open menu holds while the query changes (see holdBranchMenuWidth).
     let bmHeldWidth = 0;
+    // The best match of the last render: the row a query's highlight goes to.
+    let bmBest = null;
+    // Whether the arrows or the pointer have moved the highlight since the
+    // query last changed. Until they have, a repaint from the host puts it
+    // back on the best match (branches that arrived, counts that changed);
+    // after, it stays where they put it.
+    let bmUserMoved = false;
+    // The list's scroll position while a branch's actions are drilled in.
+    let bmDrillScroll = 0;
     // Per-category collapse memory (Favorites / Recents / Local / Remote / Tags).
     const collapsedCats = Object.create(null);
 
@@ -5360,6 +6662,9 @@ export class CommitViewProvider
     // -1 when the highlight is in the main list.
     let bmActiveKey = "";
     let bmSubActive = -1;
+    // Drilled in, the pointer on the back row ('‹ feature') lights it: the
+    // one row lit, the actions' highlight dark until the arrows move on.
+    let bmBackLit = false;
     let bmOptSeq = 0;
     // Where the pointer last was: a mousemove at the same spot is the list
     // scrolling under a still mouse, not the mouse moving, and must not take
@@ -5389,6 +6694,11 @@ export class CommitViewProvider
     function bmSubItems() {
       return branchSubmenu ? Array.prototype.slice.call(branchSubmenu.querySelectorAll(".bm-subaction")) : [];
     }
+    /** Drilled in, the back row above the actions; otherwise none. */
+    function bmBackRow() {
+      return branchSubmenu && branchSubmenu.classList.contains("is-drilled")
+        ? branchSubmenu.querySelector(".bm-subhead") : null;
+    }
     /** Paint the highlight where the state says it is, and point the box at it. */
     function paintBm(scroll) {
       if (!branchMenu) return;
@@ -5408,11 +6718,22 @@ export class CommitViewProvider
       if (input) {
         input.setAttribute("aria-controls", branchSubmenu ? "bm-list bm-sub" : "bm-list");
       }
+      const back = bmBackLit ? bmBackRow() : null;
+      if (back) {
+        // Lit as any row is; not an option of the list, so the box points at none.
+        back.classList.add("is-active");
+        if (main) main.classList.add("is-open");
+        if (input) input.removeAttribute("aria-activedescendant");
+        return;
+      }
       if (target) {
         target.classList.add("is-active");
         target.setAttribute("aria-selected", "true");
         if (input) input.setAttribute("aria-activedescendant", target.id);
-        if (scroll && target.scrollIntoView) target.scrollIntoView({ block: "nearest" });
+        if (scroll && target.scrollIntoView) {
+          target.scrollIntoView({ block: "nearest" });
+          fitBranchNames(); // rows it scrolled into sight
+        }
       } else if (input) {
         input.removeAttribute("aria-activedescendant");
       }
@@ -5428,11 +6749,19 @@ export class CommitViewProvider
       // An open submenu belongs to the row it was opened on.
       if (branchSubmenu) { closeBranchSubmenu(); subMenuFor = null; }
       bmActiveKey = rows[i].dataset.bmkey;
+      bmUserMoved = true;
       paintBm(true);
     }
     function moveBmSub(delta) {
       const items = bmSubItems();
       if (!items.length) return;
+      if (bmBackLit) {
+        // From the back row, down goes into the actions from their top;
+        // up has nowhere to go.
+        if (delta < 0) return;
+        bmBackLit = false;
+        bmSubActive = -1;
+      }
       bmSubActive = Math.max(0, Math.min(items.length - 1, bmSubActive + delta));
       paintBm(true);
     }
@@ -5452,6 +6781,7 @@ export class CommitViewProvider
     function closeBmSub() {
       closeBranchSubmenu();
       subMenuFor = null;
+      bmUserMoved = true; // the branch it was opened on keeps the highlight
       paintBm(true);
     }
     /** The search box's keys. Only the box's own events: a dialog raised
@@ -5506,6 +6836,7 @@ export class CommitViewProvider
         // run its first item. Only a fresh press acts.
         if (e.repeat) return;
         if (branchSubmenu) {
+          if (bmBackLit) { closeBmSub(); return; }
           if (bmSubActive < 0) { moveBmSub(1); return; }
           const item = bmSubItems()[bmSubActive];
           if (item) item.click();
@@ -5543,6 +6874,13 @@ export class CommitViewProvider
     function closeBranchSubmenu() {
       if (branchSubmenu) { branchSubmenu.remove(); branchSubmenu = null; }
       bmSubActive = -1;
+      bmBackLit = false;
+      // Drilled in: the list comes back, scrolled where it was.
+      if (branchMenu && branchMenu.classList.contains("is-drilled")) {
+        branchMenu.classList.remove("is-drilled");
+        const list = bmList();
+        if (list) list.scrollTop = bmDrillScroll;
+      }
       hideTip(); // a tip anchored to a removed submenu item must not linger
     }
     function onBranchDocDown(e) {
@@ -5593,26 +6931,150 @@ export class CommitViewProvider
       vscode.postMessage({ type: "branchAction", action: "favorite", ref: name });
       // The list below is the one this change makes: the host's agreeing
       // post then has nothing to repaint.
-      lastBranchSig = JSON.stringify([branchesLoading, branchData]);
+      lastBranchSig = bmSig();
       refreshOpenBranchUi();
     }
-    function matchF(s) { return !branchFilter || s.toLowerCase().indexOf(branchFilter) !== -1; }
+    // ── Search: one scorer for the actions and every ref ─────────────────
+    // A query matches a name in one of these ways, best first. A better way
+    // always outranks a worse one, so an exact or a prefix match is never
+    // beaten by a scattered one:
+    //   exact · a prefix of the name · a prefix of its last path segment
+    //   ("login" in feature/login) · a run that starts a word ("cache" in
+    //   spike/the-cache) · a run anywhere · scattered letters, each one
+    //   either right after the one before it or starting a word: "rel21"
+    //   finds release/2.1 and "fl" feature/login, but "fe" does not find
+    //   fix/some-page.
+    // The actions are scored the same way, on their labels, so with a query
+    // the highlight goes to the best match of all; on a tie a branch wins —
+    // "fe" is feature, not Fetch — and only an action whose name the query
+    // matches better (typing "fetch") takes it.
+    const BM_TIER = { exact: 1000, prefix: 800, segment: 700, word: 600, run: 400, scattered: 200 };
+    /** Does a word start at text[i]: the start, after a separator, a
+     *  lower-to-upper case step, or a step between letters and digits. */
+    function bmWordStart(text, i) {
+      if (i <= 0) return true;
+      const p = text.charAt(i - 1), c = text.charAt(i);
+      if (/[\/\-_.\s()'"@#:,+]/.test(p)) return true;
+      if (/[a-z]/.test(p) && /[A-Z]/.test(c)) return true;
+      const pd = /[0-9]/.test(p), cd = /[0-9]/.test(c);
+      return pd !== cd && /[A-Za-z0-9]/.test(p) && /[A-Za-z0-9]/.test(c);
+    }
+    function bmRun(at, n) {
+      const out = [];
+      for (let i = 0; i < n; i++) out.push(at + i);
+      return out;
+    }
+    /**
+     * How well q (lower case, trimmed) matches text: { s, pos } — s the
+     * score, pos the index of each matched letter — or null for no match.
+     */
+    function bmScore(q, text) {
+      if (!q) return { s: 0, pos: [] };
+      const t = text.toLowerCase();
+      const n = q.length;
+      if (t === q) return { s: BM_TIER.exact, pos: bmRun(0, n) };
+      if (t.startsWith(q)) return { s: BM_TIER.prefix, pos: bmRun(0, n) };
+      const seg = t.lastIndexOf("/") + 1;
+      if (seg > 0 && t.startsWith(q, seg)) return { s: BM_TIER.segment, pos: bmRun(seg, n) };
+      const first = t.indexOf(q);
+      if (first >= 0) {
+        for (let w = first; w >= 0; w = t.indexOf(q, w + 1)) {
+          // Within a way of matching, an earlier match ranks a little higher.
+          if (bmWordStart(text, w)) return { s: BM_TIER.word + (99 - Math.min(w, 99)) / 100, pos: bmRun(w, n) };
+        }
+        return { s: BM_TIER.run + (99 - Math.min(first, 99)) / 100, pos: bmRun(first, n) };
+      }
+      return bmScattered(q, text, t);
+    }
+    /** The scattered match with the fewest separate runs (then the earliest). */
+    function bmScattered(q, text, t) {
+      const n = t.length, m = q.length;
+      // The letters in order at all? Most names are out here, cheaply.
+      let k = 0;
+      for (let j = 0; j < n && k < m; j++) if (t.charCodeAt(j) === q.charCodeAt(k)) k++;
+      if (k < m) return null;
+      // runs[j]: the fewest runs matching q up to letter i with letter i at
+      // j (Infinity: cannot); back[i][j]: where letter i - 1 was then.
+      let runs = new Array(n).fill(Infinity);
+      for (let j = 0; j < n; j++) if (t.charAt(j) === q.charAt(0) && bmWordStart(text, j)) runs[j] = 1;
+      const back = [null];
+      for (let i = 1; i < m; i++) {
+        const cur = new Array(n).fill(Infinity);
+        const from = new Array(n).fill(-1);
+        let bestBefore = Infinity, bestAt = -1; // the best of runs[0 .. j - 2]
+        for (let j = 0; j < n; j++) {
+          if (j >= 2 && runs[j - 2] < bestBefore) { bestBefore = runs[j - 2]; bestAt = j - 2; }
+          if (t.charAt(j) !== q.charAt(i)) continue;
+          // Right after the letter before: the same run.
+          if (j >= 1 && runs[j - 1] < cur[j]) { cur[j] = runs[j - 1]; from[j] = j - 1; }
+          // Or a new run, which must start a word.
+          if (bestAt >= 0 && bestBefore + 1 < cur[j] && bmWordStart(text, j)) { cur[j] = bestBefore + 1; from[j] = bestAt; }
+        }
+        back.push(from);
+        runs = cur;
+      }
+      let end = -1, fewest = Infinity;
+      for (let j = 0; j < n; j++) if (runs[j] < fewest) { fewest = runs[j]; end = j; }
+      if (end < 0) return null;
+      const pos = [end];
+      for (let i = m - 1; i > 0; i--) pos.unshift(back[i][pos[0]]);
+      return { s: BM_TIER.scattered + Math.max(1, 90 - 10 * (fewest - 1) - Math.min(pos[0], 40) / 2), pos: pos };
+    }
+    /** A remote branch scored on what its row shows (the name without the
+     *  remote) and on its whole name ("origin/fe" finds it too); the marks
+     *  land on the part shown. */
+    function bmScoreRemote(q, full, shown) {
+      const part = bmScore(q, shown);
+      const whole = bmScore(q, full);
+      if (!whole || (part && part.s >= whole.s)) return part;
+      const cut = full.length - shown.length;
+      return { s: whole.s, pos: whole.pos.filter((p) => p >= cut).map((p) => p - cut) };
+    }
 
     function bIcon(name) {
       return '<i class="codicon codicon-' + name + '" aria-hidden="true"></i>';
     }
-    // HTML-escape, then wrap the matched search substring in a highlight mark.
     function esc(s) {
       return s.replace(/[&<>"]/g, (c) =>
         ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
     }
-    function hl(text) {
-      if (!branchFilter) return esc(text);
-      const i = text.toLowerCase().indexOf(branchFilter);
-      if (i < 0) return esc(text);
-      return esc(text.slice(0, i)) +
-        '<mark class="bm-hl">' + esc(text.slice(i, i + branchFilter.length)) + '</mark>' +
-        esc(text.slice(i + branchFilter.length));
+    /** HTML-escape text, marking the letters at pos (each run in one mark). */
+    function hl(text, pos) {
+      if (!pos || !pos.length) return esc(text);
+      const on = new Set(pos);
+      let out = "";
+      for (let i = 0; i < text.length; ) {
+        let j = i;
+        const inMark = on.has(i);
+        while (j < text.length && on.has(j) === inMark) j++;
+        const part = esc(text.slice(i, j));
+        out += inMark ? '<mark class="bm-hl">' + part + "</mark>" : part;
+        i = j;
+      }
+      return out;
+    }
+    /** A count as a badge shows it: a number past 999 would crowd the name out. */
+    function bmCount(n) { return n > 999 ? "999+" : String(n); }
+    /**
+     * The remote a remote-tracking name belongs to — the longest remote the
+     * host listed whose namespace holds it, since a remote's own name may
+     * hold a slash ("team/eu"). When strict, "" for a name under none of
+     * them (an upstream that is a local branch); otherwise its first path
+     * segment then, as it is when the host listed no remotes.
+     */
+    function bmRemoteOf(name, strict) {
+      const names = branchData.remoteNames || [];
+      let best = "";
+      for (const r of names) if (r.length > best.length && name.startsWith(r + "/")) best = r;
+      if (best || (strict && names.length)) return best;
+      const i = name.indexOf("/");
+      return i > 0 ? name.slice(0, i) : "";
+    }
+    /** What a row shows for a live upstream: only the remote ("origin") when
+     *  it tracks the branch of the same name there, else the whole name. */
+    function bmUpstreamShown(name, up) {
+      const r = bmRemoteOf(up, true);
+      return r && up === r + "/" + name ? r : up;
     }
     /** What Compare / Merge / Rebase act on, as a submenu names it: the
      *  current branch, quoted — the header's name when git lists no ref for it
@@ -5625,9 +7087,18 @@ export class CommitViewProvider
       return name ? "'" + name + "'" : "HEAD";
     }
 
-    function branchRow(name, kind, up, fav, current, ahead, behind, gone) {
+    /**
+     * One ref's row. r: { name, kind ("local" | "remote" | "tag"), shown (the
+     * text the row shows: a remote branch without its remote), up, fav,
+     * current, ahead, behind, gone, pos (matched letters of shown), s }.
+     */
+    function branchRow(r) {
+      const name = r.name, kind = r.kind, up = r.up, current = r.current;
+      const ahead = r.ahead, behind = r.behind, gone = r.gone;
+      const shown = r.shown || name;
       const row = el("div", "bm-branch" + (current ? " is-current" : ""));
       if (kind === "local") {
+        const fav = !!r.fav;
         const star = el("button", "bm-star" + (fav ? " on" : ""),
           bIcon(fav ? "star-full" : "star-empty"));
         star.title = fav ? "Remove from favorites" : "Add to favorites";
@@ -5644,13 +7115,19 @@ export class CommitViewProvider
         : current ? "check" : "git-branch";
       row.appendChild(el("i", "codicon codicon-" + icon + " bm-bicon"));
       row.dataset.bname = name; // refreshOpenBranchUi re-finds the row by name
-      const nm = el("span", "bm-bname", hl(name)); row.appendChild(nm);
+      const nm = el("span", "bm-bname", hl(shown, r.pos));
+      // What fitBranchNames needs to cut the middle out of a long name
+      // around what matched.
+      if (r.pos && r.pos.length) { nm.dataset.text = shown; nm.dataset.pos = r.pos.join(","); }
+      row.appendChild(nm);
       // Unpushed/unpulled counts per branch — the payoff of the in-menu Fetch.
-      if (ahead) row.appendChild(el("span", "bm-ab up", "↑" + ahead));
-      if (behind) row.appendChild(el("span", "bm-ab down", "↓" + behind));
+      if (ahead) row.appendChild(el("span", "bm-ab up", "↑" + bmCount(ahead)));
+      if (behind) row.appendChild(el("span", "bm-ab down", "↓" + bmCount(behind)));
       if (up) {
         const u = el("span", "bm-bup" + (gone ? " is-gone" : ""));
-        u.textContent = up;
+        // Gone, it is named in full: 'origin' struck through would say the
+        // remote is gone, not its branch.
+        u.textContent = gone ? up : bmUpstreamShown(name, up);
         row.appendChild(u);
         // A deleted upstream says so, and keeps saying it where a narrow
         // row has no room left for the upstream's name.
@@ -5664,6 +7141,7 @@ export class CommitViewProvider
       row.title = name + (up ? "  ↔ " + up + (gone ? ", which no longer exists on the remote" : "") : "") +
         (counts ? " — " + counts : "");
       row.dataset.bmkey = "b:" + kind + ":" + name;
+      if (branchFilter) row.dataset.score = String(r.s);
       bmOption(row);
       // What a screen reader says when the highlight lands here — the badges
       // are arrows and numbers, so they are spelled out.
@@ -5681,10 +7159,20 @@ export class CommitViewProvider
       vscode.postMessage({ type: "branchRefCommand", command: command, ref: refName, refType: refType });
       closeBranchMenu();
     }
+    /**
+     * An item's tip: a title that says more than its label (it becomes the
+     * item's description too), else the label itself — which the page's
+     * tooltip shows only while the label is cut short (tipAdds), never over
+     * a label that is there in full.
+     */
+    function itemTip(b, label, title) {
+      if (title) b.title = title;
+      else b.dataset.tip = label;
+    }
     function subItem(list, icon, label, fn, danger, title) {
       const b = el("button", "bm-subaction" + (danger ? " danger" : ""), bIcon(icon) + "<span></span>");
       b.querySelector("span").textContent = label;
-      b.title = title || label; // full text on hover when the label ellipsis-clips a long branch name
+      itemTip(b, label, title);
       b.addEventListener("click", fn);
       list.appendChild(b);
     }
@@ -5696,7 +7184,7 @@ export class CommitViewProvider
       const b = el("button", "bm-subaction" + (running ? " is-busy" : ""),
         bIcon(running ? "loading codicon-modifier-spin" : icon) + "<span></span>");
       b.querySelector("span").textContent = running ? busyLabel : label;
-      b.title = title || label;
+      itemTip(b, label, title);
       b.addEventListener("click", () => {
         if (subLive || syncBusy || menuSyncBusy) return;
         subLive = { action: action, ref: ref };
@@ -5711,38 +7199,94 @@ export class CommitViewProvider
       list.appendChild(b);
     }
     function subSep(list) { list.appendChild(el("div", "bm-subsep")); }
-    /** Repaint the open menu (badges/labels) and re-open the same branch's
-     *  submenu on its NEW row — an in-place live refresh of the dialog stack. */
-    function refreshOpenBranchUi() {
+    /** What the highlighted submenu item is (its data-sub), or null when the
+     *  highlight is not in a submenu. */
+    function bmSubActiveKey() {
+      const item = bmSubActive >= 0 ? bmSubItems()[bmSubActive] : null;
+      return item ? item.dataset.sub || "" : null;
+    }
+    /**
+     * Repaint the open menu (badges/labels) and re-open the same branch's
+     * submenu on its NEW row — an in-place live refresh of the dialog stack.
+     * A keyboard highlight in the submenu stays on the same item, found by
+     * what it is: the repaint can add or drop items above it (an upstream
+     * that appeared, or went), and Enter must still run what was chosen. An
+     * item that is gone gives the highlight to the first. subKey: the item
+     * to keep, when the caller has already closed the submenu.
+     */
+    function refreshOpenBranchUi(subKey) {
       if (!branchMenu) return;
       const sub = subMenuFor;
-      const subActive = bmSubActive; // a keyboard highlight in the submenu survives the repaint
+      const keep = subKey !== undefined ? subKey : bmSubActiveKey();
+      const backLit = bmBackLit;
+      // Drilled in, the list is hidden: it comes back where it was, under
+      // the actions drilled in again below.
+      const drillScroll = branchMenu.classList.contains("is-drilled") ? bmDrillScroll : -1;
       renderBranchMenu(); // closes the submenu; rows rebuilt with fresh data
+      if (drillScroll >= 0) { const l = bmList(); if (l) l.scrollTop = drillScroll; }
+      // A query whose highlight nobody has moved stays on its best match —
+      // which may be a branch that has only now arrived.
+      if (!sub && branchFilter && !bmUserMoved) {
+        bmActiveKey = bmBest ? bmBest.key : "";
+        paintBm(true);
+      }
       if (sub) {
-        const row = branchMenu.querySelector('.bm-branch[data-bname="' + (window.CSS && CSS.escape ? CSS.escape(sub.name) : sub.name) + '"]');
+        // By kind and name: a branch and a tag can share a short name, and
+        // the name alone finds the branch's row first.
+        const row = bmRowByKey("b:" + sub.kind + ":" + sub.name);
         if (row) {
           openBranchActions(sub.name, sub.kind, sub.current, row);
-          bmSubActive = subActive;
+          if (keep !== null) {
+            const i = bmSubItems().findIndex((n) => n.dataset.sub === keep);
+            bmSubActive = i >= 0 ? i : 0;
+          }
+          // The back row the pointer rests on stays lit, drilled in again.
+          if (backLit && bmBackRow()) { bmBackLit = true; bmSubActive = -1; }
           // The rebuilt submenu starts scrolled to its top; a highlight
           // further down a short view's submenu is brought back into sight.
-          paintBm(subActive >= 0);
+          paintBm(bmSubActive >= 0);
         } else {
           subMenuFor = null; // the branch vanished (e.g. deleted)
         }
       }
     }
 
-    // ---- Reusable in-sidebar action popover (file rows: double/right-click) ----
+    // ---- Reusable in-sidebar action popover (files, folders, group headers:
+    // right-click or Shift+F10; files also double-click) ----
     // Opens right at the row inside the sidebar — NOT the VS Code quick-pick.
     let actionMenuEl = null;
-    function closeActionMenu() {
+    // The row (or header) the open menu belongs to. The menu is the
+    // keyboard's only way to a row's Stage, Unstage and Discard, and closing
+    // it dropped the focus on the page: the next arrow key did nothing, and
+    // the row that had just been staged could not hand the keyboard on.
+    let actionMenuAnchor = null;
+    /** Close the menu; with refocus, the keyboard goes back to the row it came from. */
+    function closeActionMenu(refocus) {
+      const anchor = actionMenuAnchor;
+      const hadFocus = !!actionMenuEl && actionMenuEl.contains(document.activeElement);
       if (actionMenuEl) { actionMenuEl.remove(); actionMenuEl = null; }
+      actionMenuAnchor = null;
       document.removeEventListener("mousedown", onActionDocDown, true);
       document.removeEventListener("keydown", onActionKey, true);
       window.removeEventListener("blur", onActionBlur, true);
+      if (refocus && anchor && anchor.isConnected && (hadFocus || isPageFocus())) {
+        anchor.focus({ preventScroll: true });
+      }
+    }
+    /** Nothing in particular has the keyboard: the page itself. */
+    function isPageFocus() {
+      const a = document.activeElement;
+      return !a || a === document.body || a === document.documentElement;
     }
     function onActionDocDown(e) {
-      if (actionMenuEl && !actionMenuEl.contains(e.target)) closeActionMenu();
+      if (!actionMenuEl || actionMenuEl.contains(e.target)) return;
+      const anchor = actionMenuAnchor;
+      closeActionMenu(false);
+      // A click elsewhere goes where it was aimed; only a click on nothing
+      // that takes the keyboard gives it back to the menu's row.
+      setTimeout(() => {
+        if (anchor && anchor.isConnected && isPageFocus()) anchor.focus({ preventScroll: true });
+      }, 0);
     }
     // The webview cannot see clicks in the editor/main area — those never reach
     // this document. Blur is the only signal that focus left the webview, so
@@ -5753,28 +7297,75 @@ export class CommitViewProvider
       }, 0);
     }
     function onActionKey(e) {
-      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeActionMenu(); }
+      if (!actionMenuEl) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        closeActionMenu(true);
+        return;
+      }
+      // A menu's keys: Up and Down move through its items (round the ends),
+      // Home and End go to the first and last, and Tab stays in the menu.
+      const items = Array.prototype.slice.call(actionMenuEl.querySelectorAll(".bm-subaction"));
+      if (!items.length) return;
+      const i = items.indexOf(document.activeElement);
+      let to = -1;
+      if (e.key === "ArrowDown" || (e.key === "Tab" && !e.shiftKey)) to = i < 0 ? 0 : (i + 1) % items.length;
+      else if (e.key === "ArrowUp" || (e.key === "Tab" && e.shiftKey)) to = i <= 0 ? items.length - 1 : i - 1;
+      else if (e.key === "Home") to = 0;
+      else if (e.key === "End") to = items.length - 1;
+      if (to < 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      items[to].focus();
     }
-    function openActionMenu(title, items, anchor) {
-      closeActionMenu();
+    /**
+     * The in-sidebar menu for a row, a folder or a group's header, opened
+     * under anchor. icon is the codicon beside its title (none for a group).
+     * Choosing an item gives the keyboard back to anchor BEFORE it acts, so a
+     * row the action takes out of the list hands the keyboard to the next.
+     */
+    function openActionMenu(title, items, anchor, icon) {
+      closeActionMenu(false);
       closeBranchSubmenu();
+      actionMenuAnchor = anchor || null;
       const menu = el("div", "branch-submenu action-menu");
+      menu.setAttribute("role", "menu");
+      if (title) menu.setAttribute("aria-label", title);
       if (title) {
         const head = el("div", "bm-subhead");
-        head.appendChild(el("i", "codicon codicon-file"));
+        head.setAttribute("aria-hidden", "true");
+        if (icon !== null) head.appendChild(el("i", "codicon codicon-" + (icon || "file")));
         const nm = el("span", "bm-subhead-name");
         nm.textContent = title;
         head.appendChild(nm);
         menu.appendChild(head);
       }
       const list = el("div", "bm-sublist");
+      list.setAttribute("role", "none");
       menu.appendChild(list);
       for (const it of items) {
         if (it.sep) { subSep(list); continue; }
-        subItem(list, it.icon, it.label, () => { closeActionMenu(); it.fn(); }, it.danger);
+        subItem(list, it.icon, it.label, () => { closeActionMenu(true); it.fn(); }, it.danger, it.tip);
       }
+      list.querySelectorAll(".bm-subaction").forEach((b) => {
+        b.setAttribute("role", "menuitem");
+        b.tabIndex = -1;
+      });
+      // The pointer moves the keyboard's item, as it moves the branch
+      // window's highlight: the focused item is the one lit item, under the
+      // pointer or the arrows alike. Only a pointer that really moved: the
+      // list scrolling under a still one (the arrows in a short view) must
+      // not take the item from the keys.
+      menu.addEventListener("mousemove", (e) => {
+        if (!bmPointerMoved(e)) return;
+        const item = e.target.closest ? e.target.closest(".bm-subaction") : null;
+        if (item && document.activeElement !== item) item.focus({ preventScroll: true });
+      });
+      list.querySelectorAll(".bm-subsep").forEach((s) => s.setAttribute("role", "separator"));
       document.body.appendChild(menu);
       actionMenuEl = menu;
+      actionMenuAnchor = anchor || null;
       // Anchor under the row's left edge; flip up / clamp so it never leaves view.
       const PAD = 6;
       const r = menu.getBoundingClientRect();
@@ -5813,98 +7404,134 @@ export class CommitViewProvider
         () => toggleFavorite(name));
     }
 
+    /**
+     * A ref's actions, in ONE order for every kind — a current branch, any
+     * other local branch, a remote branch, a tag — with what does not apply
+     * left out, and a separator only between groups that have items:
+     *   switch and start from it · against HEAD · publish · its name · danger
+     *   Checkout, Pull…, New Branch from…, New Worktree from…
+     *   Compare with…, Merge… into…, Rebase… onto…
+     *   Push…, Tracked Branch…
+     *   Rename…, Copy Name, Add to Favorites
+     *   Reset to '<upstream>'…, Delete
+     * A branch whose upstream is gone from its remote starts with Set Tracked
+     * Branch…: the one thing it needs, and the first thing its row's "gone"
+     * sends you looking for.
+     */
     function openBranchActions(name, kind, current, anchor) {
       closeBranchSubmenu();
       const cur = headTarget();
       const refType = kind === "remote" ? "remote" : kind === "tag" ? "tag" : "head";
       const headIcon = kind === "remote" ? "cloud" : kind === "tag" ? "tag" : "git-branch";
+      const local = kind === "local";
       const menu = el("div", "branch-submenu");
-      menu.id = "bm-sub";
-      menu.setAttribute("role", "listbox");
-      menu.setAttribute("aria-label", "Actions for " + name);
       const head = el("div", "bm-subhead");
       head.setAttribute("aria-hidden", "true");
       head.appendChild(el("i", "codicon codicon-" + headIcon));
       head.appendChild(el("span", "bm-subhead-name", esc(name)));
       menu.appendChild(head);
       const list = el("div", "bm-sublist");
+      list.id = "bm-sub";
+      list.setAttribute("role", "listbox");
+      list.setAttribute("aria-label", "Actions for " + name);
       menu.appendChild(list);
 
       // Live branch data for this row (counts may have just changed via Fetch).
-      const bd = (branchData.local || []).find((x) => x.name === name);
+      const bd = local ? (branchData.local || []).find((x) => x.name === name) : null;
+      const gone = !!(bd && bd.gone);
       subMenuFor = { name: name, kind: kind, current: current };
       // The row this submenu belongs to holds the main list's highlight.
       if (anchor && anchor.dataset && anchor.dataset.bmkey) bmActiveKey = anchor.dataset.bmkey;
+
+      // Each item carries what it is (data-sub), so a repaint that adds or
+      // drops items above it finds it again by that, not by its place.
+      const groups = [[], [], [], [], []];
+      const add = (g, key, fn) => groups[g].push((l) => {
+        const before = l.querySelectorAll(".bm-subaction").length;
+        fn(l);
+        const items = l.querySelectorAll(".bm-subaction");
+        for (let i = before; i < items.length; i++) items[i].dataset.sub = key;
+      });
+      const trackedItem = (l) => subItem(l, "cloud",
+        bd && bd.upstream && !gone ? "Tracked Branch: " + bd.upstream + "…" : "Set Tracked Branch…",
+        () => subAct("gitstudio.branch.setUpstream", name, refType), false,
+        gone ? "'" + bd.upstream + "', which '" + name + "' tracked, no longer exists on the remote. Choose the branch it tracks now."
+          : bd && bd.upstream ? "'" + name + "' tracks " + bd.upstream + ". Choose another branch to track."
+          : "Choose the remote branch '" + name + "' pulls from and pushes to.");
+
+      // Switch to it, or start something from it.
+      if (local && gone) add(0, "tracked", trackedItem);
       if (kind === "tag") {
-        subItem(list, "arrow-swap", "Checkout Tag (detached)", () => subAct("gitstudio.tag.checkout", name, "tag"));
-        subItem(list, "add", "New Branch from '" + name + "'…", () => subAct("gitstudio.branch.new", name, "tag"));
-        subItem(list, "worktree", "New Worktree from '" + name + "'…", () => subAct("gitstudio.branch.createWorktree", name, "tag"));
-        subSep(list);
-        subItem(list, "git-compare", "Compare with " + cur, () => subAct("gitstudio.branch.compare", name, "tag"));
-        subItem(list, "git-merge", "Merge '" + name + "' into " + cur, () => subAct("gitstudio.branch.merge", name, "tag"));
-        subSep(list);
-        subItem(list, "cloud-upload", "Push Tag to Remote…", () => subAct("gitstudio.tag.push", name, "tag"));
-        subItem(list, "copy", "Copy Tag Name", () => branchAct("copyName", name));
-        subSep(list);
-        subItem(list, "trash", "Delete Tag", () => subAct("gitstudio.tag.delete", name, "tag"), true);
-      } else if (current) {
-        // Nothing to pull from an upstream deleted from its remote: the pull
-        // could only fail. Push… can still publish the branch again.
-        if (!(bd && bd.gone)) {
-          subItemLive(list, "arrow-down", "Pull using Rebase", "Pulling…", "pullRebase", name);
-          subItemLive(list, "arrow-down", "Pull using Merge", "Pulling…", "pullMerge", name);
+        add(0, "checkout", (l) => subItem(l, "arrow-swap", "Checkout Tag (detached)", () => subAct("gitstudio.tag.checkout", name, "tag")));
+      } else if (!current) {
+        // Not the check: in this menu that marks the branch that IS checked out.
+        add(0, "checkout", (l) => subItem(l, kind === "remote" ? "cloud-download" : "arrow-swap", "Checkout", () =>
+          subAct(kind === "remote" ? "gitstudio.remoteBranch.checkout" : "gitstudio.branch.checkout", name, refType)));
+      }
+      // Nothing to pull without an upstream, nor from one deleted from its
+      // remote: the pull could only fail. Push… can still publish the branch.
+      if (current && bd && bd.upstream && !gone) {
+        add(0, "pullRebase", (l) => subItemLive(l, "arrow-down", "Pull using Rebase", "Pulling…", "pullRebase", name));
+        add(0, "pullMerge", (l) => subItemLive(l, "arrow-down", "Pull using Merge", "Pulling…", "pullMerge", name));
+      } else if (local && !current && bd && bd.upstream && !gone) {
+        // Fast-forward this branch from its upstream WITHOUT checking it out.
+        add(0, "pullFf", (l) => subItemLive(l, "arrow-down",
+          "Pull " + (bd.behind ? bd.behind + (bd.behind === 1 ? " Commit " : " Commits ") : "") + "into '" + name + "'",
+          "Pulling…", "pullFf", name,
+          "Fast-forwards '" + name + "' from " + bd.upstream + " — no checkout"));
+      }
+      add(0, "newBranch", (l) => subItem(l, "add", "New Branch from '" + name + "'…", () => subAct("gitstudio.branch.new", name, refType)));
+      add(0, "worktree", (l) => subItem(l, "worktree", "New Worktree from '" + name + "'…", () => subAct("gitstudio.branch.createWorktree", name, refType)));
+
+      // Against what HEAD is on (nothing to compare the current branch with).
+      if (!current) {
+        add(1, "compare", (l) => subItem(l, "git-compare", "Compare with " + cur, () => subAct("gitstudio.branch.compare", name, refType)));
+        add(1, "merge", (l) => subItem(l, "git-merge", "Merge '" + name + "' into " + cur, () => subAct("gitstudio.branch.merge", name, refType)));
+        // Not the pull-request glyph: a rebase opens no pull request. The
+        // replayed, reordered list is GitStudio's glyph for a rebase.
+        if (kind !== "tag") {
+          add(1, "rebase", (l) => subItem(l, "list-ordered", "Rebase " + cur + " onto '" + name + "'", () => subAct("gitstudio.branch.rebase", name, refType)));
         }
+      }
+
+      // Publish it.
+      if (kind === "tag") {
+        add(2, "push", (l) => subItem(l, "cloud-upload", "Push Tag to Remote…", () => subAct("gitstudio.tag.push", name, "tag")));
+      } else if (current) {
         // Push opens the review modal (see openPushModal) rather than pushing in
         // place, so every push route funnels through the same confirmation.
-        subItem(list, "arrow-up", "Push…", () => {
+        add(2, "push", (l) => subItem(l, "arrow-up", "Push…", () => {
           closeBranchMenu();
           vscode.postMessage({ type: "requestPushPreview" });
-        });
-        subSep(list);
-        subItem(list, "add", "New Branch from '" + name + "'…", () => subAct("gitstudio.branch.new", name, refType));
-        subItem(list, "worktree", "New Worktree from '" + name + "'…", () => subAct("gitstudio.branch.createWorktree", name, refType));
-        subItem(list, "edit", "Rename…", () => subAct("gitstudio.branch.rename", name, refType));
-        subItem(list, "copy", "Copy Branch Name", () => branchAct("copyName", name));
-        favoriteItem(list, name, bd);
-        if (bd && bd.upstreamOnRemote) {
-          subSep(list);
-          resetToUpstreamItem(list, name, bd);
-        }
-      } else {
-        // Not the check: in this menu that marks the branch that IS checked out.
-        subItem(list, kind === "remote" ? "cloud-download" : "arrow-swap", "Checkout", () =>
-          subAct(kind === "remote" ? "gitstudio.remoteBranch.checkout" : "gitstudio.branch.checkout", name, refType));
-        if (kind === "local" && bd && bd.upstream && !bd.gone) {
-          // Fast-forward this branch from its upstream WITHOUT checking it out
-          // (not from one deleted from its remote: that fetch can only fail).
-          subItemLive(list, "arrow-down",
-            "Pull " + (bd.behind ? bd.behind + (bd.behind === 1 ? " Commit " : " Commits ") : "") + "into '" + name + "'",
-            "Pulling…", "pullFf", name,
-            "Fast-forwards '" + name + "' from " + bd.upstream + " — no checkout");
-        }
-        subItem(list, "add", "New Branch from '" + name + "'…", () => subAct("gitstudio.branch.new", name, refType));
-        subSep(list);
-        subItem(list, "git-compare", "Compare with " + cur, () => subAct("gitstudio.branch.compare", name, refType));
-        subSep(list);
-        subItem(list, "git-merge", "Merge '" + name + "' into " + cur, () => subAct("gitstudio.branch.merge", name, refType));
-        subItem(list, "git-pull-request", "Rebase " + cur + " onto '" + name + "'", () => subAct("gitstudio.branch.rebase", name, refType));
-        subSep(list);
-        subItem(list, "worktree", "New Worktree from '" + name + "'…", () => subAct("gitstudio.branch.createWorktree", name, refType));
-        if (kind === "local") {
-          subSep(list);
-          subItem(list, "arrow-up", "Push…", () => subAct("gitstudio.branch.push", name, refType));
-          subItem(list, "cloud",
-            bd && bd.upstream ? "Tracked Branch: " + bd.upstream + (bd.gone ? " (gone)" : "") + "…" : "Set Tracked Branch…",
-            () => subAct("gitstudio.branch.setUpstream", name, refType));
-          subSep(list);
-        }
-        if (kind === "local") subItem(list, "edit", "Rename…", () => subAct("gitstudio.branch.rename", name, refType));
-        subItem(list, "copy", "Copy Branch Name", () => branchAct("copyName", name));
-        if (kind === "local") favoriteItem(list, name, bd);
-        subSep(list);
-        if (kind === "local") resetToUpstreamItem(list, name, bd);
-        subItem(list, "trash", "Delete", () =>
-          subAct(kind === "remote" ? "gitstudio.remoteBranch.delete" : "gitstudio.branch.delete", name, refType), true);
+        }));
+      } else if (local) {
+        add(2, "push", (l) => subItem(l, "arrow-up", "Push…", () => subAct("gitstudio.branch.push", name, refType)));
+      }
+      if ((local || current) && !gone) add(2, "tracked", trackedItem);
+
+      // Its name.
+      if (local || current) add(3, "rename", (l) => subItem(l, "edit", "Rename…", () => subAct("gitstudio.branch.rename", name, refType)));
+      add(3, "copy", (l) => subItem(l, "copy", kind === "tag" ? "Copy Tag Name" : "Copy Branch Name", () => branchAct("copyName", name)));
+      if (local || current) add(3, "favorite", (l) => favoriteItem(l, name, bd));
+
+      // What cannot be taken back without Undo.
+      if (local || current) add(4, "reset", (l) => resetToUpstreamItem(l, name, bd));
+      if (kind === "tag") {
+        add(4, "delete", (l) => subItem(l, "trash", "Delete Tag", () => subAct("gitstudio.tag.delete", name, "tag"), true));
+      } else if (!current) {
+        add(4, "delete", (l) => subItem(l, "trash", "Delete", () =>
+          subAct(kind === "remote" ? "gitstudio.remoteBranch.delete" : "gitstudio.branch.delete", name, refType), true));
+      }
+
+      // A group's builders can add nothing (Reset has no upstream to go to):
+      // a separator goes only between groups that drew items.
+      for (const g of groups) {
+        const before = list.children.length;
+        const hadItems = !!list.querySelector(".bm-subaction");
+        const sep = hadItems ? el("div", "bm-subsep") : null;
+        if (sep) list.appendChild(sep);
+        g.forEach((fn) => fn(list));
+        if (sep && list.children.length === before + 1) sep.remove();
       }
 
       // Options of the submenu's listbox, for aria-activedescendant. None
@@ -5920,9 +7547,19 @@ export class CommitViewProvider
       // from the search box, so the keys keep working after a click.
       menu.addEventListener("mousemove", (e) => {
         if (!bmPointerMoved(e)) return;
-        const item = e.target.closest ? e.target.closest(".bm-subaction") : null;
+        const on = e.target.closest ? e.target : null;
+        // Drilled in, the back row is one of the rows the pointer lights.
+        if (on && on.closest(".bm-subhead") && menu.classList.contains("is-drilled")) {
+          if (bmBackLit) return;
+          bmBackLit = true;
+          bmSubActive = -1;
+          paintBm(false);
+          return;
+        }
+        const item = on ? on.closest(".bm-subaction") : null;
         const i = item ? bmSubItems().indexOf(item) : -1;
-        if (i < 0 || i === bmSubActive) return;
+        if (i < 0 || (i === bmSubActive && !bmBackLit)) return;
+        bmBackLit = false;
         bmSubActive = i;
         paintBm(false);
       });
@@ -5934,30 +7571,59 @@ export class CommitViewProvider
         if (box && document.activeElement !== box) box.focus();
       });
 
-      document.body.appendChild(menu);
-      branchSubmenu = menu;
-      paintBm(false);
-      // Cascade as a secondary popup off the RIGHT edge of the main branch menu,
-      // vertically aligned to the clicked row. Flip to the LEFT only if it would
-      // overflow the (narrow) panel. SEAM = small overlap so it reads as a child.
+      // Beside the menu when the view has room for it there — off its right
+      // edge, else its left — and otherwise IN it: a submenu laid over the
+      // menu hid the list and the very row it belonged to, with no way back
+      // but Escape. The room it asks for is a ref's actions at their widest
+      // (the submenu's max-width), not this ref's: its labels quote its
+      // name, and one row's actions must not open beside a menu whose next
+      // row's open in it. Measured as it would cascade, before it is shown.
       const SEAM = 2;
       const PAD = 6;
-      const sub = menu.getBoundingClientRect();
-      const subW = sub.width;
-      const subH = sub.height;
+      menu.style.visibility = "hidden";
+      document.body.appendChild(menu);
+      branchSubmenu = menu;
+      const subW = menu.getBoundingClientRect().width;
+      const widest = Math.max(subW, parseFloat(getComputedStyle(menu).maxWidth) || 0);
       const menuRect = branchMenu
         ? branchMenu.getBoundingClientRect()
         : anchor.getBoundingClientRect();
-      const rowRect = anchor.getBoundingClientRect();
+      const W = window.innerWidth;
+      let left = -1;
+      if (menuRect.right - SEAM + widest <= W - PAD) left = menuRect.right - SEAM;
+      else if (menuRect.left + SEAM - widest >= PAD) left = menuRect.left + SEAM - subW;
 
-      // Horizontal: hang off the menu's right edge; flip to its left on overflow.
-      let left = menuRect.right - SEAM;
-      if (left + subW > window.innerWidth - PAD) {
-        left = menuRect.left - subW + SEAM;
+      if (left < 0 && branchMenu) {
+        // Drilled in: the actions take the list's place, under a back row.
+        const l0 = bmList();
+        bmDrillScroll = l0 ? l0.scrollTop : 0;
+        menu.classList.add("is-drilled");
+        head.removeAttribute("aria-hidden");
+        head.insertBefore(el("i", "codicon codicon-chevron-left bm-back"), head.firstChild);
+        head.title = "Back to the branches (Left or Escape)";
+        // A way back, as a screen reader meets it: a button that says so —
+        // no Tab stop, as nothing in the menu has one — and the actions'
+        // list says the keys that go back.
+        head.setAttribute("role", "button");
+        head.setAttribute("aria-label", "Back to the branches");
+        head.tabIndex = -1;
+        head.addEventListener("click", () => closeBmSub());
+        const hint = el("span", "bm-sr");
+        hint.id = "bm-back-hint";
+        hint.textContent = "Left or Escape goes back to the branches";
+        menu.appendChild(hint);
+        list.setAttribute("aria-describedby", "bm-back-hint");
+        branchMenu.appendChild(menu);
+        branchMenu.classList.add("is-drilled");
+        menu.style.visibility = "";
+        paintBm(false);
+        return;
       }
-      left = Math.max(PAD, Math.min(left, window.innerWidth - subW - PAD));
 
-      // Vertical: align the submenu's top to the clicked row's top, clamped.
+      // Cascaded: vertically aligned to the clicked row, clamped to the view.
+      const subH = menu.getBoundingClientRect().height;
+      const rowRect = anchor.getBoundingClientRect();
+      if (left < 0) left = Math.max(PAD, Math.min(menuRect.right - SEAM, W - subW - PAD));
       let top = rowRect.top;
       if (top + subH > window.innerHeight - PAD) {
         top = window.innerHeight - subH - PAD;
@@ -5966,39 +7632,142 @@ export class CommitViewProvider
 
       menu.style.left = Math.round(left) + "px";
       menu.style.top = Math.round(top) + "px";
+      menu.style.visibility = "";
+      paintBm(false);
+    }
+
+    /**
+     * The top actions. Pull and Push have no branch to act on at a detached
+     * HEAD, and Pull nothing to pull from for a branch with no upstream (or
+     * a gone one): one line says so in their place. "terms" are other words a
+     * person may look for one by ("update" was Pull's old name): they find
+     * it, but never outrank a name the query really matches.
+     */
+    const BM_ACTIONS = [
+      // Fetch sits on TOP: it's the read-only "what's out there?" action the
+      // rest of the menu builds on.
+      { a: "fetch", icon: "sync", label: "Fetch" },
+      { a: "pull", icon: "arrow-down", label: "Pull", terms: ["update"] },
+      // It opens the push review first, so it asks for more, as "…" says.
+      { a: "push", icon: "arrow-up", label: "Push…" },
+      { a: "new", icon: "add", label: "New Branch…", terms: ["create branch"] },
+      { a: "checkoutRef", icon: "tag", label: "Checkout Tag or Revision…", terms: ["detach"] },
+    ];
+    /** An action's match: on its label (without its "…"), or on one of its terms. */
+    function bmScoreAction(q, it) {
+      let best = bmScore(q, it.label.replace(/…$/, ""));
+      for (const term of it.terms || []) {
+        const m = bmScore(q, term);
+        const s = m ? Math.min(m.s, BM_TIER.word) : 0;
+        if (m && (!best || s > best.s)) best = { s: s, pos: [] };
+      }
+      return best;
+    }
+    /** "New Branch", its name typed or to type. Created at HEAD, switched to. */
+    function promptNewBranch(value) {
+      closeBranchMenu();
+      openRefPrompt({
+        title: "New Branch",
+        hint: "Creates the branch at HEAD and switches to it.",
+        placeholder: "feature/my-change",
+        value: value || "",
+        confirmLabel: "Create Branch",
+        candidates: [],
+        allowFreeText: true,
+        validate: "refName",
+        onConfirm: function (v) {
+          vscode.postMessage({ type: "branchAction", action: "new", ref: v });
+        },
+      });
+    }
+    /** "Checkout Tag or Revision": any revision, checked out as a detached HEAD. */
+    function promptCheckoutRef(value) {
+      closeBranchMenu();
+      openRefPrompt({
+        title: "Checkout Tag or Revision",
+        hint: "Pick a tag or branch, or type any revision (a sha, origin/main~3). Checks out as a detached HEAD.",
+        placeholder: "v1.2.0   a1b2c3d   origin/main~3",
+        value: value || "",
+        confirmLabel: "Checkout",
+        candidates: allRefCandidates(),
+        allowFreeText: true,
+        // git would read it as one of its options.
+        validate: function (v) { return /^-/.test(v) ? "A revision can't start with '-'." : null; },
+        // A ref picked from the list goes with its kind, and the host checks
+        // out that ref by its full name: a tag and a branch can share the
+        // short one, and git would take the branch. What was typed goes as
+        // typed, a revision git reads for itself.
+        onConfirm: function (v, pick) {
+          const refType = pick ? { branch: "head", remote: "remote", tag: "tag" }[pick.kind] : undefined;
+          vscode.postMessage({ type: "branchAction", action: "checkoutRef", ref: v, refType: refType });
+        },
+      });
     }
 
     function renderBranchMenu() {
       if (!branchMenu) return;
       closeBranchSubmenu();
       const list = branchMenu.querySelector(".bm-list");
+      const input = branchMenu.querySelector(".bm-search input");
       list.replaceChildren();
+      const q = branchFilter;
+      // The best match so far: a higher score, or on a tie a ref over an action.
+      bmBest = null;
+      const consider = (key, s, isAction) => {
+        if (!q) return;
+        if (!bmBest || s > bmBest.s || (s === bmBest.s && bmBest.action && !isAction)) {
+          bmBest = { key: key, s: s, action: isAction };
+        }
+      };
+      const hs = lastHeaderState;
+      const detached = !!(hs && hs.detached);
 
-      // Fetch sits on TOP: it's the read-only "what's out there?" action the
-      // rest of the menu builds on. Fetch/pull/push all run IN PLACE — the
-      // dialog stays open, the item itself spins until the real op finishes,
-      // and the branch rows' ↑/↓ badges refresh live.
+      // Fetch/pull/push all run IN PLACE — the dialog stays open, the item
+      // itself spins until the real op finishes, and the branch rows' ↑/↓
+      // badges refresh live.
       const busyLabels = { fetch: "Fetching…", pull: "Pulling…", push: "Pushing…" };
-      const actions = [
-        { a: "fetch", icon: "sync", label: "Fetch" },
-        { a: "pull", icon: "arrow-down", label: "Update (pull)" },
-        // It opens the push review first, so it asks for more, as "…" says.
-        { a: "push", icon: "arrow-up", label: "Push…" },
-        { a: "new", icon: "add", label: "New Branch…" },
-        { a: "checkoutRef", icon: "tag", label: "Checkout Tag or Revision…" },
-      ];
-      let anyAction = false;
-      for (const it of actions) {
-        if (!matchF(it.label)) continue;
-        anyAction = true;
+      // Nothing to pull into the branch HEAD is on when it tracks nothing, or
+      // tracks a branch gone from its remote — the pull could only fail. Its
+      // own actions offer no Pull then either (openBranchActions): one rule.
+      const cur = detached ? null : (branchData.local || []).find((b) => b.current);
+      const noPull = !!cur && (!cur.upstream || !!cur.gone);
+      /** The query is looking for this action: its name or a term found by
+       *  a start or a word's start, not by one letter somewhere inside. */
+      const lookingFor = (it) => {
+        const m = bmScoreAction(q, it);
+        return !!m && m.s >= BM_TIER.word;
+      };
+      // Where Pull and Push are not offered, one line says why, in their
+      // place: on a detached HEAD with the box empty too (both are gone);
+      // otherwise only when the query is looking for the one that is gone.
+      const why = detached ? !q || lookingFor(BM_ACTIONS[1]) || lookingFor(BM_ACTIONS[2])
+        : noPull && !!q && lookingFor(BM_ACTIONS[1]);
+      for (const it of BM_ACTIONS) {
         const live = it.a === "fetch" || it.a === "pull" || it.a === "push";
+        if ((detached && (it.a === "pull" || it.a === "push")) || (noPull && it.a === "pull")) {
+          if (it.a === "pull" && why) {
+            const line = el("div", "bm-why", bIcon("info") + "<span></span>");
+            line.id = "bm-why";
+            line.querySelector("span").textContent = detached
+              ? "Detached at " + (hs.branch || "HEAD") + " — check out a branch to pull or push"
+              : cur.gone
+                ? "'" + cur.name + "' tracks " + cur.upstream + ", which no longer exists on the remote"
+                : "'" + cur.name + "' has no upstream to pull from";
+            list.appendChild(line);
+          }
+          continue;
+        }
+        const m = bmScoreAction(q, it);
+        if (!m) continue;
         const spinning = live && menuSyncBusy === it.a;
         const b = el("button", "bm-action" + (spinning ? " is-busy" : ""),
           bIcon(spinning ? "loading codicon-modifier-spin" : it.icon) + "<span></span>");
-        b.querySelector("span").innerHTML = spinning ? busyLabels[it.a] : hl(it.label);
+        b.querySelector("span").innerHTML = spinning ? busyLabels[it.a] : hl(it.label, m.pos);
         b.dataset.bmkey = "a:" + it.a;
+        if (q) b.dataset.score = String(m.s);
         b.tabIndex = -1; // the arrows reach it; Tab never leaves the search box
         bmOption(b);
+        consider(b.dataset.bmkey, m.s, true);
         b.addEventListener("click", () => {
           if (live) {
             if (menuSyncBusy || syncBusy) return;
@@ -6016,89 +7785,119 @@ export class CommitViewProvider
             }
             renderBranchMenu();
           } else if (it.a === "new") {
-            closeBranchMenu();
-            openRefPrompt({
-              title: "New Branch",
-              hint: "Creates the branch at HEAD and switches to it.",
-              placeholder: "feature/my-change",
-              confirmLabel: "Create Branch",
-              candidates: [],
-              allowFreeText: true,
-              validate: "refName",
-              onConfirm: function (v) {
-                vscode.postMessage({ type: "branchAction", action: "new", ref: v });
-              },
-            });
+            promptNewBranch("");
           } else if (it.a === "checkoutRef") {
-            closeBranchMenu();
-            openRefPrompt({
-              title: "Checkout Tag or Revision",
-              hint: "Pick a tag or branch, or type any revision (a sha, origin/main~3). Checks out as a detached HEAD.",
-              placeholder: "v1.2.0   a1b2c3d   origin/main~3",
-              confirmLabel: "Checkout",
-              candidates: allRefCandidates(),
-              allowFreeText: true,
-              onConfirm: function (v) {
-                vscode.postMessage({ type: "branchAction", action: "checkoutRef", ref: v });
-              },
-            });
+            promptCheckoutRef("");
           } else {
             branchAct(it.a);
           }
         });
         list.appendChild(b);
       }
+      if (input) {
+        if (why) input.setAttribute("aria-describedby", "bm-why");
+        else input.removeAttribute("aria-describedby");
+      }
 
+      /** A group's rows: with a query, each scored, the rest out, the best
+       *  first — ties keep the list's own order (the sort is stable). */
+      function scored(rows) {
+        if (!q) return rows;
+        const out = [];
+        for (const r of rows) {
+          const m = r.kind === "remote" ? bmScoreRemote(q, r.name, r.shown) : bmScore(q, r.name);
+          if (!m) continue;
+          r.s = m.s;
+          r.pos = m.pos;
+          out.push(r);
+        }
+        return out.sort((a, b) => b.s - a.s);
+      }
+      const localRow = (b) => ({
+        name: b.name, kind: "local", up: b.upstream, fav: b.favorite, current: b.current,
+        ahead: b.ahead, behind: b.behind, gone: b.gone,
+      });
       const locals = branchData.local || [];
       const recentNames = branchData.recent || [];
-      const favs = locals.filter((b) => b.favorite && matchF(b.name));
-      const recents = recentNames
+      const favs = scored(locals.filter((b) => b.favorite).map(localRow));
+      const recents = scored(recentNames
         .map((n) => locals.find((b) => b.name === n))
-        .filter((b) => b && !b.favorite && matchF(b.name));
-      const others = locals.filter((b) =>
-        !b.favorite && recentNames.indexOf(b.name) === -1 && matchF(b.name));
-      const remotes = (branchData.remote || []).filter((n) => matchF(n));
+        .filter((b) => b && !b.favorite)
+        .map(localRow));
+      const others = scored(locals
+        .filter((b) => !b.favorite && recentNames.indexOf(b.name) === -1)
+        .map(localRow));
+      // Remote branches by remote — origin, upstream, a fork — each its own
+      // group, its rows named without the remote the heading already says.
+      const byRemote = new Map();
+      for (const n of branchData.remote || []) {
+        const r = bmRemoteOf(n);
+        if (!byRemote.has(r)) byRemote.set(r, []);
+        byRemote.get(r).push({ name: n, kind: "remote", shown: r ? n.slice(r.length + 1) : n });
+      }
+      const remotes = [];
+      for (const [r, rows] of byRemote) remotes.push({ remote: r, rows: scored(rows) });
+      const tags = scored((branchData.tags || []).map((n) => ({ name: n, kind: "tag" })));
 
-      // A collapsible category: a clickable header (chevron + count) over its
-      // rows. While searching, force-expand so matches are always visible.
-      // opts.count overrides the header badge (for a capped list); opts.note
-      // appends a muted footer row (e.g. "N more — type to search").
-      function group(label, rows, build, opts) {
+      // A collapsible category: a heading (chevron, label, count) over its
+      // rows. While searching it is open, so every match shows. A paged one
+      // renders PAGE rows and a "Show more" row that renders PAGE more.
+      function group(key, label, rows, opts) {
         if (!rows.length) return;
-        const collapsed = !branchFilter && !!collapsedCats[label];
+        const remote = opts && opts.remote;
+        const collapsed = !q && !!collapsedCats[key];
+        const wrap = el("div", "bm-group");
         const head = el("button", "bm-sep" + (collapsed ? " collapsed" : ""),
           bIcon("chevron-down") + '<span class="bm-sep-label"></span><span class="bm-sep-count"></span>');
-        head.querySelector(".bm-sep-label").textContent = label;
-        head.querySelector(".bm-sep-count").textContent =
-          String(opts && opts.count != null ? opts.count : rows.length);
+        const lab = head.querySelector(".bm-sep-label");
+        lab.textContent = label;
+        if (remote) lab.appendChild(el("span", "bm-sep-remote", esc(remote)));
+        head.querySelector(".bm-sep-count").textContent = String(rows.length);
+        // Its name in words: read from the text it would be "REMOTEorigin 56"
+        // (the remote's name is set off by a margin, not a space).
+        const noun = key === "tags" ? (rows.length === 1 ? " tag" : " tags") : rows.length === 1 ? " branch" : " branches";
+        head.setAttribute("aria-label", (remote ? label + " " + remote : label) + ", " + rows.length + noun);
         head.setAttribute("aria-expanded", collapsed ? "false" : "true");
         head.tabIndex = -1; // a click folds it; Tab never leaves the search box
         const body = el("div", "bm-group-body");
         body.setAttribute("role", "group");
-        body.setAttribute("aria-label", label);
+        body.setAttribute("aria-label", remote ? label + " " + remote : label);
         if (collapsed) body.style.display = "none";
-        rows.forEach((r) => body.appendChild(build(r)));
-        if (opts && opts.note) body.appendChild(el("div", "bm-note", esc(opts.note)));
-        if (opts && opts.more > 0) {
-          const more = el("div", "bm-more", "Show " + Math.min(opts.more, TAG_PAGE) +
-            " more of " + opts.more);
-          more.dataset.bmkey = "more:" + label;
-          bmOption(more);
+        const limit = opts && opts.paged ? (pageLimits[key] || PAGE) : rows.length;
+        const shown = rows.slice(0, limit);
+        shown.forEach((r) => {
+          const row = branchRow(r);
+          body.appendChild(row);
+          consider(row.dataset.bmkey, r.s, false);
+        });
+        const more = rows.length - shown.length;
+        if (more > 0) {
+          const moreRow = el("div", "bm-more", showMoreLabel(more, PAGE));
+          moreRow.dataset.bmkey = "more:" + key;
+          bmOption(moreRow);
           // The arrows reach it and Enter runs it from the search box, which
           // keeps focus: no Tab stop of its own.
-          more.setAttribute("tabindex", "-1");
-          const grow = (ev) => {
+          moreRow.setAttribute("tabindex", "-1");
+          moreRow.addEventListener("click", (ev) => {
             ev.preventDefault();
             ev.stopPropagation();
-            tagLimit += TAG_PAGE;
+            // The highlight goes to the first of the rows it adds: where
+            // "Show more" was.
+            const at = bmRows().findIndex((n) => n.dataset.bmkey === "more:" + key);
+            pageLimits[key] = limit + PAGE;
             renderBranchMenu();
-          };
-          more.addEventListener("click", grow);
-          body.appendChild(more);
+            const rowsNow = bmRows();
+            if (at >= 0 && rowsNow[at]) {
+              bmActiveKey = rowsNow[at].dataset.bmkey;
+              bmUserMoved = true;
+              paintBm(true);
+            }
+          });
+          body.appendChild(moreRow);
         }
         head.addEventListener("click", () => {
-          collapsedCats[label] = !collapsedCats[label];
-          const c = !!collapsedCats[label];
+          collapsedCats[key] = !collapsedCats[key];
+          const c = !!collapsedCats[key];
           head.classList.toggle("collapsed", c);
           head.setAttribute("aria-expanded", c ? "false" : "true");
           body.style.display = c ? "none" : "";
@@ -6107,58 +7906,83 @@ export class CommitViewProvider
             bmActiveKey = "";
             paintBm(false);
           }
+          fitBranchNames();
         });
-        list.appendChild(head);
-        list.appendChild(body);
+        wrap.appendChild(head);
+        wrap.appendChild(body);
+        list.appendChild(wrap);
       }
 
-      // Tags can number in the thousands, so we PAGE them rather than build a
-      // giant DOM up front — but every tag stays reachable: the "Show more" row
-      // raises the window until they are all rendered. The old hard cap applied
-      // even while filtering, so tags past it could not be reached at all.
-      const allTags = (branchData.tags || []).filter((n) => matchF(n));
-      const tagsShown = allTags.slice(0, tagLimit);
-      const tagsHidden = allTags.length - tagsShown.length;
+      group("favorites", "Favorites", favs);
+      group("recents", "Recents", recents);
+      group("local", "Local", others);
+      for (const g of remotes) group("remote:" + g.remote, "Remote", g.rows, { remote: g.remote, paged: true });
+      // Tags can number in the thousands: paged, never capped, so every tag
+      // stays reachable.
+      group("tags", "Tags", tags, { paged: true });
 
-      group("Favorites", favs, (b) => branchRow(b.name, "local", b.upstream, true, b.current, b.ahead, b.behind, b.gone));
-      group("Recents", recents, (b) => branchRow(b.name, "local", b.upstream, false, b.current, b.ahead, b.behind, b.gone));
-      group("Local", others, (b) => branchRow(b.name, "local", b.upstream, b.favorite, b.current, b.ahead, b.behind, b.gone));
-      group("Remote", remotes, (n) => branchRow(n, "remote", "", false, false));
-      group("Tags", tagsShown, (n) => branchRow(n, "tag", "", false, false),
-        { count: allTags.length, more: tagsHidden });
-
+      const anyRef = favs.length || recents.length || others.length || tags.length ||
+        remotes.some((g) => g.rows.length);
       if (branchesLoading) {
         // The host has not listed this repository's branches yet (its first
         // push carries none): say so, rather than show a repository with none.
         list.appendChild(el("div", "bm-empty bm-loading",
           bIcon("loading codicon-modifier-spin") + "<span>Loading branches…</span>"));
-      } else if (!anyAction && !favs.length && !recents.length && !others.length &&
-          !remotes.length && !allTags.length) {
-        list.appendChild(el("div", "bm-empty", "No matches"));
+      } else if (q && !anyRef) {
+        // No ref by that name: offer to make one, or to check out what was
+        // typed as a revision (a sha, origin/main~3). The new branch is the
+        // first, so Enter makes it — unless an action matched.
+        const none = el("div", "bm-empty bm-none");
+        none.textContent = "No branch or tag matches '" + branchQuery + "'";
+        list.appendChild(none);
+        const offer = (key, icon, label, run) => {
+          const b = el("button", "bm-action", bIcon(icon) + "<span></span>");
+          b.querySelector("span").textContent = label;
+          b.title = label;
+          b.dataset.bmkey = key;
+          b.dataset.score = "1";
+          b.tabIndex = -1;
+          bmOption(b);
+          consider(key, 1, true);
+          b.addEventListener("click", run);
+          list.appendChild(b);
+        };
+        const typed = branchQuery;
+        offer("a:newNamed", "add", "New Branch '" + typed + "'…", () => promptNewBranch(typed));
+        offer("a:checkoutNamed", "arrow-swap", "Checkout Revision '" + typed + "'…", () => promptCheckoutRef(typed));
       }
       // The whole list is showing: the width it needs is the width to keep
       // while a query narrows it (the branches may have just arrived).
-      if (!branchFilter) holdBranchMenuWidth();
+      if (!q) holdBranchMenuWidth();
       // New rows can be wider (a longer name arrived, more tags shown): the
       // box is kept inside the view.
       placeBranchMenu();
       fitBranchRows();
+      fitBranchNames();
       // The rows are new; the highlight finds its row again by key.
       paintBm(false);
     }
     /**
      * The width the menu keeps while you type, so fewer, shorter rows never
-     * pull its edge in under the pointer: what its whole list needs, never
-     * less than it had. Taken with the box empty (on open, when the branches
-     * arrive, when the box is cleared) and when the view is resized, so
-     * branches that arrive after it opened, or a view widened under it, widen
-     * it for good. It never outgrows the view.
+     * pull its edge in under the pointer — nor a long query push it out:
+     * what its whole list needs, never less than it had. Taken with the box
+     * empty (on open, when the branches arrive, when the box is cleared) and
+     * when the view is resized, so branches that arrive after it opened, or
+     * a view widened under it, widen it for good. It never outgrows the view.
      */
     function holdBranchMenuWidth() {
       if (!branchMenu) return;
-      branchMenu.style.minWidth = "";
+      branchMenu.style.width = "";
       bmHeldWidth = Math.max(bmHeldWidth, Math.ceil(branchMenu.getBoundingClientRect().width));
-      branchMenu.style.minWidth = "min(" + bmHeldWidth + "px, calc(100vw - 12px))";
+      branchMenu.style.width = "min(" + bmHeldWidth + "px, calc(100vw - 12px))";
+    }
+    /** The same, from the whole list while a query shows only part of it:
+     *  the branches arrived after something was typed. */
+    function holdWholeListWidth() {
+      const f = branchFilter;
+      branchFilter = "";
+      renderBranchMenu();
+      branchFilter = f;
     }
     /**
      * A branch's name keeps at least 45% of its row, or all of itself when it
@@ -6177,6 +8001,135 @@ export class CommitViewProvider
         return n.scrollWidth > n.clientWidth + 0.5 && n.clientWidth < 0.45 * r.clientWidth;
       });
       cramped.forEach((r) => r.classList.add("is-cramped"));
+    }
+
+    // Measures text for fitBranchNames without laying anything out.
+    let bmMeasure = null;
+    function bmTextWidth(font, s) {
+      if (!bmMeasure) bmMeasure = document.createElement("canvas").getContext("2d");
+      bmMeasure.font = font;
+      return bmMeasure.measureText(s).width;
+    }
+    /**
+     * A long name whose match lies past the end of its row is cut in the
+     * middle instead of at the end — its first path segment, "…", then the
+     * segment (or the word) the match is in — so what was typed is in sight:
+     * "feature/…/billing-address-valid…" for "billing". Only rows on screen
+     * with a match are measured, once each; the full name is in the row's
+     * tooltip and spoken label.
+     */
+    function fitBranchNames() {
+      const list = bmList();
+      if (!list || !branchFilter || !branchMenu || branchMenu.classList.contains("is-drilled")) return;
+      const box = list.getBoundingClientRect();
+      const todo = [];
+      list.querySelectorAll(".bm-bname[data-pos]:not([data-cut])").forEach((nm) => {
+        const r = nm.getBoundingClientRect();
+        if (r.height === 0 || r.bottom < box.top || r.top > box.bottom) return;
+        if (nm.scrollWidth <= nm.clientWidth + 0.5) { nm.dataset.cut = "0"; return; }
+        const cs = getComputedStyle(nm);
+        // Measured as if every letter were as bold as a match: it errs
+        // towards showing a letter less, never a match hidden.
+        todo.push({ nm: nm, avail: nm.clientWidth, font: cs.fontStyle + " 600 " + cs.fontSize + " " + cs.fontFamily });
+      });
+      for (const t of todo) {
+        const text = t.nm.dataset.text;
+        const pos = t.nm.dataset.pos.split(",").map(Number);
+        const cut = bmMiddleCut(text, pos, t.avail, (s) => bmTextWidth(t.font, s));
+        t.nm.dataset.cut = cut ? "1" : "0";
+        if (cut) t.nm.innerHTML = hl(cut.text, cut.pos);
+      }
+    }
+    /**
+     * Where to cut text so every letter at pos shows in avail pixels, or null
+     * when an ellipsis at its end already leaves them in sight. A scattered
+     * match ("fval": the f of feature, the val of validation) has several
+     * runs of matched letters; each keeps some of what is around it, and
+     * "…" stands for what lies between. What is kept, most first:
+     *   · of the name's start: its first path segment, else its first word,
+     *     else nothing — and all of it up to a run that starts the name;
+     *   · before each run: its path segment (with the slash before it), else
+     *     its word, else the run alone;
+     *   · after a run: the rest of its word, or, for the run alone, nothing.
+     *     The last run keeps everything after it, cut at the row's end.
+     * The first way that fits is the one: "feature/…/billing-address-val…"
+     * for "billing", "feature/…validation-for…" for "fval".
+     */
+    function bmMiddleCut(text, pos, avail, width) {
+      const ELL = "…";
+      const last = pos[pos.length - 1];
+      if (width(text.slice(0, last + 1)) + width(ELL) <= avail) return null;
+      // The matched letters as runs, each [from, to).
+      const runs = [];
+      for (const p of pos) {
+        const r = runs[runs.length - 1];
+        if (r && p === r[1]) r[1] = p + 1;
+        else runs.push([p, p + 1]);
+      }
+      const SEP = /[\/\-_.\s()'"@#:,+]/;
+      /** Where the word holding text[i - 1] ends. */
+      const wordEnd = (i) => {
+        let j = i;
+        while (j < text.length && !SEP.test(text.charAt(j)) && !bmWordStart(text, j)) j++;
+        return j;
+      };
+      /** Where a run's kept text starts, at each level: its path segment, its word, itself. */
+      const before = (s, level) => {
+        let from = s;
+        if (level === 0) from = text.lastIndexOf("/", s - 1) + 1;
+        else if (level === 1) while (from > 0 && !bmWordStart(text, from)) from--;
+        // A kept path segment keeps the slash before it: "feature/…/billing".
+        return from > 0 && text.charAt(from - 1) === "/" ? from - 1 : from;
+      };
+      let firstWord = 1;
+      while (firstWord < text.length && !bmWordStart(text, firstWord)) firstWord++;
+      const heads = [text.indexOf("/") + 1, firstWord, 0];
+      /** The name with what lies between the kept parts as "…", and where each matched letter went. */
+      const build = (level, h) => {
+        const keep = [];
+        if (h > 0) keep.push([0, h]);
+        runs.forEach((r, k) => {
+          // A run that starts the name keeps the name's start.
+          const from = k === 0 && r[0] <= 1 ? 0 : before(r[0], level);
+          const to = k === runs.length - 1 ? text.length : level === 2 ? r[1] : wordEnd(r[1]);
+          keep.push([from, to]);
+        });
+        keep.sort((a, b) => a[0] - b[0]);
+        // Merged where they touch, or where "…" would be no shorter than what it stands for.
+        const merged = [];
+        for (const [a, b] of keep) {
+          const m = merged[merged.length - 1];
+          if (m && (a <= m[1] || width(text.slice(m[1], a)) <= width(ELL))) m[1] = Math.max(m[1], b);
+          else merged.push([a, b]);
+        }
+        if (merged[0][0] > 0 && width(text.slice(0, merged[0][0])) <= width(ELL)) merged[0][0] = 0;
+        let out = "";
+        const at = new Map();
+        merged.forEach(([a, b]) => {
+          if (a > 0) out += ELL;
+          for (let i = a; i < b; i++) at.set(i, out.length + i - a);
+          out += text.slice(a, b);
+        });
+        const mapped = pos.map((p) => at.get(p));
+        return { text: out, pos: mapped, fits: width(out.slice(0, mapped[mapped.length - 1] + 1)) + width(ELL) <= avail };
+      };
+      // Most kept first: around each run, then of the name's start — but a
+      // run that starts the name keeps its first path segment whole before
+      // anything around the other runs ("feature/…validation", never
+      // "feature…/billing-address-validation" beside it on the next row).
+      const tries = [];
+      if (runs[0][0] <= 1) {
+        for (const h of [heads[0], 0]) for (let level = 0; level <= 2; level++) tries.push([level, h]);
+      } else {
+        for (let level = 0; level <= 2; level++) for (const h of heads) tries.push([level, h]);
+      }
+      let cut = null;
+      for (const [level, h] of tries) {
+        cut = build(level, h);
+        if (cut.fits) break;
+      }
+      // Nothing fits the row: the closest cut still shows the most of what matched.
+      return cut.text === text ? null : cut;
     }
 
     // ── GitStudio dialogs ─────────────────────────────────────────────────
@@ -6200,6 +8153,54 @@ export class CommitViewProvider
     var dlgReturnFocus = null;
     /** Correlation id of a host-requested dialog, so we can answer exactly once. */
     var dlgHostId = null;
+    /** The open dialog's checkboxes ("Also delete the branch"), answered with it. */
+    var dlgOptionBoxes = [];
+
+    /**
+     * A pick's or a confirm's checkboxes, above the footer: a real checkbox with
+     * its label and a line saying what checking it does. Their checked ids go
+     * back with the answer (closeDialog).
+     */
+    function renderDialogOptions(panel, spec) {
+      dlgOptionBoxes = [];
+      var opts = spec.options || [];
+      if (!opts.length) return;
+      var box = el("div", "rp-options");
+      opts.forEach(function (o, i) {
+        var row = document.createElement("label");
+        row.className = "rp-option";
+        var input = document.createElement("input");
+        input.type = "checkbox";
+        input.className = "rp-check";
+        input.checked = !!o.checked;
+        input.dataset.optionId = o.id;
+        input.id = "rp-option-" + i;
+        var text = el("span", "rp-choice-text");
+        var label = el("span", "rp-choice-label");
+        label.textContent = o.label;
+        text.appendChild(label);
+        if (o.description) {
+          var desc = el("span", "rp-choice-desc");
+          desc.textContent = o.description;
+          text.appendChild(desc);
+          input.setAttribute("aria-describedby", "rp-option-desc-" + i);
+          desc.id = "rp-option-desc-" + i;
+        }
+        // Space toggles the box; Enter still answers the question.
+        input.addEventListener("keydown", function (e) { if (e.key === " ") e.stopPropagation(); });
+        row.appendChild(input);
+        row.appendChild(text);
+        box.appendChild(row);
+        dlgOptionBoxes.push(input);
+      });
+      panel.appendChild(box);
+    }
+
+    /** The checked options' ids, when the open dialog has any. */
+    function checkedDialogOptions() {
+      return dlgOptionBoxes.filter(function (b) { return b.checked; })
+        .map(function (b) { return b.dataset.optionId; });
+    }
 
     /**
      * Remove the dialog's DOM and listeners WITHOUT answering anyone.
@@ -6229,11 +8230,16 @@ export class CommitViewProvider
      * is posted here — the single place every close path funnels through.
      */
     function closeDialog(answer) {
+      // Read before the teardown takes the boxes with it.
+      var options = answer !== undefined && dlgOptionBoxes.length ? checkedDialogOptions() : undefined;
+      dlgOptionBoxes = [];
       teardownDialog();
       var hostId = dlgHostId;
       dlgHostId = null;
       if (hostId) {
-        vscode.postMessage({ type: "dialogResult", dialogId: hostId, dialogValue: answer });
+        var reply = { type: "dialogResult", dialogId: hostId, dialogValue: answer };
+        if (options) reply.dialogOptions = options;
+        vscode.postMessage(reply);
       }
     }
 
@@ -6395,6 +8401,9 @@ export class CommitViewProvider
       var candidates = spec.candidates || [];
       var sel = -1;
       var shown = [];
+      // The candidate a click picked: its name alone may be another ref's
+      // too (a branch and a tag), so a local caller is handed the candidate.
+      var picked = null;
       var panel = beginDialog(spec);
 
       var wrap = el("div", "rp-inputwrap");
@@ -6425,6 +8434,11 @@ export class CommitViewProvider
       function currentValue() {
         if (sel >= 0 && shown[sel]) return shown[sel].name;
         return spec.multiline ? input.value : input.value.trim();
+      }
+      /** The candidate the value is, when one was picked (never one typed). */
+      function currentPick() {
+        if (sel >= 0 && shown[sel]) return shown[sel];
+        return picked && picked.name === currentValue() ? picked : null;
       }
 
       function problem(v) {
@@ -6545,6 +8559,7 @@ export class CommitViewProvider
           row.addEventListener("click", function () {
             input.value = c.name;
             sel = -1;
+            picked = c;
             renderList();
             if (validate()) confirm();
           });
@@ -6555,11 +8570,12 @@ export class CommitViewProvider
       function confirm() {
         var v = currentValue();
         if (!v || problem(v)) return;
+        var pick = currentPick();
         closeDialog(onConfirm ? undefined : v);
-        if (onConfirm) onConfirm(v);
+        if (onConfirm) onConfirm(v, pick);
       }
 
-      input.addEventListener("input", function () { sel = -1; renderList(); validate(); });
+      input.addEventListener("input", function () { sel = -1; picked = null; renderList(); validate(); });
       input.addEventListener("keydown", function (e) {
         if (e.key === "Escape") { e.preventDefault(); closeDialog(undefined); return; }
         if (e.key === "Enter") {
@@ -6636,6 +8652,11 @@ export class CommitViewProvider
       var sel = 0;
       var shown = choices;
       var panel = beginDialog(spec);
+      if (spec.message) {
+        var pmsg = el("div", "rp-msg");
+        pmsg.textContent = spec.message;
+        panel.appendChild(pmsg);
+      }
 
       var input = null;
       if (useFilter) {
@@ -6650,6 +8671,7 @@ export class CommitViewProvider
 
       var list = el("div", "rp-list");
       panel.appendChild(list);
+      renderDialogOptions(panel, spec);
 
       // No confirm button: a pick IS the commit, exactly like the branch menu.
       var foot = el("div", "rp-foot");
@@ -6777,6 +8799,7 @@ export class CommitViewProvider
       var msg = el("div", "rp-msg");
       msg.textContent = spec.message;
       panel.appendChild(msg);
+      renderDialogOptions(panel, spec);
       var ok = dialogFoot(panel, spec.confirmLabel, spec.danger, function () {
         closeDialog("ok");
       });
@@ -6831,7 +8854,9 @@ export class CommitViewProvider
     function openBranchMenu() {
       if (branchMenu) { closeBranchMenu(); return; }
       branchFilter = "";
-      tagLimit = TAG_PAGE;
+      branchQuery = "";
+      pageLimits = Object.create(null);
+      bmUserMoved = false;
       // A scrim dims the view behind the dialog stack, so it's unmistakable
       // that you're IN a dialog (clicking it closes, like any modal).
       branchBackdrop = el("div", "bm-backdrop");
@@ -6849,17 +8874,22 @@ export class CommitViewProvider
       input.setAttribute("aria-autocomplete", "list");
       input.setAttribute("aria-controls", "bm-list");
       input.addEventListener("input", () => {
-        branchFilter = input.value.trim().toLowerCase();
-        tagLimit = TAG_PAGE; // a new query starts from the first page again
+        // Typing leaves an open submenu (a drilled-in one too) for the
+        // list, for good: a host repaint must not open it again.
+        subMenuFor = null;
+        branchQuery = input.value.trim();
+        branchFilter = branchQuery.toLowerCase();
+        pageLimits = Object.create(null); // a new query starts from the first page again
+        bmUserMoved = false;
         renderBranchMenu();
         // A new query starts at the top, its first group header in view —
         // not wherever the last one had been scrolled to.
         const l = bmList();
         if (l) l.scrollTop = 0;
-        // Typing puts the highlight on the first match (none for an empty box),
-        // so Enter runs what the search found.
-        const rows = bmRows();
-        bmActiveKey = branchFilter && rows.length ? rows[0].dataset.bmkey : "";
+        // Typing puts the highlight on the best match (none for an empty
+        // box), so Enter runs what the search found — a branch before an
+        // action it ties with.
+        bmActiveKey = branchFilter && bmBest ? bmBest.key : "";
         paintBm(true);
       });
       input.addEventListener("keydown", onBmInputKey);
@@ -6877,8 +8907,11 @@ export class CommitViewProvider
         const row = e.target.closest ? e.target.closest("[data-bmkey]") : null;
         if (!row || row.dataset.bmkey === bmActiveKey) return;
         bmActiveKey = row.dataset.bmkey;
+        bmUserMoved = true;
         paintBm(false);
       });
+      // Rows scrolled into sight get their long names cut around the match.
+      list.addEventListener("scroll", () => fitBranchNames(), { passive: true });
       branchMenu.appendChild(list);
       // A press anywhere in the menu but the box itself — a row, a group
       // header, the padding, the 'No matches' line — never takes focus from
@@ -6920,11 +8953,22 @@ export class CommitViewProvider
     // placed again, inside the view's new edges.
     function onBranchResize() {
       if (!branchMenu) return;
+      // Drilled in, the list is hidden and cannot be measured: it comes back
+      // first, and the actions are placed again below — beside the menu if
+      // the view is wide enough for that now.
+      const sub = subMenuFor, subKey = bmSubActiveKey(); // the same item stays highlighted
+      if (branchSubmenu) closeBranchSubmenu();
+      subMenuFor = sub;
       // Measured on whole rows: the counts a narrower view hid come back first.
       branchMenu.querySelectorAll(".bm-branch.is-cramped").forEach((r) => r.classList.remove("is-cramped"));
-      holdBranchMenuWidth();
+      // The width the whole list needs in the new view — never what a query
+      // shows: an offer quoting a long query would measure the menu at its
+      // widest, and hold it there after the box was cleared.
+      if (branchFilter) holdWholeListWidth();
+      else holdBranchMenuWidth();
       placeBranchMenu();
-      if (branchSubmenu) refreshOpenBranchUi(); else fitBranchRows();
+      // Every row, measured again at the new width.
+      refreshOpenBranchUi(subKey);
     }
     branchPill.addEventListener("click", openBranchMenu);
     // Switch Repository: the host builds the list (it holds every repository's
@@ -6953,15 +8997,18 @@ export class CommitViewProvider
     }
     function onPushKey(e) {
       if (e.key === "Escape" && !pushBusy) { e.preventDefault(); e.stopPropagation(); closePushModal(); }
-    }
-    function relTime(sec) {
-      const d = Math.max(0, Date.now() / 1000 - sec);
-      if (d < 60) return "just now";
-      const m = Math.floor(d / 60); if (m < 60) return m + "m ago";
-      const h = Math.floor(m / 60); if (h < 24) return h + "h ago";
-      const days = Math.floor(h / 24); if (days < 30) return days + "d ago";
-      const mo = Math.floor(days / 30); if (mo < 12) return mo + "mo ago";
-      return Math.floor(mo / 12) + "y ago";
+      // A modal keeps Tab inside it: its file rows, its buttons, round again
+      // — never the list behind the backdrop.
+      if (e.key === "Tab" && pushModal) {
+        const stops = Array.prototype.filter.call(
+          pushModal.querySelectorAll("button"),
+          function (b) { return !b.disabled && b.offsetParent !== null; });
+        if (!stops.length) return;
+        const first = stops[0], last = stops[stops.length - 1];
+        const inside = pushModal.contains(document.activeElement);
+        if (e.shiftKey && (!inside || document.activeElement === first)) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && (!inside || document.activeElement === last)) { e.preventDefault(); first.focus(); }
+      }
     }
     function openPushModal(data) {
       closePushModal();
@@ -6988,6 +9035,15 @@ export class CommitViewProvider
       close.addEventListener("click", () => { if (!pushBusy) closePushModal(); });
       head.appendChild(close);
       modal.appendChild(head);
+      // Reviewing another worktree's push (from the Worktrees view): say whose.
+      if (data.worktree) {
+        const where = el("div", "pm-where", '<i class="codicon codicon-worktree" aria-hidden="true"></i>');
+        const whereText = el("span");
+        whereText.textContent = "From the worktree " + data.worktree.name + " — " + data.worktree.shownPath;
+        where.appendChild(whereText);
+        modal.appendChild(where);
+        modal.setAttribute("aria-label", "Confirm push from the worktree " + data.worktree.name);
+      }
 
       const stats = el("div", "pm-stats");
       const nC = data.commits.length, nF = data.files.length;
@@ -7017,44 +9073,32 @@ export class CommitViewProvider
       }
       modal.appendChild(stats);
 
-      const body = el("div", "pm-body");
-      body.appendChild(el("div", "pm-section-label", "Commits to push"));
+      const body = el("div", "pm-body cr-list");
+      // The rows the Worktrees view draws too (webview-ui/changeRows, loaded
+      // as change-rows.js): each commit opens to what IT changed; the files
+      // below are what all of them change together. Clicking a file opens its
+      // diff in the editor; the modal stays.
+      const R = window.GsChangeRows;
+      body.appendChild(R ? R.sectionLabel("Commits to push") : el("div", "cr-section-label", "Commits to push"));
       data.commits.forEach((c) => {
-        const row = el("div", "pm-commit");
-        row.appendChild(el("span", "sha", esc(c.sha.slice(0, 7))));
-        const subj = el("span", "subj"); subj.textContent = c.subject; subj.title = c.subject; row.appendChild(subj);
-        const meta = el("span", "meta"); meta.textContent = c.author + " · " + relTime(c.date); row.appendChild(meta);
-        body.appendChild(row);
+        if (!R) { body.appendChild(el("div", "cr-commit", esc(c.sha.slice(0, 7) + "  " + c.subject))); return; }
+        body.appendChild(R.commitRow(c, {
+          loadFiles: (commit) => vscode.postMessage({ type: "pushCommitFiles", sha: commit.sha }),
+          onOpenFile: (commit, f) => vscode.postMessage({
+            type: "openPushCommitFile", sha: commit.sha, parent: (commit.parents || [])[0],
+            path: f.path, oldPath: f.oldPath, status: f.status,
+          }),
+        }));
       });
-      body.appendChild(el("div", "pm-section-label", "Files changed"));
+      body.appendChild(R ? R.sectionLabel("Files changed") : el("div", "cr-section-label", "Files changed"));
       if (!data.files.length) {
-        body.appendChild(el("div", "pm-empty-note", "No file changes in these commits."));
+        body.appendChild(R ? R.emptyNote("No file changes in these commits.") : el("div", "cr-empty", "No file changes in these commits."));
       } else {
         data.files.forEach((f) => {
-          const st = (f.status || "M").charAt(0).toUpperCase();
-          const row = el("div", "pm-file " + statusClass(st));
-          row.appendChild(el("span", "st", st));
-          const name = f.path.split("/").pop() || f.path;
-          const dir = f.path.includes("/") ? f.path.slice(0, f.path.lastIndexOf("/")) : "";
-          const nm = el("span", "name"); nm.textContent = name; row.appendChild(nm);
-          const dd = el("span", "dir");
-          const ddText = document.createElement("bdi");
-          ddText.textContent = dir;
-          dd.appendChild(ddText);
-          row.appendChild(dd);
-          row.title = "Open diff — " + f.path + (f.oldPath ? "  (was " + f.oldPath + ")" : "");
-          if (f.additions > 0 || f.deletions > 0) {
-            const nums = el("span", "nums");
-            if (f.additions > 0) nums.appendChild(el("span", "add", "+" + f.additions));
-            if (f.deletions > 0) nums.appendChild(el("span", "del", "−" + f.deletions));
-            row.appendChild(nums);
-          }
-          // Clicking a committed file opens its diff (base…HEAD) in the editor,
-          // so you can review exactly what's about to be pushed. The modal stays.
-          row.classList.add("clickable");
-          row.addEventListener("click", () =>
-            vscode.postMessage({ type: "openPushFileDiff", path: f.path, oldPath: f.oldPath }));
-          body.appendChild(row);
+          if (!R) { body.appendChild(el("div", "cr-file", esc(f.path))); return; }
+          body.appendChild(R.fileRow(f, {
+            onOpen: (file) => vscode.postMessage({ type: "openPushFileDiff", path: file.path, oldPath: file.oldPath }),
+          }));
         });
       }
       if (!data.canPush && data.reason) {
@@ -7248,22 +9292,98 @@ export class CommitViewProvider
      * in rowOrder, so anything outside it no longer exists.
      */
     function render() {
+      // Where the keyboard is, so a row that leaves the list (staged,
+      // discarded) hands focus to the next row still there — or, with none
+      // after it, the one before — instead of dropping it on the page.
+      const was = focusPlace(groupsEl);
       renderRows();
+      if (tipTarget && !tipTarget.isConnected) hideTip();
       let dropped = false;
       selectedRows.forEach((k) => {
-        if (rowOrder.indexOf(k) === -1) { selectedRows.delete(k); dropped = true; }
+        if (selScope(k) === "tree" && rowOrder.indexOf(k) === -1) { selectedRows.delete(k); dropped = true; }
       });
-      if (dropped && selectionAnchor && rowOrder.indexOf(selectionAnchor) === -1) {
+      if (dropped) paintSelection();
+      if (dropped && selectionAnchor && orderOf(selectionAnchor).indexOf(selectionAnchor) === -1) {
         selectionAnchor = null;
       }
+      applyRoving();
+      handFocusOn(was, groupsEl);
       updateSelectionBar();
+      if (drag) paintDrop();
+    }
+
+    /**
+     * Where the keyboard is among container's treeitems, and every item
+     * showing on each side of it — the whole run, not only the neighbours:
+     * a folder, a group or a stash takes its rows with it. The run spans the
+     * whole tree (the working tree's rows and the Stashes group's), so a box
+     * left empty can hand the keyboard across; index counts container's own
+     * rows. Null when the keyboard is elsewhere.
+     */
+    function focusPlace(container) {
+      const ae = document.activeElement;
+      const focused = ae && container.contains(ae) ? itemOf(ae) : null;
+      if (!focused) return null;
+      const items = treeItems();
+      const i = items.indexOf(focused);
+      const keyOf = (n) => n.dataset.tkey;
+      let own = -1;
+      for (let j = 0; i >= 0 && j <= i; j++) if (container.contains(items[j])) own++;
+      return {
+        tkey: focused.dataset.tkey,
+        after: i < 0 ? [] : items.slice(i + 1).map(keyOf),
+        before: i < 0 ? [] : items.slice(0, i).reverse().map(keyOf),
+        index: own,
+      };
+    }
+    /**
+     * After a repaint of container: when the item that had the keyboard is
+     * gone (or can no longer be seen), the same item's new row takes it — or
+     * the next one still showing, else the one before — in container first.
+     * The working tree's last file leaving goes up to the file above it, not
+     * down to the Stashes header (the next treeitem, but another box). Only
+     * with nothing left showing in container does the other box take it (the
+     * last stash leaving hands it up to the working tree's last row); with no
+     * item left in the whole tree, fallback() names the place (never the
+     * page itself).
+     */
+    function handFocusOn(was, container, fallback) {
+      if (!was) return;
+      // Only to a row that can be seen: the header of a group this render
+      // emptied is still in the DOM (and may still hold the focus for a
+      // frame), and a focus() on it lands nowhere.
+      const now = document.activeElement;
+      const lost = !container.contains(now) || (!!itemOf(now) && !shownItem(itemOf(now)));
+      if (!lost) return;
+      // One pass over the rows (a Stage All can take thousands at once).
+      const items = treeItems();
+      const here = new Map();
+      const elsewhere = new Map();
+      const mine = [];
+      for (let j = 0; j < items.length; j++) {
+        const it = items[j];
+        if (container.contains(it)) { here.set(it.dataset.tkey, it); mine.push(it); }
+        else elsewhere.set(it.dataset.tkey, it);
+      }
+      const nearest = (shown) => {
+        let to = shown.get(was.tkey) || null;
+        for (let j = 0; !to && j < was.after.length; j++) to = shown.get(was.after[j]) || null;
+        for (let j = 0; !to && j < was.before.length; j++) to = shown.get(was.before[j]) || null;
+        return to;
+      };
+      let to = nearest(here);
+      if (!to && mine.length) to = mine[Math.min(Math.max(was.index, 0), mine.length - 1)];
+      if (!to) to = nearest(elsewhere);
+      if (to) { focusItem(to); return; }
+      const other = fallback ? fallback() : null;
+      if (other) other.focus({ preventScroll: true });
     }
 
     function renderRows() {
       lastRenderSig = stateSig();
-      groupsEl.textContent = "";
       folderKeyAccumulator = [];
       rowOrder = [];
+      nextRowCache = new Map();
       const data = {
         merge: lastState.merge,
         staged: lastState.staged,
@@ -7281,19 +9401,29 @@ export class CommitViewProvider
       // staged nothing and said nothing.
       stageAllTopBtn.disabled = data.unstaged.length === 0;
       stashChangesBtn.disabled = total === 0;
-      changesTotal.textContent = String(total);
-      changesTotal.classList.toggle("visible", total > 0);
+      // "Changed Files" counts files: a partly staged file is one file, in
+      // both groups. It said 4 over a checkbox list of 3.
+      const files = new Set();
+      for (const k of ["merge", "staged", "unstaged"]) {
+        for (const e of data[k]) files.add(e.path);
+      }
+      changesTotal.textContent = String(files.size);
+      changesTotal.classList.toggle("visible", files.size > 0);
+      changesTotal.setAttribute("aria-label", countWords(files.size, "changed file", "changed files"));
 
+      const groups = [];
       if (stagingModel === "checkboxes") {
-        groupsEl.appendChild(renderChecklist(data));
-        return;
+        groups.push(renderChecklist(data));
+      } else {
+        for (const def of GROUP_DEFS) {
+          const list = data[def.kind];
+          if (def.kind === "merge" && list.length === 0) continue;
+          groups.push(renderGroup(def, list));
+        }
       }
-
-      for (const def of GROUP_DEFS) {
-        const list = data[def.kind];
-        if (def.kind === "merge" && list.length === 0) continue;
-        groupsEl.appendChild(renderGroup(def, list));
-      }
+      patchChildren(groupsEl, groups);
+      // What this render did not ask for is gone: its rows are not kept.
+      rowCache = nextRowCache;
     }
 
     // ── Checkbox model (gitstudio.changes.stagingModel = "checkboxes") ─────────
@@ -7361,35 +9491,130 @@ export class CommitViewProvider
       });
       all.sort(function (a, b) { return a.entry.path.localeCompare(b.entry.path); });
 
-      const group = el("div", "group group--all" + (all.length === 0 ? " empty" : ""));
+      // The group and its header are built once and kept: what changes from
+      // render to render (the master tick, the count, the rows it acts on)
+      // is painted onto them below, and read by its handlers from __live.
+      const group = keep("grp|ck", "", buildChecklistShell);
+      const header = group.firstChild;
+      const checkedCount = all.filter(function (f) { return f.staged; }).length;
+      header.__live = { all: all, checkedCount: checkedCount };
+      const wantClass = "group group--all" + (all.length === 0 ? " empty" : "");
+      if (group.className !== wantClass) group.className = wantClass;
+      const master = header.querySelector(".ck-master");
+      master.checked = checkedCount > 0 && checkedCount === all.length;
+      // A partly staged file is some of the changes included, too: the header
+      // said "none" over a staged part.
+      master.indeterminate = !master.checked &&
+        all.some(function (f) { return f.state !== "unstaged"; });
+      const masterTip = master.checked ? "Uncheck all" : "Check all";
+      if (master.dataset.tip !== masterTip) master.dataset.tip = masterTip;
+      setAttr(header, "aria-checked", master.indeterminate ? "mixed" : master.checked ? "true" : "false");
+      setAttr(header, "aria-label", "Changes, " + countWords(all.length));
+      header.querySelector(".gcount").textContent = String(all.length);
+
+      const stagedByPath = new Map();
+      const kindByPath = new Map();
+      const stateByPath = new Map();
+      for (const f of all) {
+        stagedByPath.set(f.entry.path, f.staged);
+        kindByPath.set(f.entry.path, f.kind);
+        stateByPath.set(f.entry.path, f.state);
+      }
+      const defForEntry = function (entry) {
+        const kind = kindByPath.get(entry.path);
+        return kind === "merge"
+          ? GROUP_DEFS[0]
+          : stagedByPath.get(entry.path) ? GROUP_DEFS[1] : GROUP_DEFS[2];
+      };
+
+      /**
+       * The tick (and the changes twisty) for one file row. sig is part of
+       * the row's signature — the tick's handler is built from the state —
+       * and decorate prepends them to a row being built.
+       */
+      const tickFor = function (entry) {
+        const state = stateByPath.get(entry.path) || "unstaged";
+        const kind = kindByPath.get(entry.path);
+        // Any file with changes can be opened up to tick them individually.
+        //
+        // This used to exclude fully staged files, on the reasoning that they
+        // had "nothing left to pick from" — true when the list held only
+        // UNSTAGED changes, and false now that a listed change can be unticked.
+        // The effect was that staging the last change removed the twisty and the
+        // open list in one go, so the whole panel evaporated at exactly the
+        // moment the user finished with it.
+        const expandable = kind !== "merge";
+        return {
+          sig: state + "/" + kind,
+          expandable: expandable,
+          decorate: function (row) { decorateTick(row, entry.path, state, expandable); },
+        };
+      };
+
+      // Both layouts, so the tree/list toggle keeps working in this model. It
+      // used to build a flat list unconditionally, which left that toggle
+      // visible and inert whenever the checkbox model was on.
+      const nodes = [];
+      if (layout === "tree") {
+        renderTreeInto(nodes, GROUP_DEFS[2], all.map(function (f) { return f.entry; }), {
+          defFor: defForEntry,
+          tick: tickFor,
+        });
+      } else {
+        for (const f of all) {
+          renderFileRow(nodes, defForEntry(f.entry), f.entry, 1, tickFor(f.entry));
+        }
+      }
+      patchChildren(group.lastChild, nodes);
+      return group;
+    }
+
+    /** The checkbox model's group and header, built once (see renderChecklist). */
+    function buildChecklistShell() {
+      const group = el("div", "group group--all");
+      group.setAttribute("role", "none");
       const header = el("div", "group-header");
+      header.tabIndex = -1;
+      header.setAttribute("role", "treeitem");
+      header.setAttribute("aria-level", "1");
+      // It holds every file and never closes.
+      header.setAttribute("aria-expanded", "true");
+      header.dataset.tkey = "g:all";
       const master = el("input", "ck ck-master");
       master.type = "checkbox";
-      const checkedCount = all.filter(function (f) { return f.staged; }).length;
-      master.checked = checkedCount > 0 && checkedCount === all.length;
-      master.indeterminate = checkedCount > 0 && checkedCount < all.length;
-      master.title = master.checked ? "Uncheck all" : "Check all";
-      master.addEventListener("click", function (ev) {
-        ev.stopPropagation();
+      // The header itself is the tick for the keyboard (Space) and for a
+      // screen reader (aria-checked); this box is the pointer's.
+      master.tabIndex = -1;
+      master.setAttribute("aria-hidden", "true");
+      const toggleAll = function () {
+        const live = header.__live;
         // Aim at the state the user is asking for, not at a toggle of each row:
         // from indeterminate, one click should mean "include everything".
-        if (checkedCount === all.length && all.length > 0) {
+        if (live.checkedCount === live.all.length && live.all.length > 0) {
           queueGroup("staged", "unstage");
           vscode.postMessage({ type: "unstageAll" });
         } else {
           queueGroup("unstaged", "stage");
           vscode.postMessage({ type: "stageAllForCommit" });
         }
+      };
+      master.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        toggleAll();
       });
+      header.__activate = function (how) { if (how === "space") toggleAll(); };
       const glabel = el("span", "glabel");
       glabel.textContent = "Changes";
       const gcount = el("span", "gcount");
-      gcount.textContent = String(all.length);
       const actions = el("span", "group-actions");
-      actions.appendChild(makeIconBtn(ICON_DISCARD, "Discard All", function (ev) {
-        ev.stopPropagation();
+      const discardAllNow = function () {
         vscode.postMessage({ type: "discardAll", group: "unstaged" });
-      }));
+      };
+      const discardAll = rowBtn(ICON_DISCARD, "Discard All", function (ev) {
+        ev.stopPropagation();
+        discardAllNow();
+      });
+      actions.appendChild(discardAll);
       // Selecting a "section" in this model. There is only one list here — the
       // split into Staged and Unstaged is exactly what the checkbox model does
       // away with — so the sections the user means are the CHECKED rows and the
@@ -7406,7 +9631,7 @@ export class CommitViewProvider
       };
       const keysFor = function (which) {
         const out = [];
-        for (const f of all) {
+        for (const f of header.__live.all) {
           if (which === "checked" && !f.staged) continue;
           if (which === "unchecked" && f.staged) continue;
           const kind = f.kind === "merge" ? "merge" : f.staged ? "staged" : "unstaged";
@@ -7422,8 +9647,9 @@ export class CommitViewProvider
         const allOn = every.length > 0 && every.every(function (k) { return selectedRows.has(k); });
         selectKeys(allOn ? [] : every);
       });
-      header.addEventListener("contextmenu", function (ev) {
+      const menu = function (ev) {
         ev.preventDefault();
+        const all = header.__live.all;
         const checked = keysFor("checked");
         const unchecked = keysFor("unchecked");
         const items = [];
@@ -7438,152 +9664,117 @@ export class CommitViewProvider
             fn: function () { selectKeys(unchecked); } });
         }
         items.push({ sep: true });
-        items.push({ icon: "archive", label: "Stash Everything Staged",
+        items.push({ icon: "git-stash", label: "Stash Everything Staged",
           fn: function () { vscode.postMessage({ type: "stashStaged" }); } });
-        items.push({ icon: "archive", label: "Stash All Changes",
+        items.push({ icon: "git-stash", label: "Stash All Changes",
           fn: function () { vscode.postMessage({ type: "stash" }); } });
-        openActionMenu("Changes", items, header);
-      });
+        // The header's own button, for the keyboard (it is out of the tab order).
+        items.push({ sep: true });
+        items.push({ icon: "discard", label: "Discard All", danger: true, fn: discardAllNow });
+        openActionMenu("Changes", items, header, null);
+      };
+      header.__menu = menu;
+      header.addEventListener("contextmenu", menu);
 
       header.append(master, glabel, actions, gcount);
       group.appendChild(header);
-
       const body = el("div", "group-body");
-      const pendingHunks = new Map();
-      const stagedByPath = new Map();
-      const kindByPath = new Map();
-      const stateByPath = new Map();
-      for (const f of all) {
-        stagedByPath.set(f.entry.path, f.staged);
-        kindByPath.set(f.entry.path, f.kind);
-        stateByPath.set(f.entry.path, f.state);
-      }
-      const defForEntry = function (entry) {
-        const kind = kindByPath.get(entry.path);
-        return kind === "merge"
-          ? GROUP_DEFS[0]
-          : stagedByPath.get(entry.path) ? GROUP_DEFS[1] : GROUP_DEFS[2];
-      };
-
-      /** Prepends the tick (and the changes twisty) to one already-built row. */
-      const decorate = function (row, entry, container) {
-        const f = {
-          entry,
-          staged: !!stagedByPath.get(entry.path),
-          kind: kindByPath.get(entry.path),
-        };
-        const state = stateByPath.get(f.entry.path) || "unstaged";
-        const ck = el("input", "ck");
-        ck.type = "checkbox";
-        // Named by its file: a list of ticks all called "Not included — click
-        // to include it" does not say which is which.
-        ck.setAttribute("aria-label", "Include " + f.entry.path + " in the commit");
-        ck.checked = state === "staged";
-        // Some of this file is staged and some is not. An empty box would claim
-        // none of it is and a ticked one that all of it is; both are false, and
-        // showing it as two rows instead was worse than either.
-        ck.indeterminate = state === "partial";
-        ck.title = state === "staged"
-          ? "Included in the commit \u2014 click to remove it"
-          : state === "partial"
-            ? "Partly included \u2014 click to include the rest"
-            : "Not included \u2014 click to include it";
-        ck.addEventListener("click", function (ev) {
-          // The row itself opens the diff; the tick must not.
-          ev.stopPropagation();
-          // Ticking the file supersedes any hunk view of it — the indexes it was
-          // showing describe a state that no longer exists.
-          expandedHunks.delete(f.entry.path);
-          hunkCache.delete(f.entry.path);
-          // Partial completes rather than reverting: the visible state is "not
-          // finished", so forward is the obvious direction, and unstaging would
-          // discard the part already staged.
-          vscode.postMessage({
-            type: state === "staged" ? "unstage" : "stage",
-            path: f.entry.path,
-          });
-        });
-        row.insertBefore(ck, row.firstChild);
-
-        // Any file with changes can be opened up to tick them individually.
-        //
-        // This used to exclude fully staged files, on the reasoning that they
-        // had "nothing left to pick from" — true when the list held only
-        // UNSTAGED changes, and false now that a listed change can be unticked.
-        // The effect was that staging the last change removed the twisty and the
-        // open list in one go, so the whole panel evaporated at exactly the
-        // moment the user finished with it.
-        const expandable = f.kind !== "merge";
-        if (expandable) {
-          const path = f.entry.path;
-          const open = expandedHunks.has(path);
-          const twist = el("button", "hunk-twisty" + (open ? " open" : ""), ICON_CHEVRON);
-          twist.title = open ? "Hide individual changes" : "Show individual changes";
-          twist.setAttribute("aria-expanded", open ? "true" : "false");
-          twist.addEventListener("click", function (ev) {
-            ev.stopPropagation();
-            // Toggle ONE row in place. This used to call render(), which
-            // rebuilt every group and every row of the whole Changes view to
-            // open a single file -- the lag -- and threw away scroll position
-            // and focus while doing it, which is the glitching. Nothing outside
-            // this row changes, so nothing outside this row is rebuilt.
-            const isOpen = expandedHunks.has(path);
-            const next = !isOpen;
-            twist.classList.toggle("open", next);
-            twist.setAttribute("aria-expanded", next ? "true" : "false");
-            twist.title = next ? "Hide individual changes" : "Show individual changes";
-            const after = row.nextSibling;
-            const panel =
-              after && after.classList && after.classList.contains("hunks")
-                ? after
-                : null;
-            if (isOpen) {
-              expandedHunks.delete(path);
-              if (panel) panel.remove();
-              return;
-            }
-            expandedHunks.add(path);
-            // Ask every time rather than trusting the cache: the file may have
-            // changed on disk since it was last listed.
-            vscode.postMessage({ type: "requestHunks", path: path });
-            if (!panel && row.parentNode) {
-              row.parentNode.insertBefore(renderHunks(path), row.nextSibling);
-            }
-          });
-          row.insertBefore(twist, row.firstChild);
-        }
-        // The tree appends the row itself after this runs, so the changes panel
-        // is queued to follow it rather than appended here.
-        if (expandable && expandedHunks.has(f.entry.path)) {
-          pendingHunks.set(row, f.entry.path);
-        }
-        void container;
-      };
-
-      // Both layouts, so the tree/list toggle keeps working in this model. It
-      // used to build a flat list unconditionally, which left that toggle
-      // visible and inert whenever the checkbox model was on.
-      if (layout === "tree") {
-        renderTreeInto(body, GROUP_DEFS[2], all.map(function (f) { return f.entry; }), {
-          defFor: defForEntry,
-          decorate: decorate,
-        });
-      } else {
-        for (const f of all) {
-          const row = renderFileRow(defForEntry(f.entry), f.entry, 1);
-          decorate(row, f.entry, body);
-          body.appendChild(row);
-        }
-      }
-      // Insert each open changes panel directly after its file row, wherever the
-      // layout ended up putting that row.
-      pendingHunks.forEach(function (path, row) {
-        if (row.parentNode) row.parentNode.insertBefore(renderHunks(path), row.nextSibling);
-      });
-      pendingHunks.clear();
-
+      body.setAttribute("role", "group");
       group.appendChild(body);
       return group;
+    }
+
+    /** Prepends a checkbox-model row's tick (and its changes twisty) as the row is built. */
+    function decorateTick(row, path, state, expandable) {
+      const ck = el("input", "ck");
+      ck.type = "checkbox";
+      // Named by its file for the pointer's tooltip; the ROW is the tick for
+      // the keyboard (Space) and for a screen reader (aria-checked), so the
+      // box itself is out of the tab order and the accessibility tree.
+      ck.setAttribute("aria-label", "Include " + path + " in the commit");
+      ck.tabIndex = -1;
+      ck.setAttribute("aria-hidden", "true");
+      ck.checked = state === "staged";
+      // Some of this file is staged and some is not. An empty box would claim
+      // none of it is and a ticked one that all of it is; both are false, and
+      // showing it as two rows instead was worse than either.
+      ck.indeterminate = state === "partial";
+      row.setAttribute("aria-checked", state === "staged" ? "true" : state === "partial" ? "mixed" : "false");
+      ck.title = state === "staged"
+        ? "Included in the commit — click to remove it"
+        : state === "partial"
+          ? "Partly included — click to include the rest"
+          : "Not included — click to include it";
+      const tick = function () {
+        // Ticking the file supersedes any hunk view of it — the indexes it was
+        // showing describe a state that no longer exists.
+        expandedHunks.delete(path);
+        hunkCache.delete(path);
+        // Partial completes rather than reverting: the visible state is "not
+        // finished", so forward is the obvious direction, and unstaging would
+        // discard the part already staged.
+        vscode.postMessage({
+          type: state === "staged" ? "unstage" : "stage",
+          path: path,
+        });
+      };
+      ck.addEventListener("click", function (ev) {
+        // The row itself opens the diff; the tick must not.
+        ev.stopPropagation();
+        tick();
+      });
+      row.__tick = tick;
+      row.insertBefore(ck, row.firstChild);
+      if (!expandable) return;
+
+      const twist = el("button", "hunk-twisty", ICON_CHEVRON);
+      twist.type = "button";
+      twist.tabIndex = -1;
+      const setOpen = function (next) {
+        // Toggle ONE row in place. This used to call render(), which
+        // rebuilt every group and every row of the whole Changes view to
+        // open a single file -- the lag -- and threw away scroll position
+        // and focus while doing it, which is the glitching. Nothing outside
+        // this row changes, so nothing outside this row is rebuilt.
+        const isOpen = expandedHunks.has(path);
+        if (next === isOpen) return;
+        paintTwist(row, next);
+        const after = row.nextSibling;
+        const panel =
+          after && after.classList && after.classList.contains("hunks")
+            ? after
+            : null;
+        if (isOpen) {
+          expandedHunks.delete(path);
+          if (panel) panel.remove();
+          return;
+        }
+        expandedHunks.add(path);
+        // Ask every time rather than trusting the cache: the file may have
+        // changed on disk since it was last listed.
+        vscode.postMessage({ type: "requestHunks", path: path });
+        if (!panel && row.parentNode) {
+          row.parentNode.insertBefore(renderHunks(path), row.nextSibling);
+        }
+      };
+      twist.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        setOpen(!expandedHunks.has(path));
+      });
+      row.__expand = setOpen;
+      row.insertBefore(twist, row.firstChild);
+      paintTwist(row, expandedHunks.has(path));
+    }
+
+    /** A checkbox-model row's changes toggle, open or closed — on the button and on the row. */
+    function paintTwist(row, open) {
+      const twist = row.querySelector(".hunk-twisty");
+      if (!twist) return;
+      if (twist.classList.contains("open") !== open) twist.classList.toggle("open", open);
+      setAttr(twist, "aria-expanded", open ? "true" : "false");
+      const tip = open ? "Hide individual changes" : "Show individual changes";
+      if (twist.dataset.tip !== tip && twist.getAttribute("title") !== tip) twist.title = tip;
+      setAttr(row, "aria-expanded", open ? "true" : "false");
     }
 
     // The individual changes inside one file, each with its own tick (#20). These
@@ -7591,26 +9782,52 @@ export class CommitViewProvider
     // list on the next refresh, exactly like the file-level tick.
     function renderHunks(path) {
       const wrap = buildHunks(path);
+      hunkPanelEls.set(path, wrap);
       // Register the in-place updater for this panel. Rebuilding calls
       // renderHunks again, so the map always points at the live element; a
-      // panel that has been detached (a full render, or the file collapsed)
+      // panel that has been detached (the file collapsed, or its row gone)
       // reports false and forgets itself.
       hunkPanels.set(path, function () {
         if (!wrap.parentNode) {
           hunkPanels.delete(path);
           return false;
         }
-        wrap.parentNode.replaceChild(renderHunks(path), wrap);
+        const focusedHunk = wrap.contains(document.activeElement)
+          ? itemOf(document.activeElement)
+          : null;
+        const fresh = renderHunks(path);
+        wrap.parentNode.replaceChild(fresh, wrap);
+        // The keyboard was on one of these changes: keep it on the same one.
+        if (focusedHunk) {
+          const again = itemByTKey(focusedHunk.dataset.tkey) || itemOf(fresh.firstChild) || null;
+          if (again) focusItem(again);
+        } else {
+          applyRoving();
+        }
         return true;
       });
       return wrap;
     }
+    // path -> the open changes panel now in the list, so a render keeps it
+    // rather than rebuilding it (and its ticks) on every click elsewhere.
+    const hunkPanelEls = new Map();
+    // path -> the tree level its changes sit at (one below their file's row).
+    const hunkLevels = new Map();
+    function hunkPanelFor(path, level) {
+      hunkLevels.set(path, level);
+      const live = hunkPanelEls.get(path);
+      if (live && live.isConnected && live.dataset.level === String(level)) return live;
+      return renderHunks(path);
+    }
 
     function buildHunks(path) {
       const wrap = el("div", "hunks");
+      wrap.setAttribute("role", "group");
+      const level = hunkLevels.get(path) || 3;
+      wrap.dataset.level = String(level);
       const hunks = hunkCache.get(path);
       if (!hunks) {
-        wrap.appendChild(el("div", "hunk-empty", "Reading changes\u2026"));
+        wrap.appendChild(el("div", "hunk-empty", "Reading changes…"));
         return wrap;
       }
       if (hunks.length === 0) {
@@ -7622,30 +9839,37 @@ export class CommitViewProvider
         const hrow = el("div", "hunk-row hunk-" + state);
         const hck = el("input", "ck");
         hck.type = "checkbox";
+        // The row is the tick for the keyboard and a screen reader (below).
+        hck.tabIndex = -1;
+        hck.setAttribute("aria-hidden", "true");
         // The real state, so a ticked change STAYS in the list showing itself as
         // ticked. It used to be hard-coded false because the list only ever held
         // unstaged changes, which made ticking one look like it deleted the row.
         hck.checked = state === "staged";
         hck.indeterminate = state === "partial";
         hck.title = state === "staged"
-          ? "Staged \u2014 click to unstage this change"
+          ? "Staged — click to unstage this change"
           : state === "partial"
-            ? "Partly staged \u2014 click to stage the rest"
+            ? "Partly staged — click to stage the rest"
             : "Include this change in the commit";
-        hck.addEventListener("click", function (ev) {
-          ev.stopPropagation();
+        const tickHunk = function () {
           // Paint the new state immediately. The host round trip re-reads git
           // and repaints authoritatively a moment later; without this the tick
           // sits visibly unchanged until then, which reads as lag.
           if (state === "staged") { hck.checked = false; hck.indeterminate = false; }
           else { hck.checked = true; hck.indeterminate = false; }
+          hrow.setAttribute("aria-checked", hck.checked ? "true" : "false");
           hrow.classList.add("is-busy");
           vscode.postMessage({ type: "stageHunk", path: path, hunkIndex: h.index });
+        };
+        hck.addEventListener("click", function (ev) {
+          ev.stopPropagation();
+          tickHunk();
         });
         const lines = el("span", "hunk-lines");
         // 1-based, matching what the editor's gutter shows.
         lines.textContent = h.lineCount > 1
-          ? "L" + (h.start + 1) + "\u2013" + (h.end + 1)
+          ? "L" + (h.start + 1) + "–" + (h.end + 1)
           : "L" + (h.start + 1);
         const prev = el("span", "hunk-preview");
         prev.textContent = h.preview || "(whitespace only)";
@@ -7654,8 +9878,14 @@ export class CommitViewProvider
         // Clicking the row opens the file's diff at THIS change — the same way
         // clicking the file opens its diff. Without it a change is something you
         // can tick but never actually look at, which is backwards.
-        hrow.tabIndex = 0;
-        hrow.setAttribute("role", "button");
+        hrow.tabIndex = -1;
+        hrow.setAttribute("role", "treeitem");
+        hrow.setAttribute("aria-level", String(level));
+        hrow.setAttribute("aria-checked", state === "staged" ? "true" : state === "partial" ? "mixed" : "false");
+        hrow.setAttribute("aria-label", (h.lineCount > 1
+          ? "Lines " + (h.start + 1) + " to " + (h.end + 1)
+          : "Line " + (h.start + 1)) + ": " + (h.preview || "whitespace only"));
+        hrow.dataset.tkey = "h:" + path + ":" + h.index;
         hrow.dataset.tip = "Open this change in the diff";
         const openHunk = function () {
           vscode.postMessage({
@@ -7663,10 +9893,7 @@ export class CommitViewProvider
           });
         };
         hrow.addEventListener("click", openHunk);
-        hrow.addEventListener("keydown", function (ev) {
-          if (ev.target !== hrow) return;
-          if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openHunk(); }
-        });
+        hrow.__activate = function (how) { if (how === "space") tickHunk(); else openHunk(); };
 
         wrap.appendChild(hrow);
       }
@@ -7676,22 +9903,47 @@ export class CommitViewProvider
     function renderGroup(def, list) {
       const collapseKey = "group:" + def.kind;
       const isCollapsed = collapsed[collapseKey] === true;
-      const group = el("div", "group group--" + def.kind +
+      // Kept across renders; its count, its open state and the files its
+      // Ctrl/Cmd-click selects are painted on below.
+      const group = keep("grp|" + def.kind, "", function () { return buildGroupShell(def); });
+      const wantClass = "group group--" + def.kind +
         (list.length === 0 ? " empty" : "") +
-        (isCollapsed ? " collapsed" : ""));
+        (isCollapsed ? " collapsed" : "");
+      if (group.className !== wantClass) group.className = wantClass;
+      const header = group.firstChild;
+      header.__list = list;
+      setAttr(header, "aria-expanded", isCollapsed ? "false" : "true");
+      setAttr(header, "aria-label", def.label + ", " + countWords(list.length));
+      const gcount = header.querySelector(".gcount");
+      if (gcount.textContent !== String(list.length)) gcount.textContent = String(list.length);
 
+      const nodes = [];
+      if (layout === "tree") {
+        renderTreeInto(nodes, def, list);
+      } else {
+        for (const f of list) renderFileRow(nodes, def, f, 1);
+      }
+      patchChildren(group.lastChild, nodes);
+      return group;
+    }
+
+    /** A split-model group and its header, built once per group (see renderGroup). */
+    function buildGroupShell(def) {
+      const collapseKey = "group:" + def.kind;
+      const group = el("div", "group group--" + def.kind);
+      group.setAttribute("role", "none");
       const header = el("div", "group-header");
-      header.tabIndex = 0;
-      header.setAttribute("role", "button");
-      header.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
+      header.tabIndex = -1;
+      header.setAttribute("role", "treeitem");
+      header.setAttribute("aria-level", "1");
+      header.dataset.tkey = "g:" + def.kind;
       const twisty = el("span", "twisty", ICON_CHEVRON);
       const gdot = el("span", "gdot");
       const glabel = el("span", "glabel");
       glabel.textContent = def.label;
-      header.title = def.label + " \u2014 click to collapse, " +
-        "Ctrl/Cmd-click to select every file in it";
+      header.title = def.label + " — click to collapse, " +
+        "Ctrl/Cmd-click to select every file in it, right-click for its actions";
       const gcount = el("span", "gcount");
-      gcount.textContent = String(list.length);
 
       // Select the whole section. Ctrl/cmd-click matches the row modifier, and a
       // stash button that already follows the selection then means "stash this
@@ -7700,8 +9952,12 @@ export class CommitViewProvider
         if (!(ev.ctrlKey || ev.metaKey)) return;
         ev.preventDefault();
         ev.stopPropagation();
+        const list = header.__list || [];
         const keys = [];
         for (let i = 0; i < list.length; i++) keys.push(rowKey(def.kind, list[i].path));
+        // A stash's files selected before: this selection is the working
+        // tree's, so it starts over.
+        selectedRows.forEach((k) => { if (selScope(k) !== "tree") selectedRows.delete(k); });
         const allOn = keys.length > 0 && keys.every((k) => selectedRows.has(k));
         for (let i = 0; i < keys.length; i++) {
           if (allOn) selectedRows.delete(keys[i]);
@@ -7711,47 +9967,70 @@ export class CommitViewProvider
         paintSelection();
       });
 
-      const actions = el("span", "group-actions");
+      // The header's buttons, and the same actions in its menu (right-click,
+      // Shift+F10) — the keyboard's way to them, as the buttons are out of
+      // the tab order.
+      const acts = [];
       if (def.kind === "staged") {
-        actions.appendChild(makeIconBtn(ICON_UNSTAGE, "Unstage All", (ev) => {
-          ev.stopPropagation();
+        acts.push({ svg: ICON_UNSTAGE, icon: "remove", label: "Unstage All", fn: () => {
           queueGroup("staged", "unstage");
           vscode.postMessage({ type: "unstageAll", group: def.kind });
-        }));
+        } });
       } else {
-        actions.appendChild(makeIconBtn(ICON_STAGE, "Stage All", (ev) => {
-          ev.stopPropagation();
+        acts.push({ svg: ICON_STAGE, icon: "add", label: "Stage All", fn: () => {
           queueGroup(def.kind, "stage");
           vscode.postMessage({ type: "stageAll", group: def.kind });
-        }));
+        } });
         if (def.kind === "unstaged") {
-          actions.appendChild(makeIconBtn(ICON_DISCARD, "Discard All", (ev) => {
-            ev.stopPropagation();
+          acts.push({ svg: ICON_DISCARD, icon: "discard", label: "Discard All", danger: true, fn: () => {
             vscode.postMessage({ type: "discardAll", group: def.kind });
-          }));
+          } });
         }
       }
+      const actions = el("span", "group-actions");
+      for (const a of acts) {
+        actions.appendChild(rowBtn(a.svg, a.label, (ev) => { ev.stopPropagation(); a.fn(); }));
+      }
+      header.__menu = (ev) => {
+        if (ev) ev.preventDefault();
+        const list = header.__list || [];
+        const items = acts.map((a) => ({ icon: a.icon, label: a.label, fn: a.fn, danger: a.danger }));
+        // What Ctrl/Cmd-click on the header does, from the keyboard.
+        items.push({ sep: true });
+        items.push({ icon: "check-all", label: "Select All (" + list.length + ")", fn: () => {
+          selectedRows.clear();
+          for (let i = 0; i < list.length; i++) selectedRows.add(rowKey(def.kind, list[i].path));
+          selectionAnchor = list.length > 0 ? rowKey(def.kind, list[list.length - 1].path) : null;
+          paintSelection();
+        } });
+        if (def.kind !== "merge") {
+          items.push({ sep: true });
+          items.push(def.kind === "staged"
+            ? { icon: "git-stash", label: "Stash Everything Staged", fn: () => vscode.postMessage({ type: "stashStaged" }) }
+            : { icon: "git-stash", label: "Stash All Changes", fn: () => vscode.postMessage({ type: "stash" }) });
+        }
+        openActionMenu(def.label, items, header, null);
+      };
+      header.addEventListener("contextmenu", header.__menu);
 
       header.append(twisty, gdot, glabel, actions, gcount);
-      const toggleGroup = () => {
-        collapsed[collapseKey] = !(collapsed[collapseKey] === true);
+      const setOpen = (open) => {
+        collapsed[collapseKey] = !open;
         render();
       };
-      header.addEventListener("click", toggleGroup);
-      header.addEventListener("keydown", (e) => {
-        // Only act when the header itself is focused — never swallow Enter/Space
-        // meant for a focused action button inside it (Stage All / Unstage All).
-        if (e.target !== header) return;
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleGroup(); }
+      // A Ctrl/Cmd-click selects the group's files (above) and leaves it
+      // open: it used to fold the group away over the selection it had
+      // just made — stopPropagation stops neither listener on one element.
+      header.addEventListener("click", (ev) => {
+        if (ev.ctrlKey || ev.metaKey) return;
+        setOpen(collapsed[collapseKey] === true);
       });
+      header.__expand = setOpen;
+      header.__activate = () => setOpen(collapsed[collapseKey] === true);
       group.appendChild(header);
 
       const body = el("div", "group-body");
-      if (layout === "tree") {
-        renderTreeInto(body, def, list);
-      } else {
-        for (const f of list) body.appendChild(renderFileRow(def, f, 1));
-      }
+      body.setAttribute("role", "group");
       group.appendChild(body);
       return group;
     }
@@ -7761,13 +10040,13 @@ export class CommitViewProvider
      *
      * That model merges staged and unstaged files into one list, so each FILE
      * needs its own def for its row buttons (defFor) and each row needs its tick
-     * prepended (decorate) — while the folder rows keep the single def they are
+     * prepended (tick) — while the folder rows keep the single def they are
      * given. Without this the tree/list toggle was visible but inert in checkbox
      * mode, because the checklist only ever built a flat list.
      */
-    function renderTreeInto(body, def, list, opts) {
+    function renderTreeInto(nodes, def, list, opts) {
       const tree = buildTree(list);
-      renderNode(body, def, tree, 1, opts);
+      renderNode(nodes, def, tree, 1, opts);
     }
 
     // Flatten every file path under a folder node (direct + nested) so a
@@ -7778,7 +10057,7 @@ export class CommitViewProvider
       return out;
     }
 
-    function renderNode(container, def, node, depth, opts) {
+    function renderNode(nodes, def, node, depth, opts) {
       // Folders first (alphabetical), then files.
       const dirs = [...node.dirs.values()].sort((a, b) =>
         a.name.localeCompare(b.name));
@@ -7786,75 +10065,136 @@ export class CommitViewProvider
         const key = "folder:" + def.kind + ":" + dir.path;
         folderKeyAccumulator.push(key);
         const isCollapsed = collapsed[key] === true;
-        const row = el("div", "row" + (isCollapsed ? " collapsed" : ""));
-        row.style.paddingLeft = (depth * 12) + "px";
-        row.tabIndex = 0;
-        // It collapses like a group header, so it says so like one (until the
-        // rows become a tree of treeitems).
-        row.setAttribute("role", "button");
-        row.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
-        row.appendChild(el("span", "twisty", ICON_CHEVRON));
-        row.appendChild(el("span", "file-icon folder-icon", ICON_FOLDER));
-        const name = el("span", "name");
-        name.textContent = dir.name;
-        row.appendChild(name);
-        row.appendChild(el("span", "spacer"));
-        // Folder-level stage/unstage/discard — one git op over every file under
-        // this folder (mirrors the per-file actions; stopPropagation so the
-        // button click never toggles the folder's collapse).
-        const folderPaths = collectFolderFiles(dir, []);
-        const factions = el("span", "row-actions");
-        if (def.staged) {
-          factions.appendChild(makeIconBtn(ICON_UNSTAGE, "Unstage folder", (ev) => {
-            ev.stopPropagation();
-            queueFiles(folderPaths, "unstage");
-            vscode.postMessage({ type: "unstageFolder", paths: folderPaths });
-          }));
-        } else {
-          factions.appendChild(makeIconBtn(ICON_STAGE, "Stage folder", (ev) => {
-            ev.stopPropagation();
-            queueFiles(folderPaths, "stage");
-            vscode.postMessage({ type: "stageFolder", paths: folderPaths });
-          }));
-          if (def.kind === "unstaged") {
-            factions.appendChild(makeIconBtn(ICON_DISCARD, "Discard folder", (ev) => {
-              ev.stopPropagation();
-              vscode.postMessage({ type: "discardFolder", paths: folderPaths });
-            }));
-          }
-        }
-        row.appendChild(factions);
-        const toggle = () => { collapsed[key] = !isCollapsed; render(); };
-        row.addEventListener("click", toggle);
-        row.addEventListener("keydown", (e) => {
-          // Don't hijack Enter/Space aimed at a focused folder action button.
-          if (e.target !== row) return;
-          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
-        });
-        container.appendChild(row);
-        if (!isCollapsed) renderNode(container, def, dir, depth + 1, opts);
+        const row = keep(
+          "fold|" + stagingModel + "|" + def.kind + "|" + dir.path,
+          dir.name + "|" + depth,
+          function () { return buildFolderRow(def, dir.name, dir.path, key, depth); },
+        );
+        // The files a folder's Stage / Unstage / Discard act on are today's.
+        row.__paths = collectFolderFiles(dir, []);
+        if (row.classList.contains("collapsed") !== isCollapsed) row.classList.toggle("collapsed", isCollapsed);
+        setAttr(row, "aria-expanded", isCollapsed ? "false" : "true");
+        setAttr(row, "aria-label", dir.name + ", folder, " + countWords(row.__paths.length));
+        nodes.push(row);
+        if (!isCollapsed) renderNode(nodes, def, dir, depth + 1, opts);
       }
       for (const f of node.files.slice().sort((a, b) =>
         a.name.localeCompare(b.name))) {
         const rowDef = opts && opts.defFor ? opts.defFor(f.entry) : def;
-        const fileRow = renderFileRowTree(rowDef, f, depth);
-        if (opts && opts.decorate) opts.decorate(fileRow, f.entry, container);
-        container.appendChild(fileRow);
+        fileRowNode(nodes, rowDef, f.entry, f.name, null, depth + 1, depth * 12 + 16,
+          opts && opts.tick ? opts.tick(f.entry) : null);
       }
     }
 
-    function renderFileRowTree(def, f, depth) {
-      const row = makeFileRow(def, f.entry, f.name, null);
-      row.style.paddingLeft = (depth * 12 + 16) + "px";
+    function buildFolderRow(def, name, path, key, depth) {
+      const row = el("div", "row");
+      row.style.paddingLeft = (depth * 12) + "px";
+      row.tabIndex = -1;
+      // It opens and closes like a group header: a treeitem one level in.
+      row.setAttribute("role", "treeitem");
+      row.setAttribute("aria-level", String(depth + 1));
+      row.dataset.tkey = "d:" + stagingModel + ":" + def.kind + ":" + path;
+      row.appendChild(el("span", "twisty", ICON_CHEVRON));
+      row.appendChild(el("span", "file-icon folder-icon", ICON_FOLDER));
+      const nameEl = el("span", "name");
+      nameEl.textContent = name;
+      row.appendChild(nameEl);
+      row.appendChild(el("span", "spacer"));
+      // Folder-level stage/unstage/discard — one git op over every file under
+      // this folder (mirrors the per-file actions; stopPropagation so the
+      // button click never toggles the folder's collapse).
+      // The same actions are the folder's menu (right-click, Shift+F10): its
+      // buttons are the pointer's, and out of the tab order.
+      const acts = [];
+      if (def.staged) {
+        acts.push({ svg: ICON_UNSTAGE, icon: "remove", tip: "Unstage folder", label: "Unstage Folder", fn: () => {
+          queueFiles(row.__paths, "unstage");
+          vscode.postMessage({ type: "unstageFolder", paths: row.__paths });
+        } });
+      } else {
+        acts.push({ svg: ICON_STAGE, icon: "add", tip: "Stage folder", label: "Stage Folder", fn: () => {
+          queueFiles(row.__paths, "stage");
+          vscode.postMessage({ type: "stageFolder", paths: row.__paths });
+        } });
+        if (def.kind === "unstaged") {
+          acts.push({ svg: ICON_DISCARD, icon: "discard", tip: "Discard folder", label: "Discard Folder", danger: true, fn: () => {
+            vscode.postMessage({ type: "discardFolder", paths: row.__paths });
+          } });
+        }
+      }
+      const factions = el("span", "row-actions");
+      for (const a of acts) {
+        factions.appendChild(rowBtn(a.svg, a.tip, (ev) => { ev.stopPropagation(); a.fn(); }));
+      }
+      row.appendChild(factions);
+      const setOpen = (open) => { collapsed[key] = !open; render(); };
+      row.addEventListener("click", () => setOpen(collapsed[key] === true));
+      row.__expand = setOpen;
+      row.__activate = () => setOpen(collapsed[key] === true);
+      row.__menu = (ev) => {
+        if (ev) ev.preventDefault();
+        const items = acts.map((a) => ({ icon: a.icon, label: a.label, fn: a.fn, danger: a.danger }));
+        // A conflicted file is not stashed; the other folders' files can be.
+        if (def.kind !== "merge") {
+          items.push({ sep: true });
+          items.push({ icon: "git-stash", label: "Stash This Folder",
+            fn: () => vscode.postMessage({ type: "stashPaths", paths: row.__paths }) });
+        }
+        openActionMenu(name, items, row, "folder");
+      };
+      row.addEventListener("contextmenu", row.__menu);
+      // Dragged onto the Stashes header, its files are stashed (not a
+      // conflicted one: git cannot stash it).
+      row.draggable = true;
+      row.addEventListener("dragstart", (ev) => {
+        const paths = def.kind === "merge" ? [] : treeDragPaths(null, row.__paths || []);
+        beginDrag(ev, { kind: "tree", paths: paths }, [row], paths.length ? paths.join("\n") : path);
+      });
+      row.addEventListener("dragend", endDrag);
       return row;
     }
 
-    function renderFileRow(def, e, depth) {
+    /** A file row in the flat list: its name, then the folder it is in. */
+    function renderFileRow(nodes, def, e, depth, tick) {
       const slash = e.path.lastIndexOf("/");
       const fileName = slash === -1 ? e.path : e.path.slice(slash + 1);
       const dir = slash === -1 ? "" : e.path.slice(0, slash);
-      const row = makeFileRow(def, e, fileName, dir);
-      row.style.paddingLeft = "20px";
+      fileRowNode(nodes, def, e, fileName, dir, depth + 1, 20, tick);
+    }
+
+    /**
+     * One file row, kept by its key while nothing it was built from changes,
+     * followed by its open changes panel in the checkbox model. The row's
+     * handlers are built from def, the path and the status, so all of them
+     * are in its signature; its selection is painted on every render.
+     */
+    function fileRowNode(nodes, def, e, fileName, dir, level, padLeft, tick) {
+      const key = rowKey(def.kind, e.path);
+      rowOrder.push(key);
+      const sig = [
+        def.kind, def.staged ? 1 : 0, e.status, fileName, dir == null ? "\u0000" : dir,
+        level, padLeft, tick ? tick.sig : "",
+      ].join("|");
+      const row = keep("file|" + stagingModel + "|" + key, sig, function () {
+        const r = makeFileRow(def, e, fileName, dir);
+        r.style.paddingLeft = padLeft + "px";
+        r.setAttribute("aria-level", String(level));
+        // In the checkbox model a file keeps its place (and the keyboard) when
+        // it is ticked, though its group changes; in the split model it moves
+        // to the other group, and the keyboard stays where the file was.
+        r.dataset.tkey = stagingModel === "checkboxes"
+          ? "f:ck:" + e.path
+          : "f:" + key;
+        if (tick) tick.decorate(r);
+        return r;
+      });
+      paintRowSelected(row);
+      nodes.push(row);
+      if (tick && tick.expandable) {
+        const open = expandedHunks.has(e.path);
+        paintTwist(row, open);
+        if (open) nodes.push(hunkPanelFor(e.path, level + 1));
+      }
       return row;
     }
 
@@ -7864,8 +10204,12 @@ export class CommitViewProvider
       const row = el("div", "row is-file " + statusClass(letter) +
         (letter === "D" ? " is-deleted" : "") +
         (conflict ? " is-conflict" : ""));
-      row.tabIndex = 0;
-      row.setAttribute("role", "button");
+      row.tabIndex = -1;
+      // A treeitem, not a button: a button's content is read as one name, so
+      // the row was heard as "README.md Stage file Discard changes M". Its
+      // name is the file and what happened to it; its folder is the tip.
+      row.setAttribute("role", "treeitem");
+      row.setAttribute("aria-label", fileName + ", " + statusTitle(letter));
       row.title = e.path;
       // The path is not otherwise recoverable from the DOM: the title attribute
       // is moved to data-tip and removed by upgradeTips, so a delegated handler
@@ -7874,11 +10218,6 @@ export class CommitViewProvider
       row.dataset.path = e.path;
       row.dataset.kind = def.kind;
       row.dataset.key = key;
-      rowOrder.push(key);
-      if (selectedRows.has(key)) {
-        row.classList.add("is-selected");
-        row.setAttribute("aria-selected", "true");
-      }
 
       row.appendChild(el("span", "file-icon", ICON_FILE));
       const name = el("span", "name");
@@ -7900,19 +10239,19 @@ export class CommitViewProvider
 
       const actions = el("span", "row-actions");
       if (def.staged) {
-        actions.appendChild(makeIconBtn(ICON_UNSTAGE, "Unstage file", (ev) => {
+        actions.appendChild(rowBtn(ICON_UNSTAGE, "Unstage file", (ev) => {
           ev.stopPropagation();
           queueOp(e.path, "unstage");
           vscode.postMessage({ type: "unstage", path: e.path });
         }));
       } else {
-        actions.appendChild(makeIconBtn(ICON_STAGE, "Stage file", (ev) => {
+        actions.appendChild(rowBtn(ICON_STAGE, "Stage file", (ev) => {
           ev.stopPropagation();
           queueOp(e.path, "stage");
           vscode.postMessage({ type: "stage", path: e.path });
         }));
         if (def.kind === "unstaged") {
-          actions.appendChild(makeIconBtn(ICON_DISCARD, "Discard changes", (ev) => {
+          actions.appendChild(rowBtn(ICON_DISCARD, "Discard changes", (ev) => {
             ev.stopPropagation();
             vscode.postMessage({ type: "discard", path: e.path });
           }));
@@ -7923,6 +10262,7 @@ export class CommitViewProvider
       const status = el("span", "status " + statusClass(letter));
       status.textContent = letter;
       status.dataset.tip = statusTitle(letter);
+      status.setAttribute("aria-hidden", "true");
       row.appendChild(status);
 
       const open = () => vscode.postMessage({
@@ -7938,7 +10278,7 @@ export class CommitViewProvider
         }
         const multi = selectedRows.has(key) && selectedRows.size > 1;
         if (multi) {
-          openActionMenu(String(selectionPaths().length) + " files", multiItems(), row);
+          openActionMenu(String(selectionPaths().length) + " files", multiItems(), row, "files");
           return;
         }
         const items = [
@@ -7961,12 +10301,12 @@ export class CommitViewProvider
           }
         }
         items.push({ sep: true });
-        items.push({ icon: "archive", label: "Stash This File",
+        items.push({ icon: "git-stash", label: "Stash This File",
           fn: () => vscode.postMessage({ type: "stashPaths", paths: [e.path] }) });
-        items.push({ icon: "archive", label: def.staged ? "Stash Everything Staged" : "Stash All Changes",
+        items.push({ icon: "git-stash", label: def.staged ? "Stash Everything Staged" : "Stash All Changes",
           fn: () => vscode.postMessage(
             def.staged ? { type: "stashStaged" } : { type: "stash" }) });
-        openActionMenu(fileName, items, row);
+        openActionMenu(fileName, items, row, "file");
       };
       row.addEventListener("click", (ev) => {
         // A modifier click selects; a plain one opens, as it always has.
@@ -7975,43 +10315,29 @@ export class CommitViewProvider
         if (ev.detail > 1) return;
         open();
       });
+      // Enter opens; Space ticks in the checkbox model and opens otherwise.
+      row.__activate = (how) => {
+        if (how === "space" && row.__tick) row.__tick();
+        else open();
+      };
       // Double-click OR right-click a file → an actions menu (open / stage / discard).
       row.addEventListener("dblclick", menu);
       row.addEventListener("contextmenu", menu);
 
-      // Drag a row (or the whole selection) onto the stash target.
+      // Drag it — or the selection it is in — onto the Stashes header to
+      // stash them. An unselected row goes alone, and the selection is left
+      // as it was: a drag is not a click, and never takes files the user has
+      // forgotten selecting somewhere off screen.
       row.draggable = true;
       row.addEventListener("dragstart", (ev) => {
-        // Right-clicking or dragging an unselected row acts on THAT row, not on
-        // a selection the user has forgotten about somewhere off screen.
-        if (!selectedRows.has(key)) {
-          selectedRows.clear();
-          selectedRows.add(key);
-          selectionAnchor = key;
-          paintSelection();
-        }
-        const paths = selectionPaths();
-        dragPaths = paths;
-        if (ev.dataTransfer) {
-          ev.dataTransfer.effectAllowed = "move";
-          // Plain text too, so dragging into a terminal or editor pastes
-          // something sensible rather than nothing.
-          ev.dataTransfer.setData("text/plain", paths.join("\n"));
-        }
-        document.body.classList.add("is-dragging-files");
-        showDropZone(paths.length);
+        const inSelection = selectedRows.has(key);
+        const paths = treeDragPaths(key, [e.path]);
+        const rows = inSelection ? Array.from(groupsEl.querySelectorAll(".row.is-file.is-selected")) : [row];
+        beginDrag(ev, { kind: "tree", paths: paths, selection: inSelection }, rows, paths.length ? paths.join("\n") : e.path);
       });
-      row.addEventListener("dragend", () => {
-        dragPaths = [];
-        document.body.classList.remove("is-dragging-files");
-        hideDropZone();
-      });
-      row.addEventListener("keydown", (ev) => {
-        // Don't hijack Enter aimed at a focused stage/unstage/discard button.
-        if (ev.target !== row) return;
-        if (ev.key === "Enter") { ev.preventDefault(); open(); }
-        else if (ev.key === "ContextMenu" || (ev.shiftKey && ev.key === "F10")) menu(ev);
-      });
+      // Its own, too: a row a render took out mid-drag hears its end, the page does not.
+      row.addEventListener("dragend", endDrag);
+      row.__menu = menu;
       return row;
     }
 
@@ -8025,6 +10351,724 @@ export class CommitViewProvider
       b.addEventListener("click", onClick);
       return b;
     }
+
+    /** A row's own button: the pointer's, out of the tab order (the tree has one stop). */
+    function rowBtn(svg, title, onClick) {
+      const b = makeIconBtn(svg, title, onClick);
+      b.tabIndex = -1;
+      return b;
+    }
+
+    /**
+     * A row's verb in WORDS — a stash's Apply and Pop, a stash file's Move
+     * and Copy, whose glyphs read alike. The pointer's, out of the tab order
+     * like rowBtn (the row's menu has the same verbs for the keyboard); its
+     * tip says exactly what happens.
+     */
+    function wordBtn(label, tip, onClick) {
+      const b = el("button", "word-btn");
+      b.type = "button";
+      b.textContent = label;
+      b.dataset.tip = tip;
+      b.setAttribute("aria-description", tip);
+      b.tabIndex = -1;
+      b.addEventListener("click", onClick);
+      return b;
+    }
+    const TIP_APPLY = "Apply: put these changes back and keep the stash";
+    const TIP_POP = "Pop: put these changes back and delete the stash";
+    /**
+     * Where some of a stash's files come back, named as the groups on screen
+     * name it: a file comes back as it was stashed — staged if it was — so a
+     * staged one lands in Staged, not in "Changes" (in the split model no
+     * group is called that).
+     */
+    function landsIn(files) {
+      const staged = files.some((f) => f.staged);
+      const unstaged = files.some((f) => f.staged !== "all");
+      const asWas = " as " + (files.length === 1 ? "it was" : "they were") + " stashed";
+      if (stagingModel === "checkboxes") return "into Changes" + (staged ? ", staged" + asWas : "");
+      if (!staged) return "into Unstaged";
+      return (unstaged ? "into Staged and Unstaged" : "into Staged") + asWas;
+    }
+    /** Some of a stash's files, by path, as its list has them. */
+    function stashFilesOf(s, paths) {
+      const files = stashFiles.get(s.sha) || [];
+      return paths.map((p) => files.find((f) => f.path === p) || { path: p });
+    }
+    /** Move / Copy's tips, for the files they would bring back ("this file" for one). */
+    function tipMove(files) {
+      return "Move: take " + (files.length === 1 ? "this file" : "these " + files.length + " files") +
+        " out of the stash, back " + landsIn(files);
+    }
+    function tipCopy(files) {
+      const one = files.length === 1;
+      return "Copy: bring " + (one ? "this file" : "these " + files.length + " files") +
+        " back " + landsIn(files) + ", and keep " + (one ? "it" : "them") + " in the stash";
+    }
+
+    // ---- Stashes group ---------------------------------------------------
+    // Every stash, after the file groups: a row each (its words, where and
+    // when it was made, how many files), opening to ALL its files — tracked,
+    // staged, untracked — as Changes rows, a page at a time. A file comes back with Move to
+    // Changes (it leaves the stash) or Copy to Changes (the stash keeps it);
+    // a stash with Apply, Pop, Create Branch… or Drop…. Every message names a
+    // stash by its full sha, never stash@{n}.
+    //
+    // authStashes is the host's list; the rows show it with every action
+    // still in flight laid over it (stashPending), so a Pop takes its row away
+    // at the click and a Cancel puts it back — never a reload of the list.
+    let authStashes = [];
+    // sha -> { remove, busy, moved: [paths], busyPaths: [paths], at }
+    const stashPending = new Map();
+    // A stash action can wait on a question (Stash & Retry, the staging one),
+    // so this is long; it only matters when the host never answers.
+    const STASH_PENDING_TTL = 60000;
+    // What the user opened, and whether the group is folded — the webview's
+    // own state, so hiding the view or reloading the window keeps both. The
+    // group starts open, each stash closed.
+    const stashUi = (function () {
+      try { return (vscode.getState && vscode.getState()) || {}; } catch (e) { return {}; }
+    })();
+    const stashOpen = new Set(Array.isArray(stashUi.stashOpen) ? stashUi.stashOpen : []);
+    let stashGroupCollapsed = stashUi.stashGroupCollapsed === true;
+    let lastStashSig = null;
+    // A stash's files, by its sha. A stash never changes, so what was read
+    // once is its files for good. The host carries them in the list while
+    // they are few (stashRows.ts); a bigger stash comes as a count, and its
+    // files are asked for when it is opened ("stashReadFiles").
+    const stashFiles = new Map();
+    // Asked for, not answered yet; answered with nothing (said in its place).
+    const stashReading = new Set();
+    const stashUnreadable = new Set();
+    // What is left of a stash after a move: its files are known before the
+    // list that names it arrives, and a list read before the move must not
+    // forget them.
+    const stashSeeded = new Set();
+    // Ctrl/Cmd-click on a stash whose files are still being read: select
+    // them when they arrive.
+    let stashSelectOnRead = null;
+    // How many of an open stash's files are shown; "Show 200 more of N" adds a page.
+    const STASH_FILE_PAGE = 200;
+    const stashShown = new Map();
+    function saveStashUi() {
+      try {
+        const prev = (vscode.getState && vscode.getState()) || {};
+        vscode.setState(Object.assign({}, prev, {
+          stashOpen: Array.from(stashOpen),
+          stashGroupCollapsed: stashGroupCollapsed,
+        }));
+      } catch (e) { /* a host without webview state */ }
+    }
+
+    /** How many files a stash of the host's list holds (a list from before counts carried its files). */
+    function countOf(s) {
+      return typeof s.count === "number" ? s.count : Array.isArray(s.files) ? s.files.length : 0;
+    }
+
+    /** The host's list with the actions in flight laid over it. */
+    function shownStashes() {
+      const out = [];
+      for (let i = 0; i < authStashes.length; i++) {
+        const s = authStashes[i];
+        const p = stashPending.get(s.sha);
+        if (p && p.remove) continue;
+        if (p && p.moved && p.moved.length) {
+          const left = countOf(s) - p.moved.length;
+          if (left <= 0) continue;
+          out.push(Object.assign({}, s, { count: left, leaving: p.moved }));
+          continue;
+        }
+        out.push(s);
+      }
+      return out;
+    }
+
+    /** A shown stash's files, less any on their way out; undefined until read. */
+    function visibleFiles(s) {
+      const files = stashFiles.get(s.sha);
+      if (!files || !s.leaving) return files;
+      const leaving = new Set(s.leaving);
+      return files.filter((f) => !leaving.has(f.path));
+    }
+
+    /** Take in a list from the host: the files it carried, and forget the stashes it no longer has. */
+    function takeStashList(list) {
+      const have = new Set();
+      for (let i = 0; i < list.length; i++) {
+        const s = list[i];
+        have.add(s.sha);
+        stashSeeded.delete(s.sha);
+        if (Array.isArray(s.files)) {
+          stashFiles.set(s.sha, s.files);
+          stashUnreadable.delete(s.sha);
+        }
+      }
+      stashFiles.forEach((_f, sha) => {
+        if (!have.has(sha) && !stashPending.has(sha) && !stashSeeded.has(sha)) stashFiles.delete(sha);
+      });
+      stashUnreadable.forEach((sha) => { if (!have.has(sha)) stashUnreadable.delete(sha); });
+      authStashes = list;
+    }
+
+    /** Ask the host for a stash's files, once. */
+    function readStashFiles(sha) {
+      if (stashReading.has(sha) || stashFiles.has(sha) || stashUnreadable.has(sha)) return;
+      stashReading.add(sha);
+      vscode.postMessage({ type: "stashReadFiles", sha: sha });
+    }
+
+    /** Drop the patches the host's list now agrees with, or that aged out. */
+    function reconcileStashPending() {
+      const now = Date.now();
+      const have = new Set(authStashes.map((s) => s.sha));
+      stashPending.forEach((p, sha) => {
+        if (now - p.at > STASH_PENDING_TTL) { stashPending.delete(sha); return; }
+        // Taken off the list (Pop, Drop, a branch, a move): settled once the
+        // list no longer holds that sha — what is left of a move is a NEW sha.
+        if ((p.remove || p.moved) && !have.has(sha)) stashPending.delete(sha);
+      });
+    }
+
+    /**
+     * The selected files of ONE stash: the first one on screen that has any.
+     * A selection never spans two (handleSelectionClick starts over in the
+     * other); if it ever did, the other stash's files are left out rather
+     * than sent under this one's sha.
+     */
+    function stashSelection() {
+      let sha = null;
+      const paths = [];
+      for (let i = 0; i < stashRowOrder.length; i++) {
+        const k = stashRowOrder[i];
+        if (!selectedRows.has(k)) continue;
+        const rest = k.slice(6);
+        const cut = rest.indexOf(":");
+        const at = rest.slice(0, cut);
+        if (sha === null) sha = at;
+        else if (at !== sha) continue;
+        paths.push(rest.slice(cut + 1));
+      }
+      return sha ? { sha: sha, paths: paths } : null;
+    }
+
+    function countFiles(n) { return n === 1 ? "1 file" : String(n) + " files"; }
+
+    /**
+     * Everything a stash row shows, so an identical re-post touches nothing.
+     * A stash's files are named by its sha and whether they have been read —
+     * they never change — so a post of a big stash costs no more than a small one.
+     */
+    function stashSig(list) {
+      // The staging model too: the Move and Copy tips name its groups.
+      return JSON.stringify([
+        layout, stagingModel, stashGroupCollapsed, Array.from(stashOpen),
+        list.map((s) => {
+          const p = stashPending.get(s.sha);
+          return [s.sha, s.text, s.branch || "", s.time, s.rel || "", countOf(s),
+            stashFiles.has(s.sha) ? 1 : stashUnreadable.has(s.sha) ? 2 : 0, s.leaving || 0, stashShown.get(s.sha) || 0,
+            p && p.busy ? 1 : 0, p && p.busyPaths ? p.busyPaths : 0];
+        }),
+        Object.keys(collapsed).filter((k) => k.indexOf("stashfolder:") === 0 && collapsed[k]),
+      ]);
+    }
+
+    function renderStashesIfChanged() {
+      if (stashSig(shownStashes()) === lastStashSig) return;
+      renderStashes();
+    }
+
+    function renderStashes() {
+      const list = shownStashes();
+      lastStashSig = stashSig(list);
+      // The group is built again (it changes only when the list or what is
+      // open does): the keyboard goes back to the same row's new node, or —
+      // a row that left — to the next one showing, as in the file groups.
+      const was = focusPlace(stashesEl);
+      stashesEl.textContent = "";
+      stashRowOrder = [];
+      // No stash, no group — but while the working tree's files are being
+      // dragged, its header is where they go, so it is there then.
+      const shown = list.length > 0 || (!!drag && drag.kind === "tree" && drag.paths.length > 0);
+      stashesEl.hidden = !shown;
+      if (shown) stashesEl.appendChild(renderStashGroup(list));
+      paintSelection();
+      applyRoving();
+      handFocusOn(was, stashesEl, nearestAboveStashes);
+      // A tooltip over a row that was just replaced has nothing under it.
+      if (tipTarget && !tipTarget.isConnected) hideTip();
+      // A stash that is gone, or files that left it, are not selected any more.
+      let dropped = false;
+      selectedRows.forEach((k) => {
+        if (selScope(k) !== "tree" && stashRowOrder.indexOf(k) === -1) { selectedRows.delete(k); dropped = true; }
+      });
+      if (dropped && selectionAnchor && orderOf(selectionAnchor).indexOf(selectionAnchor) === -1) {
+        selectionAnchor = null;
+      }
+      updateSelectionBar();
+      if (drag) paintDrop();
+    }
+
+    /**
+     * Where the keyboard goes when the Stashes group has gone with the stash
+     * that had it and no row is showing above it (the working tree's last
+     * row takes it when there is one — handFocusOn): the toolbar's last
+     * button, never the page.
+     */
+    function nearestAboveStashes() {
+      const tools = document.querySelectorAll(".changes-toolbar .icon-btn:not(:disabled)");
+      return tools.length ? tools[tools.length - 1] : null;
+    }
+
+    /** A row of the Stashes group as a treeitem of the list's tree, out of the tab order until the arrows reach it. */
+    function stashItem(row, tkey, level) {
+      row.tabIndex = -1;
+      row.setAttribute("role", "treeitem");
+      row.setAttribute("aria-level", String(level));
+      row.dataset.tkey = tkey;
+    }
+
+    function renderStashGroup(list) {
+      const group = el("div", "group group--stashes" + (stashGroupCollapsed ? " collapsed" : ""));
+      group.setAttribute("role", "none");
+      const header = el("div", "group-header");
+      stashItem(header, "group:stashes", 1);
+      header.setAttribute("aria-expanded", stashGroupCollapsed ? "false" : "true");
+      header.setAttribute("aria-label", "Stashes, " + countWords(list.length, "stash", "stashes"));
+      const glabel = el("span", "glabel");
+      glabel.textContent = "Stashes";
+      const gcount = el("span", "gcount");
+      gcount.textContent = String(list.length);
+      header.title = "Stashes — click to " + (stashGroupCollapsed ? "show" : "hide") + " them";
+      header.append(el("span", "twisty", ICON_CHEVRON), el("span", "gdot"), glabel, el("span", "group-actions"));
+      // None yet (a drag of the working tree's files shows the header): no "0".
+      if (list.length > 0) header.appendChild(gcount);
+      const setOpen = (open) => {
+        if (stashGroupCollapsed === !open) return;
+        stashGroupCollapsed = !open;
+        saveStashUi();
+        renderStashes();
+      };
+      header.addEventListener("click", () => setOpen(stashGroupCollapsed));
+      header.__expand = setOpen;
+      header.__activate = () => setOpen(stashGroupCollapsed);
+      group.appendChild(header);
+      const body = el("div", "group-body");
+      body.setAttribute("role", "group");
+      if (!stashGroupCollapsed) {
+        for (let i = 0; i < list.length; i++) {
+          const s = list[i];
+          const open = stashOpen.has(s.sha);
+          body.appendChild(makeStashRow(s, open));
+          if (!open) continue;
+          const files = visibleFiles(s);
+          if (!files) {
+            // Not carried with the list: asked for, and said in its place.
+            body.appendChild(makeStashNote(stashUnreadable.has(s.sha)));
+            readStashFiles(s.sha);
+            continue;
+          }
+          // A page at a time: a stash of thousands of files (a dependency
+          // folder stashed with -u) is thousands of rows otherwise.
+          const limit = stashShown.get(s.sha) || STASH_FILE_PAGE;
+          const page = files.length > limit ? files.slice(0, limit) : files;
+          if (layout === "tree") renderStashNode(body, s, buildTree(page), 2, files);
+          else for (const f of page) body.appendChild(makeStashFileRow(s, f, null, 2));
+          if (page.length < files.length) body.appendChild(makeStashMore(s, files, page.length));
+        }
+      }
+      group.appendChild(body);
+      return group;
+    }
+
+    function stashMeta(s) {
+      const parts = [];
+      if (s.branch) parts.push(s.branch);
+      // Its age from the host's one formatter ("3h", "2d"), as the Commits
+      // list and the push review say it.
+      if (s.rel) parts.push(s.rel);
+      parts.push(countFiles(countOf(s)));
+      return parts.join(" · ");
+    }
+
+    /** Where an open stash's files would be: being read, or unreadable. */
+    function makeStashNote(failed) {
+      const row = el("div", "row stash-note");
+      row.style.paddingLeft = (2 * 12 + 16) + "px";
+      row.appendChild(el("span", "file-icon", failed
+        ? '<i class="codicon codicon-warning" aria-hidden="true"></i>'
+        : '<i class="codicon codicon-loading codicon-modifier-spin" aria-hidden="true"></i>'));
+      const text = el("span", "name");
+      text.textContent = failed ? "Its files couldn't be read." : "Reading its files…";
+      row.appendChild(text);
+      if (!failed) row.setAttribute("aria-busy", "true");
+      return row;
+    }
+
+    /**
+     * "Show 200 more of 250": the next page of a stash's files, in the branch
+     * menu's words for its tags (showMoreLabel). From the keyboard, the first file it showed
+     * takes the keyboard, so reading goes on where it stopped.
+     */
+    function makeStashMore(s, files, shownCount) {
+      const hidden = files.length - shownCount;
+      const row = el("div", "row stash-more");
+      row.style.paddingLeft = (2 * 12 + 16) + "px";
+      stashItem(row, "stashmore:" + s.sha, 3);
+      row.appendChild(el("span", "file-icon"));
+      const text = el("span", "name");
+      text.textContent = showMoreLabel(hidden, STASH_FILE_PAGE);
+      row.appendChild(text);
+      const grow = () => {
+        const fromKeys = document.activeElement === row;
+        stashShown.set(s.sha, shownCount + STASH_FILE_PAGE);
+        renderStashes();
+        if (!fromKeys) return;
+        const first = stashKey(s.sha, files[shownCount].path);
+        const rows = stashesEl.querySelectorAll(".row.is-file");
+        for (let i = 0; i < rows.length; i++) {
+          if (rows[i].dataset.key === first) {
+            focusItem(rows[i]);
+            break;
+          }
+        }
+      };
+      row.addEventListener("click", (ev) => { ev.preventDefault(); grow(); });
+      // Enter or Space, from the tree's keys.
+      row.__activate = grow;
+      return row;
+    }
+
+    /** Select every file of an open stash that is on screen. */
+    function selectStashFiles(sha) {
+      const prefix = "stash:" + sha + ":";
+      const keys = stashRowOrder.filter((k) => k.indexOf(prefix) === 0);
+      selectedRows.clear();
+      for (let i = 0; i < keys.length; i++) selectedRows.add(keys[i]);
+      selectionAnchor = keys.length ? keys[keys.length - 1] : null;
+      paintSelection();
+    }
+
+    /** A stash action from its row or its menu: the row moves now, the host settles it. */
+    function stashAct(s, action) {
+      if (stashPending.has(s.sha)) return;
+      // Pop takes the row away at once; Drop and Create Branch ask first, so
+      // their row waits (dimmed) until the host says the question was
+      // answered; Apply keeps it, dimmed while it runs.
+      stashPending.set(s.sha, action === "pop" ? { remove: true, at: Date.now() } : { busy: true, at: Date.now() });
+      renderStashes();
+      vscode.postMessage({ type: "stashAct", sha: s.sha, action: action });
+    }
+
+    /** Move / Copy to Changes for some of a stash's files. */
+    function stashFilesAct(s, paths, action) {
+      const files = stashFiles.get(s.sha);
+      if (!files || stashPending.has(s.sha)) return;
+      // Only the paths this stash holds: "all of them" is counted against
+      // its own files, never against a list that could carry another's.
+      const have = new Set(files.map((f) => f.path));
+      const mine = paths.filter((p) => have.has(p));
+      if (!mine.length) return;
+      const all = mine.length >= files.length;
+      stashPending.set(s.sha, action === "move"
+        ? (all ? { remove: true, at: Date.now() } : { moved: mine.slice(), at: Date.now() })
+        : { busyPaths: mine.slice(), at: Date.now() });
+      clearSelection();
+      renderStashes();
+      vscode.postMessage({ type: "stashFiles", sha: s.sha, action: action, paths: mine });
+    }
+
+    function stashItems(s) {
+      return [
+        { icon: "diff-multiple", label: "Open All Changes",
+          fn: () => vscode.postMessage({ type: "stashOpenAll", sha: s.sha }) },
+        { sep: true },
+        { icon: "git-stash-apply", label: "Apply", tip: TIP_APPLY, fn: () => stashAct(s, "apply") },
+        { icon: "git-stash-pop", label: "Pop", tip: TIP_POP, fn: () => stashAct(s, "pop") },
+        { icon: "git-branch", label: "Create Branch…", fn: () => stashAct(s, "branch") },
+        { sep: true },
+        { icon: "trash", label: "Drop…", danger: true, fn: () => stashAct(s, "drop") },
+      ];
+    }
+
+    function makeStashRow(s, open) {
+      const p = stashPending.get(s.sha);
+      const busy = !!(p && p.busy);
+      const row = el("div", "row stash-row" + (open ? "" : " collapsed") + (busy ? " is-busy" : ""));
+      row.style.paddingLeft = "12px";
+      stashItem(row, "stash:" + s.sha, 2);
+      row.dataset.sha = s.sha;
+      row.setAttribute("aria-expanded", open ? "true" : "false");
+      if (busy) row.setAttribute("aria-busy", "true");
+      row.appendChild(el("span", "twisty", ICON_CHEVRON));
+      row.appendChild(el("span", "file-icon stash-icon",
+        '<i class="codicon ' + (busy ? "codicon-loading codicon-modifier-spin" : "codicon-git-stash") + '" aria-hidden="true"></i>'));
+      const text = el("span", "stash-text");
+      const msgEl = el("span", "stash-msg");
+      msgEl.textContent = s.text;
+      const meta = el("span", "stash-meta");
+      meta.textContent = stashMeta(s);
+      text.append(msgEl, meta);
+      row.appendChild(text);
+      // Its name for a screen reader: the words, then where, when, how many.
+      row.setAttribute("aria-label", s.text + ", " + stashMeta(s));
+      row.title = s.message + " — " + new Date(s.time * 1000).toLocaleString();
+
+      // The pointer's buttons, out of the tab order: the keyboard has them
+      // in the row's menu (Shift+F10), as a file row's are.
+      const actions = el("span", "row-actions");
+      const applyBtn = wordBtn("Apply", TIP_APPLY, (ev) => { ev.stopPropagation(); stashAct(s, "apply"); });
+      const popBtn = wordBtn("Pop", TIP_POP, (ev) => { ev.stopPropagation(); stashAct(s, "pop"); });
+      applyBtn.classList.add("stash-quick");
+      applyBtn.dataset.act = "apply";
+      popBtn.classList.add("stash-quick");
+      popBtn.dataset.act = "pop";
+      actions.append(applyBtn, popBtn);
+      actions.appendChild(rowBtn('<i class="codicon codicon-ellipsis" aria-hidden="true"></i>',
+        "More Actions…", (ev) => { ev.stopPropagation(); openActionMenu(s.text, stashItems(s), row, "git-stash"); }));
+      row.appendChild(actions);
+
+      const setOpen = (want) => {
+        if (stashOpen.has(s.sha) === want) return;
+        // Closed, it opens again at its first page.
+        if (want) stashOpen.add(s.sha);
+        else { stashOpen.delete(s.sha); stashShown.delete(s.sha); }
+        saveStashUi();
+        renderStashes();
+      };
+      const toggle = () => setOpen(!stashOpen.has(s.sha));
+      row.addEventListener("click", (ev) => {
+        // The second click of a double-click: the first one already toggled.
+        if (ev.detail > 1) return;
+        if (ev.ctrlKey || ev.metaKey) {
+          // Every file of this stash on screen, as a header's Ctrl/Cmd-click
+          // selects a group — once they are read, if they are being read.
+          ev.preventDefault();
+          if (!stashOpen.has(s.sha)) { stashOpen.add(s.sha); saveStashUi(); renderStashes(); }
+          if (stashFiles.has(s.sha)) selectStashFiles(s.sha);
+          else stashSelectOnRead = s.sha;
+          return;
+        }
+        toggle();
+      });
+      const menu = (ev) => {
+        if (ev) ev.preventDefault();
+        openActionMenu(s.text, stashItems(s), row, "git-stash");
+      };
+      row.addEventListener("contextmenu", menu);
+      // The tree's keys: Enter and Space open or close it, Right and Left
+      // too, Shift+F10 its menu.
+      row.__expand = setOpen;
+      row.__activate = toggle;
+      row.__menu = menu;
+      row.addEventListener("keydown", (ev) => {
+        if (ev.target !== row || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+        // Delete, and the Mac's delete key, ask to drop it.
+        if (ev.key === "Delete" || ev.key === "Backspace") { ev.preventDefault(); stashAct(s, "drop"); }
+      });
+      // Dragged onto the working tree (or its clean note): Apply (Alt: Pop).
+      row.draggable = !busy;
+      row.addEventListener("dragstart", (ev) => {
+        if (stashPending.has(s.sha)) { ev.preventDefault(); return; }
+        beginDrag(ev, { kind: "stash", sha: s.sha }, [row], "");
+      });
+      row.addEventListener("dragend", endDrag);
+      return row;
+    }
+
+    /**
+     * A stash's folders, in the tree layout: the Changes tree's rows. The
+     * last argument is every file of the stash, shown or not: a folder's Move
+     * takes all of its files, not only the page on screen.
+     */
+    function renderStashNode(container, s, node, depth, all) {
+      const dirs = Array.from(node.dirs.values()).sort((a, b) => a.name.localeCompare(b.name));
+      for (const dir of dirs) {
+        const key = "stashfolder:" + s.sha + ":" + dir.path;
+        const isCollapsed = collapsed[key] === true;
+        const row = el("div", "row stash-folder" + (isCollapsed ? " collapsed" : ""));
+        row.style.paddingLeft = (depth * 12) + "px";
+        stashItem(row, key, depth + 1);
+        row.dataset.sha = s.sha;
+        row.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
+        row.appendChild(el("span", "twisty", ICON_CHEVRON));
+        row.appendChild(el("span", "file-icon folder-icon", ICON_FOLDER));
+        const name = el("span", "name");
+        name.textContent = dir.name;
+        row.appendChild(name);
+        row.appendChild(el("span", "spacer"));
+        const under = dir.path + "/";
+        const insideFiles = all.filter((f) => f.path.indexOf(under) === 0);
+        const inside = insideFiles.map((f) => f.path);
+        row.setAttribute("aria-label", dir.name + ", folder, " + countWords(inside.length));
+        const factions = el("span", "row-actions");
+        const moveBtn = wordBtn("Move", tipMove(insideFiles), (ev) => { ev.stopPropagation(); stashFilesAct(s, inside, "move"); });
+        const copyBtn = wordBtn("Copy", tipCopy(insideFiles), (ev) => { ev.stopPropagation(); stashFilesAct(s, inside, "copy"); });
+        moveBtn.dataset.act = "move";
+        copyBtn.dataset.act = "copy";
+        factions.append(moveBtn, copyBtn);
+        row.appendChild(factions);
+        // Dragged onto the working tree (or its clean note): Move its files (Alt: Copy).
+        row.draggable = true;
+        row.addEventListener("dragstart", (ev) => {
+          if (stashPending.has(s.sha)) { ev.preventDefault(); return; }
+          beginDrag(ev, { kind: "stashFiles", sha: s.sha, paths: inside.slice() }, [row], inside.join("\n"));
+        });
+        row.addEventListener("dragend", endDrag);
+        const setOpen = (open) => { collapsed[key] = !open; renderStashes(); };
+        row.addEventListener("click", () => setOpen(collapsed[key] === true));
+        row.__expand = setOpen;
+        row.__activate = () => setOpen(collapsed[key] === true);
+        // Its button, and Copy beside it, from the keyboard.
+        row.__menu = (ev) => {
+          if (ev) ev.preventDefault();
+          const n = countWords(inside.length);
+          openActionMenu(dir.name, [
+            { icon: "git-stash-pop", label: "Move " + n + " to Changes", tip: tipMove(insideFiles), fn: () => stashFilesAct(s, inside, "move") },
+            { icon: "git-stash-apply", label: "Copy " + n + " to Changes", tip: tipCopy(insideFiles), fn: () => stashFilesAct(s, inside, "copy") },
+          ], row, "folder");
+        };
+        row.addEventListener("contextmenu", row.__menu);
+        container.appendChild(row);
+        if (!isCollapsed) renderStashNode(container, s, dir, depth + 1, all);
+      }
+      for (const f of node.files.slice().sort((a, b) => a.name.localeCompare(b.name))) {
+        container.appendChild(makeStashFileRow(s, f.entry, f.name, depth));
+      }
+    }
+
+    /**
+     * One file of a stash, as a Changes row: its status letter (U for a file
+     * git did not track), its name and folder, "staged" when the stash had it
+     * staged. Click opens its diff; the hover action is Move to Changes.
+     * fileName is null in the list layout (the folder is shown beside it).
+     */
+    function makeStashFileRow(s, f, fileName, depth) {
+      const letter = f.status;
+      const key = stashKey(s.sha, f.path);
+      const p = stashPending.get(s.sha);
+      const busy = !!(p && p.busyPaths && p.busyPaths.indexOf(f.path) !== -1);
+      const row = el("div", "row is-file stash-file " + statusClass(letter) +
+        (letter === "D" ? " is-deleted" : "") + (busy ? " is-busy" : ""));
+      row.style.paddingLeft = (depth * 12 + 16) + "px";
+      stashItem(row, key, depth + 1);
+      row.dataset.key = key;
+      row.dataset.path = f.path;
+      row.dataset.sha = s.sha;
+      stashRowOrder.push(key);
+      paintRowSelected(row);
+      if (busy) row.setAttribute("aria-busy", "true");
+      row.title = f.oldPath ? f.path + " (was " + f.oldPath + ")" : f.path;
+      row.appendChild(el("span", "file-icon", ICON_FILE));
+      const slash = f.path.lastIndexOf("/");
+      const name = el("span", "name");
+      name.textContent = fileName !== null ? fileName : (slash === -1 ? f.path : f.path.slice(slash + 1));
+      row.appendChild(name);
+      const dir = fileName !== null ? "" : (slash === -1 ? "" : f.path.slice(0, slash));
+      if (dir) {
+        const dirEl = el("span", "dir");
+        const dirText = document.createElement("bdi");
+        dirText.textContent = dir;
+        dirEl.appendChild(dirText);
+        row.appendChild(dirEl);
+      } else {
+        row.appendChild(el("span", "spacer"));
+      }
+      if (f.staged) {
+        const w = el("span", "stash-staged");
+        w.textContent = f.staged === "all" ? "staged" : "partly staged";
+        w.dataset.tip = f.staged === "all"
+          ? "Staged when it was stashed: it comes back staged"
+          : "Staged, then changed again, when it was stashed: both versions come back";
+        row.appendChild(w);
+      }
+      const actions = el("span", "row-actions");
+      const moveBtn = wordBtn("Move", tipMove([f]), (ev) => { ev.stopPropagation(); stashFilesAct(s, [f.path], "move"); });
+      const copyBtn = wordBtn("Copy", tipCopy([f]), (ev) => { ev.stopPropagation(); stashFilesAct(s, [f.path], "copy"); });
+      moveBtn.dataset.act = "move";
+      copyBtn.dataset.act = "copy";
+      actions.append(moveBtn, copyBtn);
+      row.appendChild(actions);
+      const status = el("span", "status " + statusClass(letter));
+      status.setAttribute("aria-hidden", "true");
+      status.textContent = letter;
+      // The staged word gives way at the narrowest widths; its tip keeps it
+      // for the pointer, and the row's name below for a screen reader.
+      status.dataset.tip = statusTitle(letter) +
+        (f.staged === "all" ? ", staged" : f.staged === "part" ? ", partly staged" : "");
+      row.appendChild(status);
+      // Its name in words — the file, its folder, its change, its staging —
+      // rather than the row's text run together ("login.ts src/auth Move to
+      // Changes… M"), which lost the staging wherever the word was hidden.
+      const folder = slash === -1 ? "" : f.path.slice(0, slash);
+      row.setAttribute("aria-label", [
+        slash === -1 ? f.path : f.path.slice(slash + 1),
+        folder,
+        statusTitle(letter).toLowerCase() + (f.oldPath ? " from " + f.oldPath : ""),
+        f.staged === "all" ? "staged" : f.staged === "part" ? "partly staged" : "",
+      ].filter(Boolean).join(", "));
+
+      const open = () => vscode.postMessage({ type: "stashOpenFile", sha: s.sha, path: f.path });
+      const menu = (ev) => {
+        if (ev) ev.preventDefault();
+        if (selectedRows.size > 0 && !selectedRows.has(key)) clearSelection();
+        const sel = stashSelection();
+        if (sel && sel.sha === s.sha && selectedRows.has(key) && sel.paths.length > 1) {
+          const n = countFiles(sel.paths.length);
+          openActionMenu(n + " from “" + s.text + "”", [
+            { icon: "git-stash-pop", label: "Move " + n + " to Changes", tip: tipMove(stashFilesOf(s, sel.paths)), fn: () => stashFilesAct(s, sel.paths, "move") },
+            { icon: "git-stash-apply", label: "Copy " + n + " to Changes", tip: tipCopy(stashFilesOf(s, sel.paths)), fn: () => stashFilesAct(s, sel.paths, "copy") },
+            { sep: true },
+            { icon: "close", label: "Clear Selection", fn: clearSelection },
+          ], row);
+          return;
+        }
+        const items = [{ icon: "git-compare", label: "Open Changes", fn: open }];
+        if (f.staged && !f.onlyStaged) {
+          items.push({ icon: "git-compare", label: "Open Staged Changes",
+            fn: () => vscode.postMessage({ type: "stashOpenFile", sha: s.sha, path: f.path, staged: true }) });
+        }
+        items.push({ sep: true });
+        items.push({ icon: "git-stash-pop", label: "Move to Changes", tip: tipMove([f]), fn: () => stashFilesAct(s, [f.path], "move") });
+        items.push({ icon: "git-stash-apply", label: "Copy to Changes", tip: tipCopy([f]), fn: () => stashFilesAct(s, [f.path], "copy") });
+        openActionMenu(name.textContent, items, row);
+      };
+      row.addEventListener("click", (ev) => {
+        if (handleSelectionClick(ev, key)) return;
+        if (ev.detail > 1) return;
+        open();
+      });
+      row.addEventListener("dblclick", menu);
+      row.addEventListener("contextmenu", menu);
+      // The tree's keys: Enter (and Space, as in the split model) open its
+      // diff, Shift+F10 its menu.
+      row.__activate = open;
+      row.__menu = menu;
+      // Dragged onto the working tree (or its clean note) — with the files of
+      // this stash selected beside it, when it is one of them: Move (Alt: Copy).
+      row.draggable = !busy;
+      row.addEventListener("dragstart", (ev) => {
+        if (stashPending.has(s.sha) || !stashFiles.has(s.sha)) { ev.preventDefault(); return; }
+        const sel = stashSelection();
+        const many = !!sel && sel.sha === s.sha && selectedRows.has(key);
+        const paths = many ? sel.paths.slice() : [f.path];
+        const rows = many ? Array.from(stashesEl.querySelectorAll(".row.is-file.is-selected")) : [row];
+        beginDrag(ev, { kind: "stashFiles", sha: s.sha, paths: paths }, rows, paths.join("\n"));
+      });
+      row.addEventListener("dragend", endDrag);
+      return row;
+    }
+
+    selbarMoveBtn.addEventListener("click", () => {
+      const sel = stashSelection();
+      const s = sel && authStashes.find((x) => x.sha === sel.sha);
+      if (s) stashFilesAct(s, sel.paths, "move");
+    });
+    selbarCopyBtn.addEventListener("click", () => {
+      const sel = stashSelection();
+      const s = sel && authStashes.find((x) => x.sha === sel.sha);
+      if (s) stashFilesAct(s, sel.paths, "copy");
+    });
 
     // ---- Operation banner ------------------------------------------------
     // A stopped merge / rebase / cherry-pick / revert / am / stash apply, as
@@ -8040,7 +11084,16 @@ export class CommitViewProvider
     function opButton(label, cls, onClick, tip, locks) {
       const b = el("button", "gs-commit " + cls);
       b.type = "button";
-      b.textContent = label;
+      // Two faces: the whole verb, and its first word for a narrow banner
+      // ("Abort Rebase" / "Abort") — the title above already names the
+      // operation. The name is always the whole verb.
+      const long = el("span", "lbl-long");
+      long.textContent = label;
+      const short = el("span", "lbl-short");
+      short.textContent = label.split(" ")[0];
+      b.appendChild(long);
+      b.appendChild(short);
+      b.setAttribute("aria-label", label);
       if (tip) b.title = tip;
       b.addEventListener("click", function () {
         if (opLocked) return;
@@ -8059,12 +11112,22 @@ export class CommitViewProvider
       lastOp = op || null;
       opBanner.textContent = "";
       if (!op) { opBanner.hidden = true; return; }
+      // Its tone and icon are the host's: amber while something is in the
+      // way, the accent once nothing is (a pause, or every conflict resolved).
+      opBanner.className = "op-banner tone-" + (op.tone || "attention");
       const title = el("div", "op-title");
-      title.appendChild(el("i", "codicon codicon-" + (op.conflicts > 0 ? "warning" : "debug-pause")));
+      const icon = el("i", "codicon codicon-" + (op.icon || "warning"));
+      icon.setAttribute("aria-hidden", "true");
+      title.appendChild(icon);
       const titleText = el("span");
       titleText.textContent = op.title;
       title.appendChild(titleText);
       opBanner.appendChild(title);
+      if (op.step) {
+        const st = el("div", "op-step");
+        st.textContent = op.step;
+        opBanner.appendChild(st);
+      }
       if (op.direction) {
         const d = el("div", "op-direction");
         d.textContent = op.direction;
@@ -8076,13 +11139,16 @@ export class CommitViewProvider
         opBanner.appendChild(n);
       }
       const acts = el("div", "op-actions");
+      // The lead action — the one this stop is waiting for — gets a row of
+      // its own when the banner is too narrow for every button side by side.
       if (op.conflicts > 0) {
-        acts.appendChild(opButton("Resolve Conflicts…", "primary", function () {
+        acts.appendChild(opButton("Resolve Conflicts…", "primary op-lead", function () {
           vscode.postMessage({ type: "resolveConflicts" });
         }, "", false));
       }
       if (op.continueLabel) {
-        const c = opButton(op.continueLabel, op.conflicts > 0 ? "split" : "primary", function () {
+        const lead = !(op.conflicts > 0) && op.canContinue;
+        const c = opButton(op.continueLabel, lead ? "primary op-lead" : "split", function () {
           vscode.postMessage({ type: "operation", verb: "continue" });
         }, op.continueBlocked || "", true);
         c.disabled = !op.canContinue;
@@ -8101,6 +11167,35 @@ export class CommitViewProvider
         opBanner.querySelectorAll("button").forEach(function (x) { x.disabled = true; });
       }
       opBanner.hidden = false;
+      fitOpActions();
+    }
+    /**
+     * Every button side by side when they fit; otherwise the lead action on a
+     * row of its own and the rest sharing one row by their first word
+     * ("Continue", "Skip", "Abort"). At a sidebar's width the buttons used to
+     * wrap into three rows. Measured at the width they want (max-content),
+     * not the width a flex row has already squeezed them to.
+     */
+    function fitOpActions() {
+      const acts = opBanner.querySelector(".op-actions");
+      if (!acts || opBanner.hidden || !acts.classList) return;
+      acts.classList.remove("stacked");
+      const avail = acts.clientWidth;
+      if (!avail) return;
+      const was = acts.style.width;
+      acts.style.width = "max-content";
+      const need = acts.offsetWidth;
+      acts.style.width = was;
+      acts.classList.toggle("stacked", need > avail + 0.5);
+    }
+    if (typeof ResizeObserver === "function") {
+      let lastOpWidth = 0;
+      new ResizeObserver(function (entries) {
+        const w = Math.round(entries[0].contentRect.width);
+        if (w === lastOpWidth) return;
+        lastOpWidth = w;
+        fitOpActions();
+      }).observe(opBanner);
     }
 
     // ---- Host messages ---------------------------------------------------
@@ -8191,8 +11286,12 @@ export class CommitViewProvider
         // out of the three file lists, so anything else on the payload is dropped.
         stagingModel = msg.stagingModel || "split";
         applyModelToggleLabel();
+        const wasLoading = branchesLoading;
         branchData = applyPendingFavorites(msg.branches) || { local: [], remote: [], recent: [], tags: [] };
         branchesLoading = !!msg.hasRepo && !msg.branches;
+        // The branches arrived after something was typed: the width to hold
+        // is the whole list's, not that of what the query shows.
+        if (branchMenu && wasLoading && !branchesLoading && branchFilter) holdWholeListWidth();
         // Only rebuild an OPEN branch menu when the branch data actually
         // changed. Every state push (and now the redundant 2nd post) would
         // otherwise call renderBranchMenu(), which closeBranchSubmenu()s and
@@ -8200,8 +11299,9 @@ export class CommitViewProvider
         // resetting the scroll position. refreshOpenBranchUi re-opens the
         // same branch's submenu on its fresh row, so the stack survives.
         // Loading is part of it: a repository that really has no branches
-        // yet answers with the same empty lists the loading menu holds.
-        const branchSig = JSON.stringify([branchesLoading, branchData]);
+        // yet answers with the same empty lists the loading menu holds. So
+        // is a detached HEAD, which takes Pull and Push away.
+        const branchSig = bmSig();
         if (branchMenu && branchSig !== lastBranchSig) refreshOpenBranchUi();
         lastBranchSig = branchSig;
         if (typeof msg.lastMessage === "string" && amend.checked &&
@@ -8215,6 +11315,59 @@ export class CommitViewProvider
         }
         renderCount();
         renderIfChanged();
+        // The stash list: absent means "not read yet, keep what is shown".
+        if (Array.isArray(msg.stashes)) {
+          takeStashList(msg.stashes);
+          reconcileStashPending();
+        }
+        renderStashesIfChanged();
+      } else if (msg.type === "stashFilesRead") {
+        // The files of a stash the list carried as a count, read when it opened.
+        stashReading.delete(msg.sha);
+        if (Array.isArray(msg.files)) stashFiles.set(msg.sha, msg.files);
+        else stashUnreadable.add(msg.sha);
+        renderStashes();
+        if (stashSelectOnRead === msg.sha) {
+          stashSelectOnRead = null;
+          if (stashFiles.has(msg.sha)) selectStashFiles(msg.sha);
+        }
+      } else if (msg.type === "stashPending") {
+        // Drop's confirm or Create Branch's name was answered: the row leaves
+        // now, before git has run, and comes back if it did not happen.
+        stashPending.set(msg.sha, { remove: true, at: Date.now() });
+        renderStashes();
+      } else if (msg.type === "stashDone") {
+        const o = msg.outcome || { kind: "kept" };
+        const p = stashPending.get(msg.sha);
+        // What is left of a stash after a move is a new sha where it was:
+        // it stays open if it was, as many of its files shown, and its files
+        // are the stash's less the ones moved — nothing to read again.
+        if (o.kind === "done" && o.rest) {
+          const had = stashFiles.get(msg.sha);
+          if (had && Array.isArray(msg.paths)) {
+            const moved = new Set(msg.paths);
+            stashFiles.set(o.rest, had.filter((f) => !moved.has(f.path)));
+            stashSeeded.add(o.rest);
+          }
+          if (stashShown.has(msg.sha)) stashShown.set(o.rest, stashShown.get(msg.sha));
+          if (stashOpen.has(msg.sha)) {
+            stashOpen.delete(msg.sha);
+            stashOpen.add(o.rest);
+            saveStashUi();
+          }
+        }
+        if (p) {
+          if (o.kind === "gone") {
+            p.remove = true; p.busy = false; p.busyPaths = null; p.at = Date.now();
+          } else if (o.kind === "done" && (p.remove || p.moved)) {
+            // Gone from the list once the host's next list agrees (reconcile).
+            p.at = Date.now();
+          } else {
+            // Applied or copied — or it did not happen: back as it was.
+            stashPending.delete(msg.sha);
+          }
+        }
+        renderStashes();
       } else if (msg.type === "branchActionDone") {
         // A sync op finished — clear every in-flight face (the fresh counts
         // arrived via the state push the host sent just before this).
@@ -8236,6 +11389,12 @@ export class CommitViewProvider
         }
       } else if (msg.type === "pushPreview") {
         openPushModal(msg);
+      } else if (msg.type === "pushCommitFiles") {
+        // A commit in the push review opened: its own files.
+        var item = pushModal && Array.prototype.find.call(
+          pushModal.querySelectorAll(".cr-commit-item"),
+          function (n) { return n.dataset.sha === msg.sha; });
+        if (item && window.GsChangeRows) window.GsChangeRows.setCommitFiles(item, msg.files || null);
       } else if (msg.type === "pushDone") {
         if (msg.ok) closePushModal();
         else pushModalError(msg.error);
@@ -8305,12 +11464,42 @@ export class CommitViewProvider
       c.dataset.tipNamed = "1";
     }
     function hideTip() { clearTimeout(tipTimer); tipTarget = null; tipEl.classList.remove("show"); }
+    /**
+     * Whether a tip says something the element does not already show: other
+     * words (an icon button's name, a folder, an explanation), or its own
+     * words while some of them are cut off. A tip repeating a label that is
+     * there in full ("Copy Branch Name" over Copy Branch Name) is noise.
+     */
+    function tipAdds(t, text) {
+      const norm = (s) => String(s || "").replace(/\s+/g, " ").trim();
+      const tip = norm(text);
+      const shown = norm(t.innerText);
+      if (!shown) return true;
+      const cut = (n) => n.scrollWidth > n.clientWidth + 1 && getComputedStyle(n).overflowX !== "visible";
+      const all = [t].concat(Array.prototype.slice.call(t.querySelectorAll("*")));
+      if (tip === shown) return all.some(cut);
+      // A row's own words, each shown in full on its own: a file's name, its
+      // folder. A tip that is one of them ("README.md" over README.md), or a
+      // path that is the folder and the name both there in full, repeats
+      // them; one that is cut short is still worth its tip.
+      const whole = new Set();
+      for (let i = 1; i < all.length; i++) {
+        const n = all[i];
+        if (!n.getClientRects().length || getComputedStyle(n).visibility === "hidden") continue;
+        let clipped = false;
+        for (let a = n; a && !clipped; a = a === t ? null : a.parentElement) clipped = cut(a);
+        if (!clipped) whole.add(norm(n.innerText));
+      }
+      if (whole.has(tip)) return false;
+      const slash = tip.lastIndexOf("/");
+      return !(slash > 0 && whole.has(tip.slice(slash + 1)) && whole.has(tip.slice(0, slash)));
+    }
     function showTip() {
       // The hovered node can be swapped out by a live dialog repaint before
       // the delay fires — a tip for a detached node would float orphaned.
       if (!tipTarget || !tipTarget.isConnected) { hideTip(); return; }
       const text = tipTarget.getAttribute("data-tip");
-      if (!text) return;
+      if (!text || !tipAdds(tipTarget, text)) return;
       tipEl.textContent = text;
       tipEl.classList.add("show");
       // Grow to the full single-line width, and ONLY wrap when that width
@@ -8323,15 +11512,20 @@ export class CommitViewProvider
       tipEl.style.right = "auto";
       tipEl.style.whiteSpace = "nowrap";
       tipEl.style.wordBreak = "normal";
+      tipEl.style.overflowWrap = "normal";
       tipEl.style.width = "auto";
       tipEl.style.maxWidth = "none";
       if (tipEl.offsetWidth > avail) {
-        // Genuinely too wide for the panel — wrap. Use break-all so each line
-        // fills COMPLETELY and the remainder just overflows to the next row,
-        // instead of break-word snapping at the last hyphen and leaving a ragged
-        // gap on line 1 (which reads as "there's still room, why did it wrap?").
+        // Genuinely too wide for the panel — wrap. A name (a path, a branch)
+        // breaks anywhere, so each line fills COMPLETELY and the remainder
+        // just overflows to the next row, instead of break-word snapping at
+        // the last hyphen and leaving a ragged gap on line 1 (which reads as
+        // "there's still room, why did it wrap?"). Words in a sentence wrap
+        // between them: "as it w / as stashed" read as broken.
+        const sentence = /\s/.test(text.trim());
         tipEl.style.whiteSpace = "normal";
-        tipEl.style.wordBreak = "break-all";
+        tipEl.style.wordBreak = sentence ? "normal" : "break-all";
+        tipEl.style.overflowWrap = sentence ? "anywhere" : "normal";
         tipEl.style.width = avail + "px";
         tipEl.style.maxWidth = avail + "px";
       }
@@ -8357,6 +11551,23 @@ export class CommitViewProvider
     });
     document.addEventListener("pointerdown", hideTip);
     window.addEventListener("scroll", hideTip, true);
+    // The keyboard gets the tip too: a button reached with Tab says what it
+    // does, as it does under the pointer. Not the tree's rows — their name is
+    // read out, and a tip over the next row at every arrow press is noise.
+    document.addEventListener("focusin", (e) => {
+      const t = e.target;
+      if (!t || !t.getAttribute || !t.getAttribute("data-tip")) return;
+      if (t.getAttribute("role") === "treeitem") return;
+      let keyboard = false;
+      try { keyboard = t.matches(":focus-visible"); } catch (_) { keyboard = false; }
+      if (!keyboard) return;
+      hideTip();
+      tipTarget = t;
+      tipTimer = setTimeout(showTip, 350);
+    });
+    document.addEventListener("focusout", (e) => {
+      if (e.target === tipTarget) hideTip();
+    });
     upgradeTips(document.body);
     new MutationObserver((muts) => {
       for (const m of muts) {
@@ -8378,6 +11589,8 @@ export class CommitViewProvider
   }
 
   dispose(): void {
+    this.pushTarget?.release();
+    this.pushTarget = undefined;
     for (const d of this.disposables) {
       d.dispose();
     }

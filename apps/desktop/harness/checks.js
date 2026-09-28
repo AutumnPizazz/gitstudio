@@ -236,6 +236,687 @@
     c.eq(activeTabRoot(), GS_DEV_ROOT, "and then the tab main put in front comes to the front");
   };
 
+  // ── Selection is never a line ─────────────────────────────────────────────
+  //
+  // The owner's rule: a selected, active or current thing is never marked with
+  // a LINE — no bar down its left or right edge, no rule on top, no underline,
+  // no accent outline. ("disgusting", "trash".) It is marked with a fill tinted
+  // with the accent, and a pill or tab also glows softly in it
+  // (.repo-tab.is-active is the pattern). These read it back by COMPUTED style.
+  //
+  // A line can be drawn a dozen ways, and every one the first version of this
+  // sweep missed came back in review with a passing suite under it: an outline,
+  // an underline, a gradient with a hard stop, a child element two pixels
+  // wide, a ::before the base rule declares at opacity 0 and the state rule
+  // switches on. selectionLines() looks for each of them.
+
+  /** The states that mean "this one": a class, or what aria says. */
+  const CHOSEN_STATE =
+    '.active, .is-active, .is-selected, .is-sel, .selected, .is-current, .current, .is-on, .row-landed, ' +
+    ".is-mine, .focused, .checked, .is-checked, .is-hit, .toggled, .is-toggled, .jb-toggled, " +
+    '[class*="--active"], [class*="--selected"], [class*="--current"], ' +
+    '[aria-selected="true"], [aria-current]:not([aria-current="false"]), [aria-pressed="true"], [aria-checked="true"]';
+  /**
+   * Open things — a menu's trigger, an expanded group, a drawer: states for
+   * LINES (a bar down an open group is a line like any other), but their
+   * fill and their words are their own, not a selection's.
+   */
+  const OPEN_TRIGGER = '[aria-expanded="true"]:not(input):not(textarea):not(select), .is-open';
+  const SELECTED_STATE = `${CHOSEN_STATE}, ${OPEN_TRIGGER}`;
+  const STATE_CLASS = /^(active|is-active|is-selected|is-sel|selected|is-current|current|is-on|row-landed|is-mine|focused|checked|is-checked|is-open|is-hit|toggled|is-toggled|jb-toggled|[\w-]+--(active|selected|current)|gs-force-hover)$/;
+  /**
+   * A computed colour as {r,g,b,a} in 0–1. Reads rgb()/rgba() and the
+   * "color(srgb …)" a color-mix() computes to — which an rgb() parser reads as
+   * black. Anything else (oklab(), a keyword) is null.
+   */
+  const rgbaOf = (col) => {
+    const al = (s) => (s === undefined ? 1 : s.endsWith("%") ? parseFloat(s) / 100 : Number(s));
+    const m = /rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:\s*[,/]\s*([\d.]+%?))?\s*\)/.exec(col || "");
+    if (m) return { r: +m[1] / 255, g: +m[2] / 255, b: +m[3] / 255, a: al(m[4]) };
+    const n = /color\(srgb\s+([-\d.e]+)\s+([-\d.e]+)\s+([-\d.e]+)(?:\s*\/\s*([\d.]+%?))?\s*\)/.exec(col || "");
+    if (n) return { r: +n[1], g: +n[2], b: +n[3], a: al(n[4]) };
+    return null;
+  };
+  /** Every colour written in a computed value (a gradient's stops, a shadow list). */
+  const coloursIn = (v) =>
+    [...String(v || "").matchAll(/rgba?\([^)]*\)|color\([^)]*\)/g)].map((m) => m[0]);
+  /** Painted at all: an unreadable colour counts, so it cannot hide a line. */
+  const paints = (col) => {
+    const p = rgbaOf(col);
+    return p ? p.a > 0.04 : !/^(transparent|none|)$/.test(col || "");
+  };
+  /** Has a hue — the accent, a status colour — rather than a grey. */
+  const hued = (col) => {
+    const p = rgbaOf(col);
+    if (!p) return paints(col);
+    return p.a > 0.04 && Math.max(p.r, p.g, p.b) - Math.min(p.r, p.g, p.b) > 0.08;
+  };
+  const sameColour = (a, b) => {
+    const p = rgbaOf(a), q = rgbaOf(b);
+    if (!p || !q) return a === b;
+    return Math.abs(p.r - q.r) + Math.abs(p.g - q.g) + Math.abs(p.b - q.b) < 0.06 && Math.abs(p.a - q.a) < 0.08;
+  };
+  /** A value split at its top-level commas (not the ones inside a colour). */
+  const topLevel = (v) => {
+    const parts = [];
+    let depth = 0, cur = "";
+    for (const ch of v) {
+      if (ch === "(") depth++;
+      if (ch === ")") depth--;
+      if (ch === "," && depth === 0) { parts.push(cur); cur = ""; } else cur += ch;
+    }
+    parts.push(cur);
+    return parts;
+  };
+  /** A computed box-shadow list as [{inset, x, y, blur, spread, colour}]. */
+  const shadowsOf = (v) => {
+    if (!v || v === "none") return [];
+    return topLevel(v).map((p) => {
+      const colour = (/(rgba?\([^)]*\)|color\([^)]*\)|oklab\([^)]*\)|oklch\([^)]*\)|lab\([^)]*\)|lch\([^)]*\))/.exec(p) || [""])[0];
+      const lens = p.replace(colour, "").match(/-?[\d.]+px/g) || [];
+      const [x, y, blur, spread] = [0, 1, 2, 3].map((i) => parseFloat(lens[i] || "0"));
+      return { inset: /\binset\b/.test(p), x, y, blur, spread, colour };
+    });
+  };
+  /**
+   * Drawn at all: not display:none or hidden, and not faded or scaled to
+   * nothing. A bar the base rule declares at opacity 0 (or scaleX(0)) and the
+   * selected state switches on is ABSENT on the sibling — reading only
+   * `content` called it present on both and passed the pair.
+   */
+  const drawn = (p) => {
+    if (p.display === "none" || p.visibility === "hidden" || parseFloat(p.opacity) < 0.05) return false;
+    const m = /matrix\(([^)]+)\)/.exec(p.transform || "");
+    if (m) {
+      const [a, b, c, d] = m[1].split(",").map(Number);
+      if (Math.hypot(a, b) < 0.05 || Math.hypot(c, d) < 0.05) return false;
+    }
+    if (p.scale && p.scale !== "none" && p.scale.split(/\s+/).some((v) => Math.abs(parseFloat(v)) < 0.05)) return false;
+    return true;
+  };
+  /**
+   * A background image drawn as a line: a gradient with a hard stop (the
+   * colour changes at one position — "accent 0 3px, transparent 3px"), or any
+   * gradient sized to a sliver (background-size: 3px 100%). A soft wash
+   * (accent 22% → 15%) is a fill, not a line, and is not reported.
+   */
+  const stripeIn = (p) => {
+    const img = p.backgroundImage || "none";
+    if (!/gradient\(/.test(img) || !coloursIn(img).some(hued)) return null;
+    for (const size of topLevel(p.backgroundSize || "")) {
+      if (size.trim().split(/\s+/).some((v) => /px$/.test(v) && parseFloat(v) <= 4)) return `a gradient sized to a sliver (${size.trim()})`;
+    }
+    for (const g of topLevel(img)) {
+      const inner = /gradient\(([\s\S]*)\)\s*$/.exec(g.trim())?.[1];
+      if (!inner) continue;
+      const stops = [];
+      for (const part of topLevel(inner)) {
+        const col = (/(rgba?\([^)]*\)|color\([^)]*\)|transparent)/.exec(part) || [""])[0];
+        if (!col) continue; // the direction ("90deg", "to right")
+        const pos = part.replace(col, "").match(/-?[\d.]+(px|%)/g) || [];
+        for (const at of pos.length ? pos : [null]) stops.push({ col, at });
+      }
+      for (let i = 1; i < stops.length; i++) {
+        const a = stops[i - 1], b = stops[i];
+        if (!a.at || !b.at || sameColour(a.col, b.col)) continue;
+        const unit = a.at.endsWith("%") ? "%" : "px";
+        if (!b.at.endsWith(unit)) continue;
+        if (Math.abs(parseFloat(b.at) - parseFloat(a.at)) <= (unit === "px" ? 2 : 1)) return `a gradient with a hard stop at ${b.at} (${g.trim().slice(0, 90)})`;
+      }
+    }
+    return null;
+  };
+  /**
+   * The same part in the sibling: the element with the child's first class,
+   * else the one at the same place in the tree.
+   */
+  const twinOf = (kid, el, sib) => {
+    if (!sib) return null;
+    const kind = [...kid.classList].find((k) => !STATE_CLASS.test(k));
+    if (kind) return sib.querySelector(`.${CSS.escape(kind)}`);
+    const path = [];
+    for (let n = kid; n && n !== el; n = n.parentElement) path.unshift([...n.parentElement.children].indexOf(n));
+    let t = sib;
+    for (const i of path) t = t?.children[i];
+    return t && t.tagName === kid.tagName ? t : null;
+  };
+  /** A box's painted size: content, padding and border, as computed. */
+  const paintedSize = (p) => {
+    let w = parseFloat(p.width), h = parseFloat(p.height);
+    if (p.boxSizing !== "border-box") {
+      const n = (k) => parseFloat(p[k]) || 0;
+      if (!Number.isNaN(w)) w += n("paddingLeft") + n("paddingRight") + n("borderLeftWidth") + n("borderRightWidth");
+      if (!Number.isNaN(h)) h += n("paddingTop") + n("paddingBottom") + n("borderTopWidth") + n("borderBottomWidth");
+    }
+    return { w, h };
+  };
+  /** A pseudo-element that is drawn at all: content, not hidden or faded or
+   *  scaled away, and not of no size (a bar that GROWS from width 0 is absent
+   *  on the sibling, not present there). */
+  const pseudoDrawn = (node, pe) => {
+    if (!node) return null;
+    const p = getComputedStyle(node, pe);
+    if (!p.content || p.content === "none" || p.content === "normal" || !drawn(p)) return null;
+    const { w, h } = paintedSize(p);
+    if ((!Number.isNaN(w) && w < 0.5) || (!Number.isNaN(h) && h < 0.5)) return null;
+    return p;
+  };
+  /** A pseudo-element drawn as a strip (≤ 4px across one axis, painted). */
+  const strip = (node, pe) => {
+    const p = pseudoDrawn(node, pe);
+    if (!p) return null;
+    const { w, h } = paintedSize(p);
+    if (Number.isNaN(w) || Number.isNaN(h)) return null;
+    if (!((w <= 4 && h > 4) || (h <= 4 && w > 4))) return null;
+    const cols = [p.backgroundColor, ...coloursIn(/gradient/.test(p.backgroundImage) ? p.backgroundImage : ""),
+      ...["Top", "Right", "Bottom", "Left"].filter((s) => (parseFloat(p[`border${s}Width`]) || 0) > 0).map((s) => p[`border${s}Color`])];
+    if (!cols.some(paints)) return null;
+    // A 1px grey rule across a row is the list's divider, worn by every row
+    // but the first — not a mark, when another unselected row wears it too
+    // (the caller checks: a grey hairline only the selected tab has is an
+    // underline).
+    if (Math.min(w, h) <= 1 && !cols.some(hued)) return `hairline ${Math.round(w)}×${Math.round(h)} ${cols.find(paints)}`;
+    return `${Math.round(w)}×${Math.round(h)} ${cols.find(paints)}`;
+  };
+  /** A thin painted part: a bar made of an element. */
+  const barOf = (k) => {
+    const kr = k.getBoundingClientRect();
+    if (Math.min(kr.width, kr.height) < 0.5) return null; // of no size: absent, not a bar
+    if (!((kr.width <= 4 && kr.height >= 6) || (kr.height <= 4 && kr.width >= 10))) return null;
+    const kc = getComputedStyle(k);
+    const cols = [kc.backgroundColor, ...coloursIn(/gradient/.test(kc.backgroundImage) ? kc.backgroundImage : ""),
+      ...["Top", "Right", "Bottom", "Left"].filter((s) => (parseFloat(kc[`border${s}Width`]) || 0) > 0).map((s) => kc[`border${s}Color`])];
+    const col = cols.find(hued);
+    return col ? `${Math.round(kr.width)}×${Math.round(kr.height)} ${col}` : null;
+  };
+  /** Faded or hidden by itself or by anything above it. */
+  const shownChain = (n, stop) => {
+    for (let x = n; x && x !== stop; x = x.parentElement) if (!drawn(getComputedStyle(x))) return false;
+    return true;
+  };
+  /**
+   * What one shadow draws: "bar" (an inset band down a side), "rule" (an
+   * outer band beyond a side), "ring" (a hard band all round), or "" (a
+   * glow, a soft lift, the neutral 1px sheen a raised surface wears). A band
+   * is a line while its blur is narrower than it would take to dissolve it:
+   * an inset 3px bar blurred 2px is still a bar (the first guard called any
+   * blur over 1px soft, and passed the owner's GO TO bar drawn that way).
+   * packages/webview-ui/test/selectionProbe.js and selectionStatic.ts use
+   * the same model.
+   */
+  const shadowKind = (s) => {
+    if (!paints(s.colour)) return "";
+    const off = Math.max(Math.abs(s.x), Math.abs(s.y));
+    if (off > 0) {
+      if (off <= 1 && s.spread <= 0 && !hued(s.colour)) return "";
+      if (s.inset) {
+        const band = off + Math.min(s.spread, 0);
+        return band >= 0.5 && s.blur < 3 * band + 4 ? "bar" : "";
+      }
+      const band = off + s.spread;
+      return band >= 1 && s.blur < band ? "rule" : "";
+    }
+    return s.spread > 0 && s.spread < 8 && s.blur < 2 * s.spread + 1.5 ? "ring" : "";
+  };
+  /** A filter's drop-shadow()s, as outer shadows. */
+  const dropShadowsOf = (v) =>
+    [...String(v || "").matchAll(/drop-shadow\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)/g)].map((m) => {
+      const colour = (/(rgba?\([^)]*\)|color\([^)]*\))/.exec(m[1]) || [""])[0];
+      const lens = m[1].replace(colour, "").match(/-?[\d.]+px/g) || [];
+      const [x, y, blur] = [0, 1, 2].map((i) => parseFloat(lens[i] || "0"));
+      return { inset: false, x, y, blur, spread: 0, colour, text: m[0] };
+    });
+  /**
+   * The line-shaped marks of one box (an element, a pseudo-element, a part):
+   * [{key, text, colour}]. `key` is the shape, compared with the twin's.
+   * Whole rings are left out for a part (a chip's own border is a chip).
+   */
+  const boxMarks = (p, { part = false, focused = false, sides = true } = {}) => {
+    const out = [];
+    for (const s of shadowsOf(p.boxShadow)) {
+      const k = shadowKind(s);
+      if (!k || (k === "ring" && (part || focused))) continue;
+      out.push({ key: `${k}${s.inset ? " inset" : ""} ${s.x},${s.y},${s.spread}`, text: `${k === "bar" ? "an inset bar" : k === "rule" ? "a hard outer line" : "a ring"} (box-shadow ${s.x}px ${s.y}px ${s.blur}px ${s.spread}px, ${s.colour})`, colour: s.colour });
+    }
+    for (const s of dropShadowsOf(p.filter)) {
+      const k = shadowKind(s);
+      if (k) out.push({ key: `drop ${s.x},${s.y}`, text: `a ${k} drawn by a filter (${s.text})`, colour: s.colour });
+    }
+    if (!focused && p.outlineStyle !== "none" && parseFloat(p.outlineWidth) > 0 && paints(p.outlineColor)) {
+      out.push({ key: `outline ${p.outlineStyle} ${parseFloat(p.outlineWidth)}`, text: `an outline (${p.outlineWidth} ${p.outlineStyle} ${p.outlineColor})`, colour: p.outlineColor });
+    }
+    if (sides) {
+      const on = ["Top", "Right", "Bottom", "Left"].filter((sd) =>
+        (parseFloat(p[`border${sd}Width`]) || 0) > 0 && !/none|hidden/.test(p[`border${sd}Style`]) && paints(p[`border${sd}Color`]));
+      const whole = on.length === 4;
+      if (!(whole && part)) {
+        for (const sd of on) {
+          const w = parseFloat(p[`border${sd}Width`]);
+          const col = p[`border${sd}Color`];
+          // Inside a part a grey hairline is a divider; a hued or thick side is a rule.
+          if (part && !hued(col) && w < 2) continue;
+          out.push({ key: `border-${sd.toLowerCase()} ${Math.round(w * 2) / 2}`, text: `a ${sd.toLowerCase()} border (${w}px ${col})`, colour: col });
+        }
+      }
+    }
+    return out;
+  };
+  const hasMark = (list, m, geometryOnly) => (list || []).some((x) => x.key === m.key && (geometryOnly || sameColour(x.colour, m.colour)));
+  /**
+   * A ::before/::after of any size that carries a line: a full-size overlay
+   * with a border side, an inset bar or a ring (strip() finds the thin ones).
+   */
+  const overlayMarks = (node, pe) => {
+    const p = pseudoDrawn(node, pe);
+    return p ? boxMarks(p, { part: false }) : null;
+  };
+  /**
+   * Every line a selected element — or its ::before/::after, or anything
+   * inside it — draws that an unselected sibling of its kind does not:
+   * returns a list of phrases.
+   */
+  const selectionLines = (el, sib) => {
+    const out = [];
+    const cs = getComputedStyle(el);
+    const ss = sib ? getComputedStyle(sib) : null;
+    const focused = el.matches(":focus-visible");
+    // Its shadows and drop-shadow filters: a bar (an inset band pushed to
+    // one side, blurred or not), a hard outer rule, a ring. Any colour but a
+    // neutral 1px sheen (the "lit from above" bevel raised surfaces wear).
+    const sibOwn = ss ? boxMarks(ss, { sides: false }) : [];
+    for (const m of boxMarks(cs, { focused, sides: false })) {
+      if (m.key.startsWith("outline")) continue; // below, with its own wording
+      if (!hasMark(sibOwn, m)) out.push(m.text);
+    }
+    // A border side: one the sibling does not have, wider than the sibling's,
+    // or in a colour (a hue) the sibling's is not. A grey 1px side the sibling
+    // lacks is a divider when another unselected one of its kind wears it (a
+    // segmented group's `.x + .x { border-left }`, a list's rule between
+    // rows — the first has none); a grey hairline only the selected tab has
+    // is an underline.
+    const others = el.parentElement
+      ? [...el.parentElement.children].filter((n) => n !== el && n !== sib && n.tagName === el.tagName && !n.matches(SELECTED_STATE) && n.getClientRects().length > 0).slice(0, 12).map((n) => getComputedStyle(n))
+      : [];
+    // A grey hairline all round is the thing's own edge (a pill, a card), and
+    // an OPEN thing's grey frame (an expanded section's rules) is the
+    // disclosure's structure; a hued side is a mark either way.
+    const sidesOn = ["Top", "Right", "Bottom", "Left"].filter((sd) =>
+      (parseFloat(cs[`border${sd}Width`]) || 0) > 0 && !/none|hidden/.test(cs[`border${sd}Style`]) && paints(cs[`border${sd}Color`]));
+    const greyEdge = sidesOn.length === 4 || !el.matches(CHOSEN_STATE);
+    for (const side of ["Top", "Right", "Bottom", "Left"]) {
+      const w = parseFloat(cs[`border${side}Width`]) || 0;
+      const col = cs[`border${side}Color`];
+      if (!w || /none|hidden/.test(cs[`border${side}Style`]) || !paints(col)) continue;
+      const sw = ss ? parseFloat(ss[`border${side}Width`]) || 0 : 0;
+      const sv = ss && sw > 0 && !/none|hidden/.test(ss[`border${side}Style`]) && paints(ss[`border${side}Color`]);
+      if (!sv) {
+        // (A grey hairline down a side is a segmented group's divider,
+        // `.x + .x { border-left }`: in a group of two, no other has it.)
+        const divider = !hued(col) && w <= 1 && (greyEdge || side === "Left" || side === "Right" ||
+          others.some((o) => (parseFloat(o[`border${side}Width`]) || 0) > 0 && !/none|hidden/.test(o[`border${side}Style`]) && paints(o[`border${side}Color`])));
+        if (!divider) out.push(`a ${side.toLowerCase()} border (${w}px ${col}) its sibling does not have`);
+      } else if (w > sw + 0.5) {
+        out.push(`a ${side.toLowerCase()} border ${w}px wide where its sibling's is ${sw}px`);
+      } else if (hued(col) && !sameColour(col, ss[`border${side}Color`])) {
+        out.push(`a ${side.toLowerCase()} border in ${col} where its sibling's is ${ss[`border${side}Color`]}`);
+      }
+    }
+    // An outline — the accent ring the review verdict and the rebase presets
+    // once wore. A keyboard focus ring is accessibility and is not measured.
+    if (!focused && cs.outlineStyle !== "none" && parseFloat(cs.outlineWidth) > 0 && paints(cs.outlineColor)) {
+      const had = ss && ss.outlineStyle !== "none" && parseFloat(ss.outlineWidth) > 0 && sameColour(ss.outlineColor, cs.outlineColor);
+      if (!had) out.push(`an outline (${cs.outlineWidth} ${cs.outlineStyle} ${cs.outlineColor})`);
+    }
+    // A gradient drawn as a bar, or sized to one.
+    const stripe = stripeIn(cs);
+    if (stripe && !(ss && stripeIn(ss) && ss.backgroundImage === cs.backgroundImage)) out.push(stripe);
+    // A strip: a ::before/::after at most 4px across one axis, painted — and
+    // DRAWN: the sibling's copy at opacity 0 is no copy at all.
+    for (const pe of ["::before", "::after"]) {
+      const mine = strip(el, pe);
+      const hairlineShared = () =>
+        el.parentElement && [...el.parentElement.children].some((n) => n !== el && n.tagName === el.tagName && !n.matches(SELECTED_STATE) && strip(n, pe));
+      if (mine && !strip(sib, pe) && !(mine.startsWith("hairline") && hairlineShared())) out.push(`a ${pe} strip (${mine})`);
+      // …and one of any size carrying a side, a bar or a ring: a full-size
+      // overlay drew the owner's GO TO bar past the first guard.
+      const theirs = sib ? overlayMarks(sib, pe) : null;
+      for (const m of overlayMarks(el, pe) || []) {
+        if (!hasMark(theirs, m)) out.push(`a ${pe} overlay with ${m.text}`);
+      }
+    }
+    // Inside it: an underline or overline on its text, a child element used as
+    // a bar, a child's own strip, a child's border on one side — anything its
+    // twin in the sibling does not draw.
+    const decorated = (n) => /underline|overline/.test(getComputedStyle(n).textDecorationLine);
+    if (decorated(el) && !(sib && decorated(sib))) out.push(`an ${getComputedStyle(el).textDecorationLine} under its text`);
+    const kids = el.querySelectorAll("*");
+    for (let i = 0; i < kids.length && i < 400; i++) {
+      const k = kids[i];
+      if (!k.getClientRects().length || !shownChain(k, el)) continue;
+      const twin = twinOf(k, el, sib);
+      const twinShown = twin && twin.getClientRects().length > 0 && shownChain(twin, sib);
+      const name = describeEl(k);
+      const ownText = [...k.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim());
+      if (ownText && decorated(k) && !decorated(el) && !(twinShown && decorated(twin))) {
+        out.push(`an ${getComputedStyle(k).textDecorationLine} on ${name}`);
+      }
+      const bar = barOf(k);
+      if (bar && !(twinShown && barOf(twin))) out.push(`a child bar (${name} ${bar})`);
+      for (const pe of ["::before", "::after"]) {
+        const mine = strip(k, pe);
+        // (A part's grey hairline is a divider inside it.)
+        if (mine && !mine.startsWith("hairline") && !(twinShown && strip(twin, pe))) out.push(`a ${pe} strip on ${name} (${mine})`);
+        const theirs = twinShown ? overlayMarks(twin, pe) : null;
+        for (const m of overlayMarks(k, pe) || []) {
+          if (!hasMark(theirs, m)) out.push(`a ${pe} overlay on ${name} with ${m.text}`);
+        }
+      }
+      // A part's own shadow (an inset underline on a label), drop-shadow or
+      // outline, against its twin's shape: a part's ring follows its row's
+      // fill (an avatar's hole), so its colour is not compared.
+      {
+        const kc0 = getComputedStyle(k);
+        const tm = twinShown ? boxMarks(getComputedStyle(twin), { part: true, sides: false }) : [];
+        // A knockout in the colour of the ground it sits on (an avatar's
+        // ring in the page's own colour) shows as nothing.
+        const under = k.parentElement ? groundsOf(k.parentElement)[0] : null;
+        const knockout = (col) => {
+          const q = rgbaOf(col);
+          return !!q && !!under && q.a > 0.9 && Math.abs(q.r - under.r) + Math.abs(q.g - under.g) + Math.abs(q.b - under.b) < 0.06;
+        };
+        for (const m of boxMarks(kc0, { part: true, focused: k.matches(":focus-visible"), sides: false })) {
+          if (!hasMark(tm, m, true) && !knockout(m.colour)) out.push(`${m.text} on ${name}`);
+        }
+      }
+      // A rule on one to three sides of a part; a chip's full outline is a
+      // chip, not a line.
+      const kc = getComputedStyle(k);
+      const sides = ["Top", "Right", "Bottom", "Left"].filter((s) =>
+        (parseFloat(kc[`border${s}Width`]) || 0) > 0 && !/none|hidden/.test(kc[`border${s}Style`]) && hued(kc[`border${s}Color`]));
+      if (sides.length && sides.length < 4) {
+        const tc = twinShown ? getComputedStyle(twin) : null;
+        const twinHas = tc && sides.every((s) => (parseFloat(tc[`border${s}Width`]) || 0) > 0 && sameColour(tc[`border${s}Color`], kc[`border${s}Color`]));
+        if (!twinHas) out.push(`a ${sides.join("/").toLowerCase()} border on ${name} (${kc[`border${sides[0]}Color`]})`);
+      }
+    }
+    return out;
+  };
+  /** An unselected element of the same kind: its sibling if it has one. */
+  const unselectedSibling = (el) => {
+    const kind = [...el.classList].find((k) => !STATE_CLASS.test(k));
+    const same = (n) =>
+      n !== el && n.tagName === el.tagName && (!kind || n.classList.contains(kind)) &&
+      !n.matches(SELECTED_STATE) && n.getClientRects().length > 0;
+    const near = el.parentElement ? [...el.parentElement.children].find(same) : null;
+    if (near) return near;
+    if (!kind) return null;
+    return [...el.getRootNode().querySelectorAll(`${el.tagName.toLowerCase()}.${CSS.escape(kind)}`)].find(same) || null;
+  };
+  /**
+   * Surfaces this sweep does not own: Monaco's own chrome (the editor's current
+   * line is Monaco's), and the shared diff/merge views from packages/webview-ui
+   * (the `jb-*` roots diffView.ts, mergeView.ts and mergeShell.ts build) — the
+   * merge editor's bands, columns and ribbons are signed off, and that package
+   * is swept with the extension.
+   */
+  const NOT_OURS =
+    ".monaco-editor, .monaco-diff-editor, .jb-app, .jb-diff-grid, .jb-merge-grid, .jb-toolbar, .jb-bottom-bar, .jb-legend";
+  /** A short name for an element in a failure message. */
+  const describeEl = (el) => {
+    const cls = [...el.classList].slice(0, 3).join(".");
+    const label = (el.getAttribute("aria-label") || el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 28);
+    return `${el.tagName.toLowerCase()}${cls ? "." + cls : ""}${label ? ` "${label}"` : ""}`;
+  };
+  /** The ones of `els` a reader can see: laid out, not faded, not hidden. */
+  const onScreen = (els) =>
+    els.filter((el) => {
+      if (!el.getClientRects().length || el.closest(NOT_OURS)) return false;
+      const r = el.getBoundingClientRect();
+      return r.width >= 2 && r.height >= 2 && shownChain(el, null);
+    });
+  /** Every selected element on screen this sweep owns (the light DOM). */
+  const selectedOnScreen = () => onScreen($$(SELECTED_STATE));
+  /**
+   * Every shadow root in the page: the shared Lit views from
+   * packages/webview-ui (the graph, the commit rail, commit details, rebase),
+   * each carrying its own stylesheet, which `querySelectorAll` from the
+   * document never enters.
+   */
+  const shadowRoots = () => {
+    const out = [];
+    const walk = (root) => {
+      for (const el of root.querySelectorAll("*")) {
+        if (el.shadowRoot) {
+          out.push(el.shadowRoot);
+          walk(el.shadowRoot);
+        }
+      }
+    };
+    walk(document);
+    return out;
+  };
+
+  // ── …and what it is marked with instead has to read ─────────────────────
+  // Composited, because the tints are mixed into TRANSPARENT: a fill's
+  // colour alone says nothing about what the eye sees on the surface below.
+  const lumOf = (c) => {
+    const lin = (v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+    return 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b);
+  };
+  const ratioOf = (a, b) => {
+    const x = lumOf(a) + 0.05, y = lumOf(b) + 0.05;
+    return x > y ? x / y : y / x;
+  };
+  const over = (top, under) => ({
+    r: top.r * top.a + under.r * (1 - top.a),
+    g: top.g * top.a + under.g * (1 - top.a),
+    b: top.b * top.a + under.b * (1 - top.a),
+    a: 1,
+  });
+  /**
+   * Every colour the ground under `el` can be: its own fill and each one above
+   * it, composited down to the first opaque surface. A gradient layer yields
+   * one ground per stop, so a caller can take the worst (or the strongest).
+   * Steps out of a shadow root through its host.
+   */
+  const groundsOf = (el) => {
+    const chain = [];
+    for (let n = el; n; n = n.parentElement || n.getRootNode?.().host || null) {
+      const cs = getComputedStyle(n);
+      const g = /gradient/.test(cs.backgroundImage) ? coloursIn(cs.backgroundImage).map(rgbaOf).filter(Boolean) : [];
+      const bg = rgbaOf(cs.backgroundColor);
+      // A background image paints OVER the element's own colour: nearer the
+      // top of the stack, so it goes into the chain first.
+      if (g.length) chain.push(g);
+      if (bg && bg.a > 0) chain.push([bg]);
+      if (bg && bg.a >= 0.999) break;
+    }
+    let cur = [{ r: 1, g: 1, b: 1, a: 1 }];
+    for (let i = chain.length - 1; i >= 0; i--) {
+      const next = [];
+      for (const top of chain[i]) for (const u of cur) next.push(over(top, u));
+      cur = next.slice(0, 8);
+    }
+    return cur;
+  };
+  const fmtRgb = (c) => `rgb(${Math.round(c.r * 255)}, ${Math.round(c.g * 255)}, ${Math.round(c.b * 255)})`;
+  /**
+   * Every piece of text inside a selected element that reads under WCAG AA on
+   * the ground it actually sits on: [{el, text, ratio, need, ink, ground}] for
+   * the ones that do not. Ink is faded by every opacity above it; text that is
+   * not drawn at all (a row's hover-only buttons at opacity 0) and disabled
+   * controls (exempt under 1.4.3) are not text a reader is asked to read.
+   */
+  const unreadableIn = (el) => {
+    const out = [];
+    const seen = new Set();
+    const tw = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let t; (t = tw.nextNode()); ) {
+      const words = t.textContent.trim();
+      const p = t.parentElement;
+      if (!words || !p || seen.has(p)) continue;
+      seen.add(p);
+      if (!p.getClientRects().length || p.closest(NOT_OURS) || p.closest(':disabled, [aria-disabled="true"]')) continue;
+      const pc = getComputedStyle(p);
+      if (pc.visibility === "hidden") continue;
+      let op = 1;
+      for (let n = p; n && n.nodeType === 1; n = n.parentElement) op *= parseFloat(getComputedStyle(n).opacity);
+      if (op < 0.05) continue;
+      const ink = rgbaOf(pc.color);
+      if (!ink) {
+        out.push({ el: p, text: words, ratio: 0, need: 4.5, ink: pc.color, ground: "?" });
+        continue;
+      }
+      const size = parseFloat(pc.fontSize), weight = Number(pc.fontWeight) || 400;
+      const need = size >= 24 || (size >= 18.66 && weight >= 700) ? 3 : 4.5;
+      let worst = Infinity, at = null;
+      for (const g of groundsOf(p)) {
+        const r = ratioOf(over({ ...ink, a: ink.a * op }, g), g);
+        if (r < worst) { worst = r; at = g; }
+      }
+      if (worst < need) out.push({ el: p, text: words.slice(0, 24), ratio: worst, need, ink: pc.color, ground: fmtRgb(at) });
+    }
+    return out;
+  };
+  /**
+   * How far apart two elements' grounds are, as the eye sees them: the
+   * strongest part of `a` against `b` — a sum of channel differences (0–3)
+   * and a luminance ratio.
+   */
+  const fillApart = (a, b) => {
+    let delta = 0, ratio = 1;
+    for (const x of groundsOf(a)) for (const y of groundsOf(b)) {
+      delta = Math.max(delta, Math.abs(x.r - y.r) + Math.abs(x.g - y.g) + Math.abs(x.b - y.b));
+      ratio = Math.max(ratio, ratioOf(x, y));
+    }
+    return { delta, ratio };
+  };
+
+  /**
+   * The sweep's assertions over `marked` (the selected elements on screen):
+   * none draws a line its unselected sibling does not, and `want` — the
+   * surface the scene exists to reach — is among them, filled, and filled
+   * VISIBLY differently from its sibling.
+   */
+  const litNotLined = (c, marked, want) => {
+    c.ok(marked.length > 0, "precondition: something in the scene is selected");
+    if (want) c.ok(marked.some((el) => el.matches(want)), `precondition: the scene reaches ${want} (measured: ${[...new Set(marked.map((el) => el.className.split(" ")[0]))].join(", ")})`);
+    for (const el of marked) {
+      for (const line of selectionLines(el, unselectedSibling(el))) {
+        c.ok(false, `${describeEl(el)} is marked with ${line}`);
+      }
+    }
+    // With the line gone, the surface the scene exists for must still be
+    // unmistakable: filled, and filled visibly differently from the one
+    // beside it. A 1% tint is a different string and the same colour.
+    for (const el of want ? marked.filter((n) => n.matches(want)) : []) {
+      const cs = getComputedStyle(el);
+      c.ok(paints(cs.backgroundColor) || /gradient/.test(cs.backgroundImage), `${describeEl(el)} is filled (${cs.backgroundColor})`);
+      const sib = unselectedSibling(el);
+      if (!sib) continue;
+      const { delta, ratio } = fillApart(el, sib);
+      c.ok(
+        delta >= 0.06 || ratio >= 1.1,
+        `${describeEl(el)} is filled visibly differently from ${describeEl(sib)} (Δ ${delta.toFixed(3)}, ${ratio.toFixed(2)}:1; needs Δ 0.06 or 1.1:1)`,
+      );
+    }
+  };
+  /**
+   * Every word inside every selected element reads: WCAG AA (4.5:1, 3:1 for
+   * large text) against the ground it actually sits on — the tints are mixed
+   * into transparent, so the ratio is taken over the composited stack, never
+   * the fill's own colour. Selection tints eat contrast: a muted hint went
+   * from 4.36 to 4.21:1 when its verdict's fill rose from 15% to 18%, and the
+   * accent ink on a lit segment in a popover measured 4.05:1.
+   */
+  const selectedTextReads = (c, marked) => {
+    const told = new Set();
+    for (const el of marked) {
+      // An open menu's trigger is judged for lines; its words are the control's own.
+      if (!el.matches(CHOSEN_STATE)) continue;
+      for (const u of unreadableIn(el)) {
+        if (told.has(u.el)) continue;
+        told.add(u.el);
+        c.ok(false, `${describeEl(u.el)} in ${describeEl(el)} reads ${u.ratio.toFixed(2)}:1 (needs ${u.need}): ${u.ink} on ${u.ground}`);
+      }
+    }
+  };
+
+  // ── …and under the pointer ───────────────────────────────────────────────
+  // The selected row you hover is still the selected row: it has to read,
+  // and it must not grow a line. A page cannot hover an element, so every
+  // :hover rule on the page — renderer.css (readable because check.mjs runs
+  // Chrome with --allow-file-access-from-files) and every shadow root's —
+  // is rewritten in place to :is(:hover, .gs-force-hover), which keeps its
+  // order and its weight, and the class goes on the element and everything
+  // above it. Hover on a lit thing was never measured, and a fix raised the
+  // rebase row's hover past what its words could take.
+  const FORCE = "gs-force-hover";
+  /** Rewrites the page's :hover rules; returns whether the document's own sheet could be read. */
+  const prepareHover = () => {
+    const walk = (list) => {
+      for (const r of list) {
+        if (r.selectorText && r.selectorText.includes(":hover") && !r.selectorText.includes(FORCE)) {
+          try { r.selectorText = r.selectorText.replace(/:hover(?![\w-])/g, `:is(:hover, .${FORCE})`); } catch { /* not writable */ }
+        }
+        if (r.cssRules && r.cssRules.length) walk(r.cssRules);
+      }
+    };
+    let readable = false;
+    for (const sh of document.styleSheets) {
+      try { walk(sh.cssRules); readable = true; } catch { /* a sheet from elsewhere */ }
+    }
+    for (const root of shadowRoots()) {
+      const sheets = [...(root.adoptedStyleSheets || []), ...[...root.querySelectorAll("style")].map((x) => x.sheet).filter(Boolean)];
+      for (const sh of sheets) {
+        try { walk(sh.cssRules); } catch { /* unreadable */ }
+      }
+    }
+    return readable;
+  };
+  const setHover = (el, on) => {
+    for (let n = el; n && n.classList; n = n.parentElement || n.getRootNode?.().host || null) n.classList.toggle(FORCE, on);
+  };
+  /**
+   * Every selected element, hovered: its words read (AA) on the hover's
+   * fill, and it draws no line under the pointer that its sibling has
+   * neither at rest nor hovered (a hover every row wears is not a mark).
+   * Only what the pointer changes is reported.
+   */
+  const underThePointer = (c, marked) => {
+    c.ok(prepareHover(), "the page's stylesheet can be read, so hover can be forced (check.mjs passes --allow-file-access-from-files)");
+    const told = new Set();
+    for (const el of marked) {
+      const sib = unselectedSibling(el);
+      const restLines = new Set(selectionLines(el, sib));
+      const restWords = new Set(el.matches(CHOSEN_STATE) ? unreadableIn(el).map((u) => u.el) : []);
+      setHover(el, true);
+      try {
+        if (el.matches(CHOSEN_STATE)) {
+          for (const u of unreadableIn(el)) {
+            if (restWords.has(u.el) || told.has(u.el)) continue;
+            told.add(u.el);
+            c.ok(false, `${describeEl(u.el)} in ${describeEl(el)} under the pointer reads ${u.ratio.toFixed(2)}:1 (needs ${u.need}): ${u.ink} on ${u.ground}`);
+          }
+        }
+        // With no unselected sibling there is nothing to tell a hover every
+        // one of its kind wears from a mark of the state (the static guard
+        // reads the :hover rules of a state).
+        if (sib) {
+          const vsRest = selectionLines(el, sib);
+          setHover(sib, true);
+          const vsHovered = new Set(selectionLines(el, sib));
+          for (const line of vsRest) {
+            if (vsHovered.has(line) && !restLines.has(line)) c.ok(false, `${describeEl(el)} under the pointer is marked with ${line}`);
+          }
+        }
+      } finally {
+        if (sib) setHover(sib, false);
+        setHover(el, false);
+      }
+    }
+  };
+
   window.__GS_CHECKS = {
     // ── the count badge reports what is on screen ────────────────────────────
     "count-badge-filtered": (f) => {
@@ -292,29 +973,41 @@
       c.eq(idx, 0, "index of the selected row");
       c.match(rows[0]?.textContent, /Search GitHub for/, "first row");
     },
+    /**
+     * The highlighted row IS the button Enter presses, so it has to read as
+     * one — on its FILL alone. It used to lean on an accent bar down its left
+     * edge, which the owner called trash; the bar is gone, so the fill has to
+     * stand clear of the card by itself (composited over the card: the tint is
+     * mixed into transparent), with no inset bar and no border the other rows
+     * do not have.
+     */
     "palette-selection-visible": (f) => {
       const c = check(f);
+      noAnimation();
       const sel = $(".cmdk-row.is-selected");
-      c.ok(!!sel, "a row is selected");
-      if (!sel) return;
-      const parse = (rgb) => (rgb.match(/\d+/g) || []).slice(0, 3).map(Number);
-      const lum = (rgb) => {
-        const [r, g, b] = parse(rgb).map((v) => {
-          const x = v / 255;
-          return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
-        });
-        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-      };
-      const rowBg = getComputedStyle(sel).backgroundColor;
-      const panelBg = getComputedStyle($(".cmdk-card")).backgroundColor;
-      const a = lum(rowBg) + 0.05;
-      const b = lum(panelBg) + 0.05;
-      const ratio = a > b ? a / b : b / a;
-      const bar = getComputedStyle(sel).boxShadow;
-      c.ok(
-        ratio >= 1.35 || /inset/.test(bar),
-        `selection must be visible: ${ratio.toFixed(2)}:1 against the panel and no accent bar`,
-      );
+      const other = $(".cmdk-row:not(.is-selected)");
+      c.ok(!!sel && !!other, "a row is selected, and another is not");
+      if (!sel || !other) return;
+      const card = getComputedStyle($(".cmdk-card")).backgroundColor;
+      const under = rgbaOf(card);
+      const cs = getComputedStyle(sel);
+      const over1 = rgbaOf(cs.backgroundColor);
+      c.ok(!!under && !!over1, `both colours are measurable (${card} / ${cs.backgroundColor})`);
+      if (!under || !over1) return;
+      // The fill alone, over the card — and the WEAKEST of it, so a gradient
+      // cannot pass on its strongest stop.
+      const base = groundsOf($(".cmdk-card"))[0];
+      const ratio = Math.min(...groundsOf(sel).map((g) => ratioOf(g, base)));
+      c.ok(ratio >= 1.35, `the fill alone stands clear of the card: ${ratio.toFixed(2)}:1 (needs 1.35; ${cs.backgroundColor} on ${card})`);
+      c.eq(cs.backgroundImage, getComputedStyle(other).backgroundImage, "it paints no image the other rows do not (a gradient stripe is a bar)");
+      const os = getComputedStyle(other);
+      c.ok(!shadowsOf(cs.boxShadow).some((x) => x.inset), `no bar or ring drawn inside the row (${cs.boxShadow})`);
+      for (const side of ["Top", "Right", "Bottom", "Left"]) {
+        c.eq(cs[`border${side}Width`], os[`border${side}Width`], `its ${side.toLowerCase()} border is the other rows' width`);
+      }
+      c.eq(cs.outlineStyle === "none" || sel.matches(":focus-visible") ? "" : `${cs.outlineWidth} ${cs.outlineStyle} ${cs.outlineColor}`, "", "it wears no outline");
+      c.eq(selectionLines(sel, other).join("; "), "", "it is marked with no line of any kind");
+      c.eq(unreadableIn(sel).map((u) => `"${u.text}" ${u.ratio.toFixed(2)}:1`).join("; "), "", "every word on it reads (AA)");
     },
     "palette-min-chars": (f) => {
       const groups = $$(".cmdk-group").map((g) => g.textContent);
@@ -7890,7 +8583,14 @@
         c.ok(strip.clientHeight >= 34, `the strip keeps its height (${strip.clientHeight}px)`);
         c.ok(strip.clientHeight >= strip.scrollHeight, "nothing in the strip is clipped");
         const active = strip.querySelector(".gh-subtab.active");
-        c.ok(!!active && active.getBoundingClientRect().bottom <= strip.getBoundingClientRect().bottom + 1, "the active tab's underline is inside the strip");
+        c.ok(!!active && active.getBoundingClientRect().bottom <= strip.getBoundingClientRect().bottom + 1, "the active tab is inside the strip");
+        // …and it is LIT, not underlined (the owner: selection is never a line).
+        const idle = strip.querySelector(".gh-subtab:not(.active)");
+        if (active && idle) {
+          const as = getComputedStyle(active);
+          c.ok(as.backgroundColor !== getComputedStyle(idle).backgroundColor, `the active tab is filled (${as.backgroundColor})`);
+          c.eq(as.borderBottomWidth, getComputedStyle(idle).borderBottomWidth, "…with no underline the other tabs do not have");
+        }
       }
       const body = $(".pr-threads-body");
       const cards = $$(".pr-threads-body > .pr-thread");
@@ -9554,8 +10254,9 @@
 
     /**
      * Cmd-click and Shift-click select several; every selected row has the
-     * selection fill and ONLY the focused one the accent bar (computed, in
-     * whichever theme the scene runs); aria says so; the details pane becomes
+     * selection fill, the focused one is lit with a fill of its own, and no
+     * row wears a line (computed, in whichever theme the scene runs); aria
+     * says so; the details pane becomes
      * "N commits selected" with the actions that apply — never one commit's
      * details — and Escape keeps only the focused row.
      */
@@ -9577,7 +10278,20 @@
       };
       const selected = () => $$('.row[aria-selected="true"]', sr).map((r) => r.dataset.sha);
       const bg = (sha) => getComputedStyle(row(sha)).backgroundColor;
-      const barOf = (sha) => getComputedStyle(row(sha)).borderLeftColor;
+      // Any line a row wears: a coloured border down its side, a shadow, an
+      // outline, a ::before/::after strip. The owner's rule is that nothing
+      // selected wears one; the focused row is LIT instead (a fill of its own).
+      const linesOf = (sha) => {
+        const s = getComputedStyle(row(sha));
+        const strip = (w) => { const p = getComputedStyle(row(sha), w); return p.content !== "none" && p.content !== "normal" && !clear(p.backgroundColor); };
+        return [
+          clear(s.borderLeftColor) || parseFloat(s.borderLeftWidth) === 0 ? "" : `border-left ${s.borderLeftColor}`,
+          s.boxShadow === "none" ? "" : `box-shadow ${s.boxShadow}`,
+          s.outlineStyle === "none" ? "" : `outline ${s.outlineStyle}`,
+          strip("::before") ? "::before strip" : "",
+          strip("::after") ? "::after strip" : "",
+        ].filter(Boolean).join(", ");
+      };
       const clear = (v) => v === "rgba(0, 0, 0, 0)" || v === "transparent";
       const sent = (ch) => window.__GS_INVOKED.filter((r) => r.channel === ch);
 
@@ -9585,10 +10299,11 @@
       await click(S[2], { metaKey: true });
       c.eq(selected().join(","), [S[0], S[2]].join(","), "Cmd+click adds a row");
       c.eq(sr.querySelector(".scroller")?.getAttribute("aria-multiselectable"), "true", "the grid says it is multi-select");
-      c.ok(!clear(bg(S[0])) && bg(S[0]) === bg(S[2]), `both selected rows are filled alike (${bg(S[0])} / ${bg(S[2])})`);
-      c.ok(bg(S[1]) !== bg(S[0]), `the row between them is not (${bg(S[1])})`);
-      c.ok(!clear(barOf(S[2])), `the focused row has the accent bar (${barOf(S[2])})`);
-      c.ok(clear(barOf(S[0])), `a selected row that is not focused has none (${barOf(S[0])})`);
+      c.ok(!clear(bg(S[0])) && bg(S[1]) !== bg(S[0]), `a selected row is filled, the row between them is not (${bg(S[0])} / ${bg(S[1])})`);
+      c.ok(!clear(bg(S[2])) && bg(S[2]) !== bg(S[0]) && bg(S[2]) !== bg(S[1]),
+        `the focused row is lit: a fill of its own (${bg(S[2])} / ${bg(S[0])})`);
+      c.eq(linesOf(S[2]), "", "the focused row wears no line");
+      c.eq(linesOf(S[0]), "", "nor does a selected row that is not focused");
       c.eq(sr.querySelector(".scroller")?.getAttribute("aria-activedescendant"), row(S[2])?.id, "aria-activedescendant is the focused row");
 
       const pane = $(".graph-details gitstudio-commit-details");
@@ -10641,6 +11356,38 @@
       const all = text("#toast-stack");
       c.ok(!!$$("#toast-stack .toast-success").find((t) => /^Applied stash@\{0\} — it stays in the list\.$/.test(text(t))), `said as applied and kept (${all})`);
       c.ok(!!page && page.isConnected, "the page of the stash that is still there stays open");
+    },
+
+    /**
+     * Every control that makes, lists or holds a stash wears codicon's stash
+     * glyph, as the extension's do — the Stashes segment, each stash's row,
+     * the "Stash changes" button over them, and on the Changes page the Stash
+     * button and its drop zone (the row menus' Stash items too). They wore an
+     * archive box, which says "archive", while the extension had moved on:
+     * the same verb, two different pictures.
+     */
+    "every-stash-control-wears-the-stash-glyph": async (f) => {
+      const c = check(f);
+      await settle(1200);
+      // Drawn, not only named: the character the font is asked for.
+      const STASH = '"\uec26"';
+      const drawn = (g) => (g ? getComputedStyle(g, "::before").content : "none");
+      const glyphs = [];
+      const seg = $$(".gh-seg-btn").find((b) => /^Stashes/.test(text(b) || ""));
+      if (seg) {
+        glyphs.push(["the Stashes segment", seg.querySelector(".codicon")]);
+        for (const row of $$(".sec-row")) glyphs.push([`the row “${text(row).slice(0, 30)}”`, row.querySelector(".codicon")]);
+        const cta = $$(".gh-head-cta, .gh-head .btn, .gh-head .mini-btn").find((b) => /Stash changes/.test(text(b) || ""));
+        glyphs.push(["Stash changes", cta && cta.querySelector(".codicon")]);
+      } else {
+        const btn = $$(".mini-btn").find((b) => text(b) === "Stash");
+        glyphs.push(["the Stash button", btn && btn.querySelector(".codicon")]);
+        glyphs.push(["the drop zone", $(".dc-stash-drop .codicon")]);
+      }
+      c.ok(glyphs.length > 1, `stash controls found (${glyphs.length})`);
+      for (const [what, g] of glyphs) {
+        c.ok(!!g && g.classList.contains("codicon-git-stash") && drawn(g) === STASH, `${what}: ${g ? g.className : "no glyph"} ${drawn(g)}`);
+      }
     },
 
     "a-stash-rows-pop-wears-the-stash-glyph": async (f) => {
@@ -17550,19 +18297,28 @@
       if (!front || !back || !bar || !row) return c.ok(false, "precondition: a front tab, a back tab, the bars");
       const fs = getComputedStyle(front);
       const bs = getComputedStyle(back);
-      c.eq(fs.backgroundColor, getComputedStyle(bar).backgroundColor, "the front tab wears the top bar's panel colour, so it runs into it");
+      // The owner: no rule on top and no side lines — the tab in front is lit.
       c.ok(bs.backgroundColor === "rgba(0, 0, 0, 0)" || bs.backgroundColor === "transparent", `a back tab sits on the row's ground (${bs.backgroundColor})`);
-      c.ok(fs.backgroundColor !== getComputedStyle(row).backgroundColor, "…which is a different colour from the front tab");
+      c.ok(fs.backgroundColor !== getComputedStyle(row).backgroundColor, "the front tab is filled, a different colour from the row");
+      c.ok(fs.backgroundColor !== getComputedStyle(bar).backgroundColor, "…tinted, not the top bar's plain panel");
       const accent = getComputedStyle(document.body).getPropertyValue("--gs-accent").trim();
-      c.match(fs.boxShadow, /inset/, `the front tab carries the accent rule (${fs.boxShadow})`);
-      c.ok(bs.boxShadow === "none", "a back tab carries none");
+      c.ok(!/inset/.test(fs.boxShadow), `no rule drawn inside the front tab (${fs.boxShadow})`);
+      c.match(fs.boxShadow, /\b\d+(\.\d+)?px -?\d+(\.\d+)?px \d*[1-9]\d*(\.\d+)?px/, "it glows: an outer shadow with a blur");
+      for (const side of ["Top", "Right", "Bottom", "Left"]) {
+        c.ok(parseFloat(fs[`border${side}Width`]) === 0, `no ${side.toLowerCase()} border line on the front tab`);
+      }
+      c.ok(bs.boxShadow === "none", "a back tab carries no glow");
       c.ok(Number(fs.fontWeight) > Number(bs.fontWeight), "the front tab's name is heavier");
-      c.eq(Math.round(front.getBoundingClientRect().bottom), Math.round(row.getBoundingClientRect().bottom), "it covers the row's bottom rule — no line between it and its bar");
+      c.ok(front.getBoundingClientRect().bottom < row.getBoundingClientRect().bottom - 1, "it floats in the row, clear of the row's edge");
       // Contrast, measured.
-      const lum = (rgb) => {
-        const m = /rgba?\(([^)]+)\)/.exec(rgb);
-        if (!m) return 0;
-        const [r, g, b] = m[1].split(",").map((x) => Number(x.trim()) / 255);
+      // color-mix() computes to "color(srgb r g b)" (0–1), plain colours to rgb().
+      const lum = (col) => {
+        let r, g, b;
+        const m = /rgba?\(([^)]+)\)/.exec(col);
+        const n = /color\(srgb ([^)]+)\)/.exec(col);
+        if (m) [r, g, b] = m[1].split(",").map((x) => Number(x.trim()) / 255);
+        else if (n) [r, g, b] = n[1].trim().split(/\s+/).map(Number);
+        else return NaN;
         const lin = (v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
         return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
       };
@@ -17570,6 +18326,7 @@
         const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p);
         return (x + 0.05) / (y + 0.05);
       };
+      c.ok(!Number.isNaN(lum(fs.backgroundColor)), `the front tab's colour is measurable (${fs.backgroundColor})`);
       const rowBg = getComputedStyle(row).backgroundColor;
       c.ok(ratio(bs.color, rowBg) >= 4.5, `a back tab's name reads on the row (${ratio(bs.color, rowBg).toFixed(2)}:1)`);
       c.ok(ratio(fs.color, fs.backgroundColor) >= 7, `the front tab's name reads strongly (${ratio(fs.color, fs.backgroundColor).toFixed(2)}:1)`);
@@ -17882,6 +18639,169 @@
       tabEl(GS_ROOT)?.click();
       await settle(800);
       c.eq(text(".nav-item.active"), "Repositories", "the tab it was opened from is still on Repositories");
+    },
+
+    /**
+     * The top bar of the tab in front is filled for THAT tab — its branch
+     * pill, its sync control, its editor button — however the tab came to
+     * the front (the owner: "checking out a repo doesn't load the branch").
+     *
+     * Every read here answers late (?slow= on head:get, refs:list and
+     * sync:status), so each answer lands AFTER whatever moves next: an open's
+     * own landing (Repositories' Open and Clone, Home's rows, all land on
+     * Code), or the first click a person makes while git is still answering.
+     * The pill used to be guarded by the route generation, which every route
+     * bumps, so that answer was thrown away and the pill said "…" for the
+     * rest of the tab's life — nothing asked again.
+     *
+     * `arg` is the door: repositories, clone, home, open, recent, worktree,
+     * switch, launch. With ?norepo=1, repositories and home open from the
+     * window with no tab (a fresh launch, or the last tab closed) — the most
+     * common first open, and another road: the no-repository screen hands its
+     * landing to the new tab.
+     */
+    "a-tabs-top-bar-fills-however-it-came-to-the-front": async (f) => {
+      const c = check(f);
+      const door = window.__GS_ARG || "repositories";
+      const SLOW = 700;
+      const WEBAPP = "/Users/anton/Code/webapp";
+      const WT = "/Users/anton/Developer/GitStudioHQ/gitstudio-wave2";
+      const invoked = () => window.__GS_INVOKED || [];
+      const asked = (channel, root) => invoked().filter((r) => r.channel === channel && r.root === root).length;
+      const rail = (view) => $(`.nav-item[data-view="${view}"]`);
+      /** The first click a person makes in the new tab, before git answered —
+       *  to a view that reads nothing of the top bar's (Branches re-reads HEAD
+       *  itself, which would fill the pill by another road). */
+      const clickOnAtOnce = async () => {
+        const to = text(".nav-item.active") === "Commits" ? "changes" : "graph";
+        rail(to)?.click();
+        await settle(50);
+      };
+      /**
+       * Everything the top bar says about `root`, once its answers are in.
+       * `once`: the pill filled from the FIRST head:get this tab asked — one
+       * status read, no second one needed to fill it.
+       */
+      const filledFor = (root, want, what, once = true) => {
+        const name = root.split("/").pop();
+        c.eq(activeTabRoot(), root, `${what}: its tab is in front`);
+        c.eq(text(".topbar-branch .switch-name"), want.branch, `${what}: the pill names its branch`);
+        const main = $(".topbar-sync .sync-main");
+        c.ok(!!main && getComputedStyle($(".topbar-sync")).display !== "none", `${what}: the sync control is shown`);
+        c.eq(text(main), want.sync, `${what}: the sync control is its own`);
+        c.match(main?.title || "", new RegExp(name.replace(/\./g, "\\.")), `${what}: …and names the repository it acts on`);
+        const openIn = $(".topbar-openin");
+        c.eq(openIn?.getAttribute("aria-label"), `Open ${name} in an editor`, `${what}: the editor button opens this repository`);
+        c.ok(!!openIn && text(openIn.querySelector(".openin-label")) !== "Open in…", `${what}: …and names its editor (${text(openIn?.querySelector(".openin-label"))})`);
+        if (once) c.eq(asked("head:get", root), 1, `${what}: filled from the first status read`);
+      };
+      // The tab the window starts with is filled before anything moves —
+      // except at launch, where moving while it loads is the point, and in a
+      // window with no tab at all.
+      const norepo = new URLSearchParams(location.search).has("norepo");
+      if (norepo) {
+        await settle(SLOW + 500);
+        c.eq($$(".repo-tab").length, 0, "precondition: no repository is open");
+      } else if (door !== "launch") {
+        await settle(SLOW + 500);
+        c.eq(text(".topbar-branch .switch-name"), "main", "precondition: the first tab's pill is filled");
+      }
+
+      if (door === "repositories" || door === "home") {
+        const want = "/Users/demo/GitStudio/gistudio.dev";
+        const row =
+          door === "home"
+            ? $$(".view-host .dash-line").find((r) => text(r.querySelector(".dash-line-text")) === "gistudio.dev")
+            : $$(".sec-row.repo-row").find((r) => r.dataset.root === want);
+        if (!row) return c.ok(false, `precondition: a ${door} row for gistudio.dev`);
+        row.click();
+        await settle(SLOW + 700);
+        c.eq(text(".nav-item.active"), "Code", "precondition: the open landed on its code");
+        filledFor(want, { branch: "main", sync: "Push 2" }, norepo ? `${door}, in a window with no tab` : door);
+        return;
+      }
+      if (door === "clone") {
+        const btn = $$(".view-host .mini-btn").find((b) => text(b) === "Clone…");
+        if (!btn) return c.ok(false, "precondition: Repositories' Clone…");
+        btn.click();
+        await settle(500);
+        const url = $(".clone-card .clone-url-input");
+        if (!url) return c.ok(false, "precondition: the clone dialog");
+        url.value = "https://github.com/libgit2/libgit2.git";
+        url.dispatchEvent(new Event("input", { bubbles: true }));
+        $(".clone-card .clone-choose")?.click();
+        await settle(500);
+        $(".clone-card .clone-go")?.click();
+        await settle(SLOW + 900);
+        c.eq(text(".nav-item.active"), "Code", "precondition: the clone landed on its code");
+        filledFor("/Users/demo/Code/libgit2", { branch: "main", sync: "Push 2" }, "clone");
+        return;
+      }
+      if (door === "open" || door === "recent") {
+        if (door === "open") {
+          window.__gsEmit("menu:command", { command: "openRepo" });
+        } else {
+          $(".repo-tabs-add")?.click();
+          await settle(400);
+          const item = $$(".dropdown .dropdown-item").find((r) => /^gistudio\.dev/.test(text(r)));
+          if (!item) return c.ok(false, `precondition: the + menu's recent gistudio.dev (${$$(".dropdown .dropdown-item").map(text).join(" | ")})`);
+          item.click();
+        }
+        await settle(150);
+        await clickOnAtOnce();
+        await settle(SLOW + 700);
+        if (door === "open") filledFor(WEBAPP, { branch: "feature/login", sync: "Publish" }, "Open…");
+        else filledFor(GS_DEV_ROOT, { branch: "site/pricing", sync: "Pull 1" }, "a recent repository");
+        return;
+      }
+      if (door === "worktree") {
+        const btn = $$(".view-host button.row-btn").find((b) => (b.getAttribute("aria-label") || "").includes("gitstudio-wave2"));
+        if (!btn) return c.ok(false, "precondition: the worktree's Open");
+        btn.click();
+        await settle(150);
+        await clickOnAtOnce();
+        await settle(SLOW + 700);
+        filledFor(WT, { branch: "main", sync: "Push 2" }, "a worktree's Open");
+        return;
+      }
+      if (door === "switch") {
+        // B comes to the front for the first time, is clicked on at once, and
+        // is left for C before any of its answers: they land while B is in the
+        // back, and are painted when B is in front again.
+        tabEl(GS_DEV_ROOT)?.click();
+        await settle(150);
+        await clickOnAtOnce();
+        tabEl(WEBAPP)?.click();
+        await settle(150);
+        await clickOnAtOnce();
+        await settle(SLOW + 700);
+        filledFor(WEBAPP, { branch: "feature/login", sync: "Publish" }, "C");
+        // B's one status read is in; coming back also asks the disk whether
+        // anything moved (refreshIfDiskMoved), which is not a pill read.
+        c.eq(asked("head:get", GS_DEV_ROOT), 1, "B: one status read while it was in the back");
+        tabEl(GS_DEV_ROOT)?.click();
+        await settle(400);
+        filledFor(GS_DEV_ROOT, { branch: "site/pricing", sync: "Pull 1" }, "B, back in front", false);
+        tabEl(GS_ROOT)?.click();
+        await settle(SLOW + 400);
+        filledFor(GS_ROOT, { branch: "main", sync: "Push 2" }, "A, back in front", false);
+        return;
+      }
+      if (door === "launch") {
+        // Both tabs came back at launch (?latetabs=1); the front one's reads
+        // are still out (?slow= is long here). A click on at once.
+        c.eq(text(".topbar-branch .switch-name"), "…", "precondition: the restored tab's reads are still out");
+        await clickOnAtOnce();
+        await settle(2600);
+        filledFor(GS_ROOT, { branch: "main", sync: "Push 2" }, "the restored tab in front");
+        tabEl(GS_DEV_ROOT)?.click();
+        await settle(150);
+        await clickOnAtOnce();
+        await settle(2600);
+        filledFor(GS_DEV_ROOT, { branch: "site/pricing", sync: "Pull 1" }, "the other restored tab");
+        return;
+      }
+      c.ok(false, `unknown door ${door}`);
     },
 
     /** Row 3: a watcher event about the tab you LEFT does not refresh this one. */
@@ -18823,6 +19743,206 @@
       const back = calls().length;
       await settle(9500);
       c.ok(calls().length > back, `back in front, it polls again (${channel}: ${back} → ${calls().length})`);
+    },
+    /**
+     * THE OWNER'S RULE, swept: nothing selected, active or current is marked
+     * with a line. Every element in the scene wearing a selected state — a
+     * class (.active, .is-active, .is-selected, .is-sel, .selected,
+     * .is-current, .current, .is-on, .row-landed, .is-mine, .focused,
+     * .checked, .is-checked) or aria (aria-selected, aria-current,
+     * aria-pressed, aria-checked) — is compared by COMPUTED style with an
+     * unselected sibling of its kind, and fails on any line the sibling does
+     * not draw: an inset box-shadow bar, an inset or hard outer ring, a border
+     * side (or one in another hue), an outline, an underline, a gradient with
+     * a hard stop, a ::before/::after strip (one the sibling holds at opacity
+     * 0 counts as absent there), or a child element or child border used as a
+     * bar. Drag and drop markers, focus rings and the shared diff/merge
+     * surfaces are not selection and are not measured.
+     *
+     * `arg` names what the scene exists to reach (".cmdk-row.is-selected"):
+     * it must be among the elements measured, so a scene that stopped reaching
+     * its surface fails instead of passing over nothing — and it must be
+     * filled VISIBLY differently from its sibling, composited, not merely
+     * with a different string.
+     *
+     * And every word on a tint reads (selected-text-reads, folded in so that
+     * each scene costs one browser): a tint that replaced a line eats the
+     * contrast of what sits on it.
+     *
+     * Light DOM: the graph, rail, commit details and rebase view are Lit
+     * components from packages/webview-ui — see the shared-views check below.
+     */
+    "no-selection-is-drawn-as-a-line": async (f) => {
+      const c = check(f);
+      await settle(400);
+      noAnimation();
+      await settle(120);
+      const marked = selectedOnScreen();
+      litNotLined(c, marked, window.__GS_ARG);
+      selectedTextReads(c, marked);
+      underThePointer(c, marked);
+    },
+    /**
+     * The same sweep INSIDE the shared views' shadow roots — the graph's
+     * selected commit, its branch popover's active preset. They are built by
+     * packages/webview-ui and restyled with the extension, so the cases that
+     * run this are `pending` until that lands; a light-DOM-only sweep passed
+     * over a 2px accent bar down the selected commit in the Commits view, the
+     * desktop's most-used list.
+     */
+    "no-selection-is-drawn-as-a-line-in-shared-views": async (f) => {
+      const c = check(f);
+      await settle(400);
+      noAnimation();
+      for (const root of shadowRoots()) {
+        const st = document.createElement("style");
+        st.textContent = "*,*::before,*::after{transition:none!important;animation:none!important}";
+        root.appendChild(st);
+      }
+      await settle(120);
+      const marked = onScreen(shadowRoots().flatMap((r) => [...r.querySelectorAll(SELECTED_STATE)]));
+      litNotLined(c, marked, window.__GS_ARG);
+      // …and every word on them reads, at rest and under the pointer (the
+      // "+1" chip on the lit commit read 4.29:1 in light, never measured).
+      selectedTextReads(c, marked);
+      underThePointer(c, marked);
+    },
+    /**
+     * The guard itself has to SEE every shape a line can take: a review drew
+     * the owner's GO TO bar through a full-size ::before, blurred an inset bar
+     * 2px, grew a ::before from width 0, put an underline on a label by
+     * box-shadow and a drop-shadow under a segment, and the sweep passed all
+     * of it. Each shape here is a small list of rows, one of them selected
+     * and wearing the shape; selectionLines() must report it (a hover shape,
+     * with the pointer forced onto it). The rows beside them — a tint and a
+     * glow, a soft lift, the neutral sheen, a divider every row has, an
+     * avatar's ring in the page's colour, a hover that deepens — must not be.
+     */
+    "the-line-guard-sees-every-shape": async (f) => {
+      const c = check(f);
+      await settle(200);
+      noAnimation();
+      const A = "#7c5cf0";
+      const SHAPES = [
+        ["a hard inset bar", `.X.is-selected { box-shadow: inset 3px 0 0 ${A}; }`],
+        ["an inset bar blurred 2px", `.X.is-selected { box-shadow: inset 3px 0 2px ${A}; }`],
+        ["an inset bar blurred 4px", `.X.is-selected { box-shadow: inset 2px 0 4px ${A}; }`],
+        ["a hard outer underline", `.X.is-selected { box-shadow: 0 2px 0 ${A}; }`],
+        ["an outer ring", `.X.is-selected { box-shadow: 0 0 0 1px ${A}; }`],
+        ["a drop-shadow filter underline", `.X.is-selected { filter: drop-shadow(0 2px 0 ${A}); }`],
+        ["a full-size ::after carrying a border side", `.X::after { content: ""; position: absolute; inset: 0; pointer-events: none; } .X.is-selected::after { border-bottom: 2px solid ${A}; }`],
+        ["a full-size ::before carrying an inset bar (the GO TO bar)", `.X.is-selected::before { content: ""; position: absolute; inset: 0; box-shadow: inset 3px 0 0 ${A}; pointer-events: none; }`],
+        ["a ::before grown from width 0", `.X::before { content: ""; position: absolute; left: 0; top: 3px; bottom: 3px; width: 0; background: ${A}; } .X.is-selected::before { width: 3px; }`],
+        ["an ::after grown from height 0", `.X::after { content: ""; position: absolute; left: 8px; right: 8px; bottom: 0; height: 0; background: ${A}; } .X.is-selected::after { height: 2px; }`],
+        ["a ::before at opacity 0 switched on", `.X::before { content: ""; position: absolute; left: 0; top: 3px; bottom: 3px; width: 3px; background: ${A}; opacity: 0; } .X.is-selected::before { opacity: 1; }`],
+        ["an inset underline on a label", `.X.is-selected .lbl { box-shadow: inset 0 -2px 0 ${A}; }`],
+        ["an outline on a label", `.X.is-selected .lbl { outline: 1px solid ${A}; outline-offset: 2px; }`],
+        ["a border under a label", `.X.is-selected .lbl { border-bottom: 2px solid ${A}; }`],
+        ["an underline on a label", `.X.is-selected .lbl { text-decoration: underline; }`],
+        ["a child made into a bar", `.X.is-selected .lbl { display: inline-block; width: 3px; height: 16px; background: ${A}; overflow: hidden; }`],
+        ["a child bar grown from width 0", `.X .lbl { display: inline-block; width: 0; height: 16px; background: ${A}; overflow: hidden; } .X.is-selected .lbl { width: 3px; }`],
+        ["a gradient with a hard stop", `.X.is-selected { background: linear-gradient(90deg, ${A} 0 3px, transparent 3px); }`],
+        ["a border side", `.X.is-selected { border-left: 2px solid ${A}; }`],
+        ["an accent outline", `.X.is-selected { outline: 1px solid ${A}; outline-offset: -1px; }`],
+        ["a grey hairline underline only the selected one has", `.X.is-selected { border-bottom: 1px solid var(--app-fg, #888); }`],
+        ["a grey hairline ::after only the selected one has", `.X.is-selected::after { content: ""; position: absolute; left: 10px; right: 10px; bottom: 2px; height: 1px; background: #888; }`],
+      ];
+      const FINE = [
+        ["a tint and a glow", `.X.is-selected { box-shadow: 0 0 16px -4px color-mix(in srgb, ${A} 70%, transparent); }`],
+        ["the neutral sheen", `.X.is-selected { box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.055); }`],
+        ["a soft lift", `.X.is-selected { box-shadow: 0 1px 3px color-mix(in srgb, ${A} 32%, transparent), 0 0 12px -3px color-mix(in srgb, ${A} 60%, transparent); }`],
+        ["a soft drop-shadow filter", `.X.is-selected { filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.4)); }`],
+        ["a divider every row has", `.X { border-bottom: 1px solid #444; }`],
+        ["a rule between rows (the first has none)", `.X + .X { border-top: 1px solid #444; }`],
+        ["an avatar's ring in the page's colour", `.X .lbl { outline: 2px solid var(--app-bg); }`],
+        ["a hover that deepens the tint", `.X.is-selected:hover { background: color-mix(in srgb, ${A} 32%, transparent); }`],
+      ];
+      const HOVER = [["a bar only under the pointer", `.X.is-selected:hover { box-shadow: inset 3px 0 0 ${A}; }`]];
+      const all = [...SHAPES.map((x, i) => ["shape-" + i, ...x]), ...HOVER.map((x, i) => ["hover-" + i, ...x]), ...FINE.map((x, i) => ["fine-" + i, ...x])];
+      const st = document.createElement("style");
+      st.textContent =
+        ".gsg-grp { position: relative; width: 320px; } .gsg-row { position: relative; display: flex; gap: 6px; align-items: center; height: 22px; padding: 0 8px; color: var(--vscode-foreground); } .gsg-row.is-selected { background: var(--sel-fill); }\n" +
+        all.map(([k, , css]) => css.replace(/\.X\b/g, ".gsg-row." + k)).join("\n");
+      document.head.appendChild(st);
+      const host = document.createElement("div");
+      host.style.cssText = "position: fixed; left: 0; top: 0; z-index: 99999; background: var(--app-bg); max-height: 100vh; overflow: auto";
+      const groups = new Map();
+      for (const [k] of all) {
+        const g = document.createElement("div");
+        g.className = "gsg-grp";
+        const rows = [0, 1, 2].map((i) => {
+          const r = document.createElement("div");
+          r.className = "gsg-row " + k + (i === 1 ? " is-selected" : "");
+          r.innerHTML = '<span class="lbl">Row ' + i + '</span><span class="word">feature/checkout</span>';
+          g.appendChild(r);
+          return r;
+        });
+        host.appendChild(g);
+        groups.set(k, rows);
+      }
+      document.body.appendChild(host);
+      c.ok(prepareHover(), "hover can be forced (the stylesheets can be read)");
+      for (const [k, what, css] of all) {
+        const [before, sel] = groups.get(k);
+        let lines = selectionLines(sel, before);
+        if (k.startsWith("hover-")) {
+          setHover(sel, true);
+          const vsRest = selectionLines(sel, before);
+          setHover(before, true);
+          const vsHovered = new Set(selectionLines(sel, before));
+          setHover(before, false);
+          setHover(sel, false);
+          lines = vsRest.filter((l) => vsHovered.has(l) && !lines.includes(l));
+        }
+        if (k.startsWith("fine-")) c.eq(lines.join("; "), "", `not a line: ${what}`);
+        else c.ok(lines.length > 0, `seen: ${what} (${css})`);
+      }
+    },
+    /**
+     * The contrast half of the sweep on its own (the sweep runs it too): every
+     * word inside every selected element on screen reads under WCAG AA.
+     */
+    "selected-text-reads": async (f) => {
+      const c = check(f);
+      await settle(400);
+      noAnimation();
+      await settle(120);
+      const marked = selectedOnScreen();
+      c.ok(marked.length > 0, "precondition: something in the scene is selected");
+      const want = window.__GS_ARG;
+      if (want) c.ok(marked.some((el) => el.matches(want)), `precondition: the scene reaches ${want}`);
+      selectedTextReads(c, marked);
+      underThePointer(c, marked);
+    },
+    /**
+     * A segmented control's selected pill keeps its SHAPE with no line. Light
+     * lost it once: the white pill went (its 0.5px hairline ring was a line)
+     * and what was left — a 16% tint into white on a grey track, with a glow
+     * too faint to see — stood 1.03:1 off its idle neighbour, so the selection
+     * rested on the violet word alone. The pill has to stand off the track by
+     * its fill (1.15:1, composited), glow in the accent past its own edge,
+     * draw no line, and keep its label readable.
+     */
+    "the-selected-segment-reads-as-a-pill": async (f) => {
+      const c = check(f);
+      await settle(300);
+      noAnimation();
+      await settle(120);
+      const sel = window.__GS_ARG || ".gh-seg-btn.active";
+      const on = $(sel);
+      c.ok(!!on, `the scene shows ${sel}`);
+      if (!on) return;
+      const off = unselectedSibling(on);
+      c.ok(!!off, "…beside an unselected segment");
+      if (!off) return;
+      const { ratio } = fillApart(on, off);
+      c.ok(ratio >= 1.15, `the pill stands off its idle neighbour by its fill: ${ratio.toFixed(2)}:1 (needs 1.15)`);
+      const cs = getComputedStyle(on);
+      const glow = shadowsOf(cs.boxShadow).filter((s) => !s.inset && s.blur >= 4 && hued(s.colour) && (rgbaOf(s.colour)?.a ?? 1) >= 0.3 && s.spread + s.blur / 2 >= 1);
+      c.ok(glow.length > 0, `it glows in the accent past its own edge (${cs.boxShadow})`);
+      c.eq(selectionLines(on, off).join("; "), "", "it is marked with no line of any kind");
+      c.eq(unreadableIn(on).map((u) => `"${u.text}" ${u.ratio.toFixed(2)}:1`).join("; "), "", "its label reads");
+      underThePointer(c, [on]);
     },
   };
 })();

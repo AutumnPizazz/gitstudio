@@ -265,8 +265,9 @@ interface Row {
   extra?: Record<string, unknown>;
 }
 const rows: Row[] = [];
-/** The envelope's toast, with Undo: "<label> — done.", "<label> stopped — finish
- *  it, or Undo." (git is waiting on the user), or "<label> did not finish.". */
+/** The envelope's toast, with Undo: "GitStudio: <label> — done.", "GitStudio:
+ *  <label> stopped — finish it, or Undo." (git is waiting on the user), or
+ *  "GitStudio: <label> did not finish.". */
 const UNDO_TOAST = / — done\.$| stopped — finish it, or Undo\.$| did not finish\.$/;
 after(() => {
   if (process.env.UNDO_AUDIT_OUT) writeFileSync(process.env.UNDO_AUDIT_OUT, JSON.stringify(rows, null, 2));
@@ -646,7 +647,7 @@ cell({
   op: (f) => runCommitAction("cherryPick", f.ctx, { sha: sha(f, "feature"), subject: "F" }, f.undoRunner),
   expect: (f, s, { row }) => {
     // Stopped for the user, not done: the toast beside "needs a decision" says so.
-    assert.deepEqual(row.opToasts, [`Cherry-pick ${sha(f, "feature").slice(0, 7)} stopped — finish it, or Undo.`]);
+    assert.deepEqual(row.opToasts, [`GitStudio: Cherry-pick ${sha(f, "feature").slice(0, 7)} stopped — finish it, or Undo.`]);
     isAt(f, "refs/heads/main", "M", "main at M");
     assert.deepEqual(s.status, [], "clean");
     assert.equal(s.op, "none", "no cherry-pick left in progress");
@@ -933,7 +934,7 @@ cell({
     return branchActions.rebaseCurrentOnto(f.repos, node("main"), noop);
   },
   expect: (f, s, { row }) => {
-    assert.deepEqual(row.opToasts, ["Rebase onto main stopped — finish it, or Undo."]);
+    assert.deepEqual(row.opToasts, ["GitStudio: Rebase onto main stopped — finish it, or Undo."]);
     assert.equal(s.op, "none", "no rebase left in progress");
     onBranch(f, "feature", "back on feature");
     assert.equal(sha(f, "refs/heads/feature"), f.memo.F, "feature at the ORIGINAL F");
@@ -1019,15 +1020,15 @@ cell({
   expect: (f, _s, { row, undoSaid }) => {
     assert.ok(hasRef(f, "refs/heads/feature"), "feature still exists");
     assert.equal(row.opRecordedUndo, false, "no 'Delete branch feature — done.' toast for a delete that did not happen");
-    assert.ok(undoSaid.includes("info: Nothing to undo."), `Undo has nothing to undo (said: ${undoSaid.join(" / ")})`);
+    assert.ok(undoSaid.includes("info: GitStudio: Nothing to undo."), `Undo has nothing to undo (said: ${undoSaid.join(" / ")})`);
   },
 });
 
-// ══ 5. Stashes view: Pop / Drop ═════════════════════════════════════════════
+// ══ 5. Stashes (the Changes view's Stashes group): Pop / Drop / Move ════════
 
 cell({
   id: "E33",
-  operation: "Pop stash@{0} (Stashes view)",
+  operation: "Pop stash@{0} (Stashes group)",
   state: "on main, clean; one stash holding an edit to f.txt",
   expected: "the stash is back in the list and the tree is clean again (as before the pop)",
   setup: (f) => {
@@ -1036,7 +1037,7 @@ cell({
   },
   op: (f) => stashesView.popStash(f.repos, "stash@{0}", noop),
   expect: (f, s, { row }) => {
-    assert.deepEqual(row.opToasts, ["Pop stash@{0} — done."], "a pop that finished is done");
+    assert.deepEqual(row.opToasts, ["GitStudio: Pop “my work” — done."], "a pop that finished is done, named by its words — stash@{0} names whichever stash is on top by the time it is read");
     const workSomewhere = s.stashes.length === 1 || f.read("f.txt") === "stashed work\n";
     assert.ok(workSomewhere, `the stashed work is gone: not in the stash list (${s.stashes.join(";") || "empty"}) and not in f.txt (${JSON.stringify(f.read("f.txt"))})`);
     assert.equal(s.stashes.length, 1, "the stash is back");
@@ -1045,7 +1046,7 @@ cell({
 
 cell({
   id: "E34",
-  operation: "Pop stash@{0} (Stashes view)",
+  operation: "Pop stash@{0} (Stashes group)",
   state: "on main with an unrelated uncommitted edit (g.txt); stash holds an edit to f.txt",
   expected: "stash back in the list, g.txt edit kept",
   setup: (f) => {
@@ -1064,7 +1065,7 @@ cell({
 
 cell({
   id: "E35",
-  operation: "Drop stash@{0} (Stashes view)",
+  operation: "Drop stash@{0} (Stashes group)",
   state: "on main, clean; one stash",
   expected: "the stash is back (the confirm says 'GitStudio's Undo can bring the stash back')",
   setup: (f) => {
@@ -1075,14 +1076,61 @@ cell({
     answer = yes();
     return stashesView.dropStash(f.repos, "stash@{0}", noop);
   },
-  expect: (_f, s) => {
+  expect: (_f, s, { row }) => {
     assert.deepEqual(s.stashes, ["On main: my work"], "the stash is back");
+    assert.deepEqual(row.opToasts, ["GitStudio: Drop “my work” — done."], "named by its words, not stash@{0}");
+  },
+});
+
+cell({
+  id: "E66",
+  operation: "Move to Changes: one file of a two-file stash (Stashes group)",
+  state: "on main, clean; a stash holding edits to f.txt and g.txt",
+  expected: "the whole stash is back where it was, what was left of it is gone, and f.txt is as before",
+  setup: (f) => {
+    f.commit("G", "g.txt", "g\n");
+    f.write("other.txt", "older\n");
+    f.git("stash", "push", "-q", "-u", "-m", "older");
+    f.write("f.txt", "stashed f\n");
+    f.write("g.txt", "stashed g\n");
+    f.git("stash", "push", "-q", "-m", "my work");
+    f.memo.stash = f.git("rev-parse", "stash@{0}");
+    f.memo.list = f.git("stash", "list", "--format=%H");
+  },
+  op: (f) => stashesView.moveStashFiles(f.repos, f.memo.stash, ["f.txt"], noop),
+  expect: (f, s, { row }) => {
+    assert.equal(row.afterOp.includes(" M f.txt"), true, `the file came out of the stash (${row.afterOp})`);
+    assert.deepEqual(row.opToasts, ["GitStudio: Move 1 file out of “my work” — done."]);
+    // The question names the stash as the toast does, and its place in words.
+    assert.match(row.undoAsked.join("\n"), /Put the stash “my work” back on top of the stash list\./);
+    assert.doesNotMatch(row.undoAsked.join("\n"), /stash@\{|On main:/);
+    assert.equal(f.git("stash", "list", "--format=%H"), f.memo.list, "the same stashes, in the same places");
+    assert.equal(f.read("f.txt"), "base\n");
+    assert.deepEqual(s.status, []);
+  },
+});
+
+cell({
+  id: "E67",
+  operation: "Move to Changes: every file of a stash (Stashes group)",
+  state: "on main, clean; a stash holding one edit",
+  expected: "moving every file is a Pop: Undo puts the stash back",
+  setup: (f) => {
+    f.write("f.txt", "stashed work\n");
+    f.git("stash", "push", "-q", "-m", "my work");
+    f.memo.stash = f.git("rev-parse", "stash@{0}");
+  },
+  op: (f) => stashesView.moveStashFiles(f.repos, f.memo.stash, ["f.txt"], noop),
+  expect: (f, s, { row }) => {
+    assert.deepEqual(row.opToasts, ["GitStudio: Pop “my work” — done."]);
+    assert.deepEqual(s.stashes, ["On main: my work"], "the stash is back");
+    assert.equal(f.read("f.txt"), "base\n");
   },
 });
 
 cell({
   id: "E51",
-  operation: "Pop stash@{0} (Stashes view)",
+  operation: "Pop stash@{0} (Stashes group)",
   state: "the pop CONFLICTS with a commit made since (git keeps the stash)",
   expected: "conflict gone, tree as before the pop, stash still in the list",
   setup: (f) => {
@@ -1093,7 +1141,7 @@ cell({
   op: (f) => stashesView.popStash(f.repos, "stash@{0}", noop),
   expect: (f, s, { row }) => {
     // git applied it with conflicts and kept it: the pop did not finish.
-    assert.deepEqual(row.opToasts, ["Pop stash@{0} did not finish."]);
+    assert.deepEqual(row.opToasts, ["GitStudio: Pop “my work” did not finish."]);
     assert.deepEqual(s.stashes, ["On main: my work"], "the stash is still there");
     assert.equal(f.read("f.txt"), "committed since\n", "the tree is as before the pop");
     assert.deepEqual(s.status, []);
@@ -1410,7 +1458,7 @@ cell({
   expect: (_f, s, { row, undoSaid }) => {
     row.extra = { note: "`git stash create` is refused over an unmerged index: the tree it changed can't be put back, so a change to it alone is not recorded" };
     assert.equal(row.opRecordedUndo, false, "no ledger entry was offered");
-    assert.ok(undoSaid.includes("info: Nothing to undo."), undoSaid.join(" / "));
+    assert.ok(undoSaid.includes("info: GitStudio: Nothing to undo."), undoSaid.join(" / "));
     assert.equal(s.op, "merge", "the merge is still in progress");
   },
 });
@@ -1536,7 +1584,7 @@ cell({
 
 cell({
   id: "E54",
-  operation: "Drop stash@{0} (Stashes view)",
+  operation: "Drop stash@{0} (Stashes group)",
   state: "a merge stopped on f.txt; one stash",
   expected: "the stash is back",
   setup: (f) => {
@@ -1581,7 +1629,7 @@ cell({
   },
   expect: (f, _s, { row, undoSaid }) => {
     assert.equal(row.opRecordedUndo, false, "no 'Delete branch — done.' for a delete that didn't happen");
-    assert.ok(undoSaid.includes("info: Nothing to undo."), undoSaid.join(" / "));
+    assert.ok(undoSaid.includes("info: GitStudio: Nothing to undo."), undoSaid.join(" / "));
     assert.equal(f.read("f.txt"), "typed while the question was open\n");
     assert.ok(hasRef(f, "refs/heads/feature"));
   },
@@ -1628,7 +1676,7 @@ cell({
   },
   expect: (f, _s, { row, undoSaid }) => {
     assert.equal(row.opRecordedUndo, false, "a cancelled merge offers no Undo");
-    assert.ok(undoSaid.includes("info: Nothing to undo."), undoSaid.join(" / "));
+    assert.ok(undoSaid.includes("info: GitStudio: Nothing to undo."), undoSaid.join(" / "));
     assert.equal(f.read("f.txt"), "typed while the question was open\n");
     assert.equal(f.read("g.txt"), "in the way\n");
   },
@@ -1650,7 +1698,7 @@ cell({
   },
   expect: (f, _s, { row, undoSaid }) => {
     assert.equal(row.opRecordedUndo, false, "a cancelled rebase offers no Undo");
-    assert.ok(undoSaid.includes("info: Nothing to undo."), undoSaid.join(" / "));
+    assert.ok(undoSaid.includes("info: GitStudio: Nothing to undo."), undoSaid.join(" / "));
     assert.equal(f.read("f.txt"), "typed while the question was open\n");
     assert.equal(f.read("feat.txt"), "uncommitted\n");
   },
@@ -1683,7 +1731,7 @@ cell({
     assert.equal(state(f).op, "cherry-pick,sequence", "stopped on B, with C still queued");
   },
   expect: async (f, s, { undoAsked, row }) => {
-    assert.deepEqual(row.opToasts, ["Cherry-pick 3 commits stopped — finish it, or Undo."], "stopped, not done");
+    assert.deepEqual(row.opToasts, ["GitStudio: Cherry-pick 3 commits stopped — finish it, or Undo."], "stopped, not done");
     assert.equal(sha(f, "HEAD"), f.memo.before, "main back where it was");
     assert.equal(s.op, "none", "no cherry-pick left in progress");
     assert.deepEqual(s.status, []);
@@ -1718,7 +1766,7 @@ cell({
     assert.equal(state(f).op, "revert,sequence", "stopped on B, with A still queued");
   },
   expect: async (f, s, { undoAsked, row }) => {
-    assert.deepEqual(row.opToasts, ["Revert 2 commits stopped — finish it, or Undo."], "stopped, not done");
+    assert.deepEqual(row.opToasts, ["GitStudio: Revert 2 commits stopped — finish it, or Undo."], "stopped, not done");
     assert.equal(sha(f, "HEAD"), f.memo.before, "main where it was");
     assert.equal(s.op, "none", "no revert left in progress");
     assert.deepEqual(s.status, []);
@@ -1745,7 +1793,7 @@ cell({
     assert.equal(state(f).op, "rebase", "stopped replaying D");
   },
   expect: (f, s, { row }) => {
-    assert.deepEqual(row.opToasts, ["Drop 2 commits stopped — finish it, or Undo."], "stopped, not done");
+    assert.deepEqual(row.opToasts, ["GitStudio: Drop 2 commits stopped — finish it, or Undo."], "stopped, not done");
     assert.equal(s.op, "none", "no rebase left in progress");
     onBranch(f, "main", "on main");
     assert.equal(sha(f, "refs/heads/main"), f.memo.D, "main back at D");

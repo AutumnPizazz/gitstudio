@@ -15,6 +15,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { configurationProperties } from "@gitstudio/merge-vscode/contract";
 
 const ROOT = join(__dirname, "..");
 const readme = readFileSync(join(ROOT, "README.md"), "utf8");
@@ -22,7 +23,7 @@ const manifestText = readFileSync(join(ROOT, "package.json"), "utf8");
 const pkg = JSON.parse(manifestText) as {
   contributes: {
     keybindings: { command: string; key: string; mac?: string }[];
-    configuration: { properties: Record<string, { default?: unknown }> };
+    configuration: unknown;
     views: Record<string, { id: string; name: string }[]>;
     walkthroughs: { steps: { id: string; description: string }[] }[];
   };
@@ -52,7 +53,8 @@ test("the README does not promise Enter commits", () => {
 });
 
 test("nothing says AI is off by default while the provider defaults to auto", () => {
-  assert.equal(pkg.contributes.configuration.properties["gitstudio.ai.provider"].default, "auto");
+  const props = configurationProperties(pkg.contributes.configuration) as Record<string, { default?: unknown }>;
+  assert.equal(props["gitstudio.ai.provider"].default, "auto");
   const offByDefault = /[Oo]ff by default|[Oo]ff until you turn it on/;
   assert.doesNotMatch(readme, offByDefault);
   assert.doesNotMatch(step("gitstudio.walkthrough.connect"), offByDefault);
@@ -67,6 +69,17 @@ test("the walkthrough places the graph where it is", () => {
   assert.doesNotMatch(graph, /editor tab/);
   assert.match(graph, /\*\*Commits\*\* view/);
   assert.match(graph, /\*\*Commit Graph\*\* panel/);
+});
+
+test("the README's sidebar names only views that ship; stashes are under Changes, as the walkthrough says", () => {
+  const views = new Set(pkg.contributes.views.gitstudio.map((v) => v.name));
+  assert.equal(views.has("Stashes"), false, "the premise: there is no Stashes view any more");
+  const sidebar = /The sidebar reads top-to-bottom as a workflow: (.*?)\. /.exec(readme)?.[1] ?? "";
+  const named = [...sidebar.matchAll(/\*\*([^*]+)\*\*/g)].map((m) => m[1]);
+  assert.ok(named.length > 0, "the README still says how the sidebar reads");
+  assert.deepEqual(named.filter((n) => !views.has(n)), [], "every view the README names is one the sidebar has");
+  assert.doesNotMatch(readme, /Stashes\*\* get a first-class view/);
+  assert.match(step("gitstudio.walkthrough.stage"), /stashes are listed under your changes/);
 });
 
 test("every image in media/ is used by the manifest, the README or the code", () => {

@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { NO_REPOSITORY } from "../ui/notify";
 import type { RepoManager } from "../git/repoManager";
 import { terminalIcon, terminalLabel, terminalTooltip } from "./terminalBadge";
 
@@ -11,9 +12,9 @@ import { terminalIcon, terminalLabel, terminalTooltip } from "./terminalBadge";
  * There were counters here — changed files and stashes — and they were the wrong
  * thing twice over. The file count belongs to the branch, so it lives on
  * SyncStatusItem as a dirty marker rather than as a segment of its own. The
- * stash count belongs nowhere near the status bar: there is an entire sidebar
- * view for stashes, and a number that duplicates it costs width to tell you
- * something you were not asking.
+ * stash count belongs nowhere near the status bar: the Changes view lists the
+ * stashes, with their count, and a number that duplicates it costs width to
+ * tell you something you were not asking.
  *
  * What is left are two routes that genuinely have no other one-click home.
  */
@@ -163,7 +164,7 @@ export class StatusCluster implements vscode.Disposable {
   private openTerminal(): void {
     const active = this.repos.getActive();
     if (!active) {
-      void vscode.window.showInformationMessage("GitStudio: no repository is open.");
+      void vscode.window.showInformationMessage(NO_REPOSITORY);
       return;
     }
     const name = this.terminalName();

@@ -167,6 +167,62 @@ async function main() {
     loader: { ".ttf": "dataurl" },
   });
 
+  // The Worktrees view (webview-ui/worktrees). Its .css import emits
+  // dist/webview/worktrees.css beside the bundle; views/worktreesWebview.ts
+  // links both.
+  const worktreesCtx = await esbuild.context({
+    ...base,
+    entryPoints: [path.resolve(webviewUiSrc, "worktrees/main.ts")],
+    outfile: path.resolve(__dirname, "dist/webview/worktrees.js"),
+    platform: "browser",
+    format: "iife",
+    loader: { ".ttf": "dataurl" },
+  });
+
+  // The shared commit and file rows (webview-ui/changeRows) as a page global,
+  // for the Changes view's push review — a hand-written page whose script is
+  // a string in the extension host, so it cannot import them.
+  const changeRowsCtx = await esbuild.context({
+    ...base,
+    entryPoints: [path.resolve(webviewUiSrc, "changeRows/global.ts")],
+    outfile: path.resolve(__dirname, "dist/webview/change-rows.js"),
+    platform: "browser",
+    format: "iife",
+  });
+
+  // The Pull Requests list (the shared webview-ui PullRequestList). Its .css
+  // import emits dist/webview/pr-list.css alongside the bundle; the view
+  // (src/pr/pullRequestsView.ts) links both.
+  const prListCtx = await esbuild.context({
+    ...base,
+    entryPoints: [path.resolve(webviewUiSrc, "pr/list-main.ts")],
+    outfile: path.resolve(__dirname, "dist/webview/pr-list.js"),
+    platform: "browser",
+    format: "iife",
+  });
+
+  // A pull request's page (the shared webview-ui PullRequestPage). Its .css
+  // import emits dist/webview/pr-page.css alongside the bundle; the page's
+  // editor tab (src/pr/prPage.ts) links both.
+  const prPageCtx = await esbuild.context({
+    ...base,
+    entryPoints: [path.resolve(webviewUiSrc, "pr/page-main.ts")],
+    outfile: path.resolve(__dirname, "dist/webview/pr-page.js"),
+    platform: "browser",
+    format: "iife",
+  });
+
+  // A new pull request's form (the shared webview-ui PullRequestCreate). Its
+  // .css import emits dist/webview/pr-create.css alongside the bundle; the
+  // form's editor tab (src/pr/prCreatePage.ts) links both.
+  const prCreateCtx = await esbuild.context({
+    ...base,
+    entryPoints: [path.resolve(webviewUiSrc, "pr/create-main.ts")],
+    outfile: path.resolve(__dirname, "dist/webview/pr-create.js"),
+    platform: "browser",
+    format: "iife",
+  });
+
   const contexts = [
     extensionCtx,
     webviewCtx,
@@ -176,6 +232,11 @@ async function main() {
     rebaseCtx,
     rebasePlanCtx,
     conflictsCtx,
+    worktreesCtx,
+    changeRowsCtx,
+    prListCtx,
+    prPageCtx,
+    prCreateCtx,
   ];
 
   if (watch) {

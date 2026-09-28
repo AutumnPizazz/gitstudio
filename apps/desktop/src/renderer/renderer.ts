@@ -34,6 +34,7 @@ import {
 } from "./bridge";
 import { RepoTabStrip, type TabStripItem } from "./repoTabs";
 import { stepTab, tabAtDigit, tabKeyAction } from "./tabModel";
+import { TopbarRead } from "./topbarRead";
 import { saveDraftIn, takeDraftIn } from "./draftStore";
 import { renderCommit } from "./views/commit";
 import { renderJobLog } from "./views/jobLog";
@@ -452,6 +453,10 @@ class App {
   private activeMonacoView?: { dispose(): void };
   private syncStatus?: SyncStatus;
   private renderSyncWidget?: (s: SyncStatus | undefined) => void;
+  /** The top bar's two reads — the branch pill's and the sync state's — and
+   *  which of their answers may paint (see topbarRead.ts). */
+  private readonly refsRead = new TopbarRead();
+  private readonly syncRead = new TopbarRead();
   private prSubTab = "conversation";
   /** Bumped whenever the visible surface changes; async work captures it and
    *  bails if superseded, so a slow IPC reply can't clobber a newer view. */
@@ -2253,7 +2258,7 @@ class App {
             { value: "local", label: `Local (${n.local})`, icon: "git-branch" },
             { value: "remote", label: `Remotes (${n.remote})`, icon: "cloud" },
             { value: "tags", label: `Tags (${n.tags})`, icon: "tag" },
-            { value: "stashes", label: `Stashes (${n.stashes})`, icon: "archive" },
+            { value: "stashes", label: `Stashes (${n.stashes})`, icon: "git-stash" },
             // Only when there is more than one: a single worktree is just "the
             // repository", and a segment reading "Worktrees (1)" is a tab that
             // tells you nothing.
@@ -3058,7 +3063,7 @@ class App {
     actions.push(more);
 
     const row = secRow({
-      lead: glyph("archive"),
+      lead: glyph("git-stash"),
       title: st.message || st.ref,
       meta: [span(st.ref, "stash-sel sec-mono")],
       time: st.time ? relTime(st.time) : "",
@@ -3418,8 +3423,10 @@ class App {
     const actions: HTMLElement[] = [];
     // Said and copied in the system's spelling; `w.path` (git's) is what is sent.
     const shown = w.shownPath ?? w.path;
-    // Nothing to open when its folder is gone, or for a bare repository's entry.
-    if (!w.current && !w.missing && !w.bare) {
+    // Nothing to open when its folder is gone or is not a worktree any more
+    // (a tab there would be the repository around it), or for a bare
+    // repository's entry.
+    if (!w.current && !w.missing && !w.unlinked && !w.bare) {
       const open = el("button", "row-btn") as HTMLButtonElement;
       open.textContent = "Open";
       open.setAttribute("aria-label", `Open the worktree at ${shown}`);
@@ -3438,8 +3445,9 @@ class App {
         { label: "Copy path", icon: "copy", onClick: () => void copyText(shown, "Copied the path.") },
         { separator: true },
         {
-          // Its folder gone, removing it only forgets git's record of it.
-          label: w.missing ? "Forget this worktree…" : "Remove this worktree…",
+          // Its folder gone, or not a worktree any more, removing it only
+          // forgets git's record of it.
+          label: w.missing || w.unlinked ? "Forget this worktree…" : "Remove this worktree…",
           icon: "trash",
           danger: true,
           disabled: w.current || w.main,
@@ -3485,9 +3493,13 @@ class App {
     }
     // Not only `prunable`: git never calls a LOCKED worktree prunable, even
     // with its folder gone.
-    if (w.missing || w.prunable) {
+    if (w.missing || (w.prunable && !w.unlinked)) {
       const p = span("folder missing", "ab-pill gone");
       p.title = "Its folder is gone — Forget it from the ⋯ menu";
+      pills.push(p);
+    } else if (w.unlinked) {
+      const p = span("not a worktree", "ab-pill gone");
+      p.title = "Its folder is there, but it isn't a worktree any more (its .git is gone) — Forget it from the ⋯ menu; the folder stays";
       pills.push(p);
     }
 
@@ -3569,6 +3581,7 @@ class App {
     }
     const q = worktreeRemovalQuestion({
       kind: plan.kind,
+      ...(plan.staleWhy ? { staleWhy: plan.staleWhy } : {}),
       label,
       shownPath: w.shownPath ?? w.path,
       branch: plan.branch,
@@ -3602,7 +3615,7 @@ class App {
       await this.refreshBranchesSoft();
       return;
     }
-    toast(plan.kind === "missing" ? `Forgot worktree ${label}.` : `Removed worktree ${label}.`, "success");
+    toast(plan.kind === "present" ? `Removed worktree ${label}.` : `Forgot worktree ${label}.`, "success");
     await this.refreshBranchesSoft();
   }
 
@@ -3671,7 +3684,7 @@ class App {
     }
     if (tab === "stashes") {
       // The one screen that LISTS stashes could not make one.
-      return mk("Stash changes", "archive", "Stash the working tree", () => void this.stashHere());
+      return mk("Stash changes", "git-stash", "Stash the working tree", () => void this.stashHere());
     }
     return el("span", "gh-head-cta-blank");
   }
@@ -3791,7 +3804,7 @@ class App {
       ],
     };
     const [title, desc] = copy[tab] ?? ["Nothing here", "This list is empty."];
-    return emptyState(title, desc, { icon: tab === "stashes" ? "archive" : "git-branch" });
+    return emptyState(title, desc, { icon: tab === "stashes" ? "git-stash" : "git-branch" });
   }
 
   /**
@@ -6885,9 +6898,11 @@ class App {
     // extension. Without one, the toolbar could stage everything but never stash
     // anything, and the only stash route was a right-click most people never try.
     // Stashing moves your working tree; its only affordance used to be an
-    // unlabelled archive glyph sitting between two text buttons. Label it.
+    // unlabelled glyph sitting between two text buttons. Label it. Its glyph
+    // is codicon's stash one — every stash control here and in the extension
+    // wears it (it was an archive box, which says "archive", not "stash").
     const stashBtn = el("button", "mini-btn") as HTMLButtonElement;
-    stashBtn.append(glyph("archive"), span("Stash"));
+    stashBtn.append(glyph("git-stash"), span("Stash"));
     // What the button will actually do, captured when its label is written.
     //
     // The label used to be computed from `selectionPaths()` at toolbar-build
@@ -6953,7 +6968,7 @@ class App {
     // The stash drop target, revealed only mid-drag.
     const dropZone = el("div", "dc-stash-drop");
     dropZone.hidden = true;
-    dropZone.append(glyph("archive"), span("Drop to stash", "dc-drop-label"));
+    dropZone.append(glyph("git-stash"), span("Drop to stash", "dc-drop-label"));
     // dragover must be cancelled or the browser refuses the drop entirely and
     // the whole gesture silently does nothing.
     dropZone.addEventListener("dragover", (ev) => {
@@ -8303,7 +8318,7 @@ class App {
       }
       items.push({ separator: true });
       items.push({
-        label: "Stash all changes", icon: "archive",
+        label: "Stash all changes", icon: "git-stash",
         onClick: () => void this.stashPaths([]).then(() => this.clearSelection(lists, selBar)),
       });
       openMenu(head, items);
@@ -8333,11 +8348,11 @@ class App {
     }
     items.push({ separator: true });
     items.push({
-      label: "Stash this file", icon: "archive",
+      label: "Stash this file", icon: "git-stash",
       onClick: () => void this.stashPaths([f.path]).then(() => this.clearSelection(lists, selBar)),
     });
     items.push({
-      label: "Stash all changes", icon: "archive",
+      label: "Stash all changes", icon: "git-stash",
       onClick: () => void this.stashPaths([]).then(() => this.clearSelection(lists, selBar)),
     });
     if (kind !== "staged") {
@@ -8366,7 +8381,7 @@ class App {
 
     const items: MenuItem[] = [
       {
-        label: `Stash ${noun(paths.length)}`, icon: "archive",
+        label: `Stash ${noun(paths.length)}`, icon: "git-stash",
         onClick: () => void this.stashPaths(paths).then(() => this.clearSelection(lists, selBar)),
       },
       { separator: true },
@@ -8994,7 +9009,12 @@ class App {
       this.syncStatus = cached;
       this.renderSyncWidget?.(cached);
     }
-    this.syncStatus = await gget("sync:status", undefined, 4000);
+    // The same rule as the pill's (topbarRead.ts): an older answer never
+    // paints over a newer one.
+    const ticket = this.syncRead.ask();
+    const status = await gget("sync:status", undefined, 4000);
+    if (!this.syncRead.land(ticket)) return;
+    this.syncStatus = status;
     this.renderSyncWidget?.(this.syncStatus);
   }
 
@@ -10372,24 +10392,23 @@ class App {
   // ── Refs / HEAD (drives the branch switcher) ────────────────────────────────
 
   private async refreshRefs(): Promise<void> {
-    // Whose refs are these? Twelve call sites reach this, and a repo switch does
-    // not cancel one already in flight — so if the OUTGOING repo's request settles
-    // after the incoming one, `this.refs` and the top-bar branch label end up
-    // showing the repo you just left. Most likely when the old repo is large and
-    // cold and the new one is small.
+    // Which answer paints? Twelve call sites reach this, and two of them can be
+    // in flight at once — so an answer asked BEFORE a checkout that lands after
+    // the one asked after it must not put the old branch back (topbarRead.ts).
     //
-    // The cache's epoch guard is not enough on its own: it stops a superseded
-    // value being CACHED, but the pending promise still resolves with it here.
-    const gen = this.routeGen;
+    // NOT the route generation. This tab is one repository for its whole life
+    // (issue #32), so no route can make its HEAD wrong — and every route bumps
+    // that generation: an open's landing (Repositories' Open and Clone land on
+    // Code) or the first click while git was still answering threw the answer
+    // away, and the pill said "…" for the rest of the tab's life.
+    const ticket = this.refsRead.ask();
     // Cached: refs/head change rarely between view switches, so reuse a recent
     // result instead of re-running git on every navigation.
     const [refs, head] = await Promise.all([
       gget("refs:list", undefined),
       gget("head:get", undefined),
     ]);
-    if (gen !== this.routeGen) {
-      return; // a different repo is on screen now
-    }
+    if (!this.refsRead.land(ticket)) return; // a newer answer is on screen
     this.refs = refs;
     this.headInfo = head;
     this.syncComposerBranch();

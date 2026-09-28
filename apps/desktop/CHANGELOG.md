@@ -9,15 +9,14 @@ The VS Code / Cursor extension has its own changelog at
 separately — desktop releases are tagged `app-v*`, extension releases `ext-v*` —
 but they share the same engine, so most Git behaviour lands in both at once.
 
-## [Unreleased]
+## [2.2.0] - 2026-09-28
 
 ### Added
-
 - **Select several commits in the graph.** **Cmd/Ctrl+click** adds or removes
   a commit, **Shift+click** selects everything from the last one you clicked,
   and **Shift+Up/Down** extends the selection from the keyboard; **Escape**
   keeps only the commit the cursor is on. Every selected row is highlighted and
-  the one the cursor is on keeps its accent bar. Right-click inside the
+  the one the cursor is on is lit a shade deeper. Right-click inside the
   selection (or press Shift+F10) for one menu for all of them; right-click
   outside it and it is that commit's own menu, as before. The details pane says
   how many commits are selected, by whom and when, lists them — click one to
@@ -128,7 +127,14 @@ but they share the same engine, so most Git behaviour lands in both at once.
   menu. (#32)
 
 ### Changed
-
+- **Whatever you picked is lit, never lined.** The tab in front, the selected
+  row of a list or a menu, a segment, a filter, a toggle that is on, the
+  current branch and the selected commit are marked by a tint of the accent,
+  with a soft glow on a tab, a pill or a button, and no longer by a bar down
+  an edge, a rule on top, an underline or an accent outline. That includes
+  the Go to list's selected row and the merge editor's pressed Synchronized
+  scrolling toggle. A search result you select in the graph stays selected.
+  The words on every tint read at least 4.5:1, under the pointer too.
 - **Closing a repository is closing its tab.** Repo ▸ **Close Tab** is ⌘W
   (Ctrl+W) — it was ⌘⇧W, and on macOS ⌘W did nothing. On Windows and Linux
   the window's own Close moves to Ctrl+Shift+W. The GitStudio mark in the top
@@ -136,7 +142,10 @@ but they share the same engine, so most Git behaviour lands in both at once.
   repository menu moved to the tab row's **+**. (#32)
 
 ### Fixed
-
+- **A repository opened in a new tab shows its branch.** Opening one from
+  Repositories, Home or a clone — or clicking anywhere before git had answered
+  — could leave the top bar's branch showing *…* for as long as the tab was
+  open. The branch now always fills in. (#32)
 - **Undo of *Discard changes*, and ⌘Z after *Accept Yours / Theirs*, no longer
   overwrite edits you made since.** Discard, type something new, Undo: the new
   text was replaced by the discarded one; resolve a conflict, polish the file
@@ -146,7 +155,9 @@ but they share the same engine, so most Git behaviour lands in both at once.
 - **Undo of *Rename on origin*** leaves the branch tracking its own remote
   branch again — it came back tracking the new name.
 - **Undo of *Drop stash*** puts the stash back where it was in the list, not
-  on top of it.
+  on top of it. Its question names the stash by its words and its place in
+  words — "Put the stash “my work” back where it was in the stash list" —
+  not git's "On main: my work" and a stash@{n}.
 - **Rebase: the reason a squash was refused could be off screen.** It was
   written under the list, below the fold of any plan long enough to scroll;
   it is shown just above **Start rebase** now. The commit the keyboard moves
@@ -189,7 +200,10 @@ but they share the same engine, so most Git behaviour lands in both at once.
   makes one whenever a new file is ticked). They are listed now, and open
   with their contents.
 - Apply and Pop on a stash use the stash-apply and stash-pop icons, as the VS
-  Code extension does.
+  Code extension does, and everything else that makes or lists a stash — the
+  Stash button and its drop zone in Changes, the Stash menu items, the
+  Stashes segment and its rows in Branches — wears the stash icon instead of
+  an archive box.
 - **Removing a worktree in Branches ▸ Worktrees.** The question promised that
   uncommitted work would go with it, then git refused any worktree with
   changes — and a locked one could not be removed at all. The question now
@@ -250,6 +264,19 @@ but they share the same engine, so most Git behaviour lands in both at once.
   Drop Commit and the several-commit actions were refused as an
   "unrecognised plan entry". They run now, and a reworded commit gets its new
   message — also when the rebase is continued after a conflict.
+- **Branches ▸ Worktrees lists a worktree whose folder name holds a line
+  break** as one worktree — it read as two broken ones. The list is read in
+  git's NUL-separated form where git has it (2.36 and later), as the VS Code
+  extension's Worktrees view reads it.
+- **A worktree folder whose `.git` is gone** reads *not a worktree* in
+  Branches ▸ Worktrees, offers no **Open**, and its ⋯ menu reads **Forget this
+  worktree…**, which clears git's record of it and leaves the folder and its
+  files alone. Asking to remove one used to list the main worktree's
+  uncommitted changes as its own — git in that folder reads the repository
+  around it, and for a worktree nested in the main one that is the main
+  worktree — and then failed with git's "validation failed".
+- The remove question says "Its 1 uncommitted change goes with it, and
+  nothing can bring it back" — it read "go … them".
 
 ## [2.1.0] - 2026-09-25
 

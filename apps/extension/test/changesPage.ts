@@ -21,6 +21,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { buildSync } from "esbuild";
 import ts from "typescript";
 import { findChrome } from "../../../packages/webview-ui/test/headless";
 import { Browser, type Page } from "../../../scripts/merge-e2e/cdp";
@@ -28,10 +29,47 @@ import { BODY_CLASS, VSCODE_THEMES, type VsCodeTheme } from "../../../scripts/me
 
 export type { VsCodeTheme };
 
+/**
+ * A theme a Changes page can be opened in: VS Code's four, and Cursor's own
+ * default ("Cursor Dark", the --vscode-* values its webviews are given, read
+ * from a live Changes view: test/fixtures/cursorDarkTheme.json). Cursor's
+ * focusBorder is 15% white — GitStudio's accent was invisible there.
+ */
+export type PageTheme = VsCodeTheme | "cursor-dark";
+
+const CURSOR_DARK: Record<string, string> = JSON.parse(readFileSync(join(__dirname, "fixtures", "cursorDarkTheme.json"), "utf8")).vars;
+
+/** The VS Code theme a page theme is laid over, and what it lays over it. */
+function themeParts(theme: PageTheme): { base: VsCodeTheme; over: Record<string, string> } {
+  return theme === "cursor-dark" ? { base: "dark", over: CURSOR_DARK } : { base: theme, over: {} };
+}
+
 const HERE = (p: string): string => fileURLToPath(new URL(p, import.meta.url));
 const SRC = HERE("../src/changes/commitView.ts");
 const TOKENS = HERE("../../../packages/webview-ui/src/styles/tokens.css");
+const CHANGE_ROWS_CSS = HERE("../../../packages/webview-ui/src/changeRows/changeRows.css");
+const CHANGE_ROWS_ENTRY = HERE("../../../packages/webview-ui/src/changeRows/global.ts");
 const CODICONS = HERE("../../../node_modules/@vscode/codicons/dist/codicon.css");
+
+let changeRowsFile: string | undefined;
+
+/** change-rows.js (window.GsChangeRows), built once per run from the extension's entry. */
+export function changeRowsScript(): string {
+  if (!changeRowsFile) {
+    const out = buildSync({
+      entryPoints: [CHANGE_ROWS_ENTRY],
+      bundle: true,
+      write: false,
+      platform: "browser",
+      format: "iife",
+      logLevel: "silent",
+    });
+    const dir = mkdtempSync(join(tmpdir(), "gs-change-rows-"));
+    changeRowsFile = join(dir, "change-rows.js");
+    writeFileSync(changeRowsFile, out.outputFiles[0].text);
+  }
+  return pathToFileURL(changeRowsFile).href;
+}
 
 /** The menu, input and list tokens the Changes view reads that themes.ts has no need for. */
 const VIEW_TOKENS: Record<VsCodeTheme, Record<string, string>> = {
@@ -91,21 +129,30 @@ const VIEW_TOKENS: Record<VsCodeTheme, Record<string, string>> = {
   },
 };
 
-/** Stands in for the host: records every message the page posts, and delivers the host's. */
+/**
+ * Stands in for the host: records every message the page posts, and delivers
+ * the host's. The webview's own state (getState / setState) is kept in
+ * `window.__gsState` — what VS Code keeps for a view across a reload.
+ */
 const HOST_STUB = `
 window.__posted = [];
 window.acquireVsCodeApi = function () {
   return {
     postMessage: function (m) { window.__posted.push(JSON.parse(JSON.stringify(m))); },
-    getState: function () { return undefined; },
-    setState: function () {},
+    getState: function () { return window.__gsState === undefined ? undefined : JSON.parse(JSON.stringify(window.__gsState)); },
+    setState: function (s) { window.__gsState = JSON.parse(JSON.stringify(s)); },
   };
 };
 window.__send = function (msg) { window.dispatchEvent(new MessageEvent("message", { data: msg })); };
 `;
 
-/** The html() template's text, exactly as String.raw hands it over, with its holes filled. */
-export function changesViewHtml(theme: VsCodeTheme): string {
+/**
+ * The html() template's text, exactly as String.raw hands it over, with its
+ * holes filled. `webviewState`: what getState() answers when the page starts,
+ * as after a reload.
+ */
+export function changesViewHtml(pageTheme: PageTheme, webviewState?: unknown): string {
+  const { base: theme, over } = themeParts(pageTheme);
   const source = readFileSync(SRC, "utf8");
   const sf = ts.createSourceFile(SRC, source, ts.ScriptTarget.Latest, true);
   let tpl: ts.TemplateExpression | undefined;
@@ -126,11 +173,15 @@ export function changesViewHtml(theme: VsCodeTheme): string {
 
   const holes: Record<string, string> = {
     // Everything the page needs, and nothing it would not get in VS Code:
-    // inline style and script (the nonce stays on the tags), the codicon font.
-    csp: "default-src 'none'; style-src 'unsafe-inline' file:; font-src file: data:; script-src 'unsafe-inline'",
+    // inline style and script (the nonce stays on the tags), the codicon font,
+    // and the shared change rows' script (change-rows.js, built here from the
+    // extension's own entry).
+    csp: "default-src 'none'; style-src 'unsafe-inline' file:; font-src file: data:; script-src 'unsafe-inline' file:",
     codiconUri: pathToFileURL(CODICONS).href,
     nonce: "n",
     tokensCss: readFileSync(TOKENS, "utf8"),
+    changeRowsCss: readFileSync(CHANGE_ROWS_CSS, "utf8"),
+    changeRowsUri: changeRowsScript(),
   };
   // head "`…${", middle "}…${", tail "}…`" — the delimiters come off.
   let html = tpl.head.getText(sf).slice(1, -2);
@@ -142,13 +193,16 @@ export function changesViewHtml(theme: VsCodeTheme): string {
     html += ts.isTemplateTail(span.literal) ? lit.slice(1, -1) : lit.slice(1, -2);
   }
 
-  const vars = { ...VSCODE_THEMES[theme], ...VIEW_TOKENS[theme] };
+  const vars = { ...VSCODE_THEMES[theme], ...VIEW_TOKENS[theme], ...over };
   const style = Object.entries(vars)
     .map(([k, v]) => `${k}:${v.replace(/"/g, "&quot;")}`)
     .join(";");
   const swaps: [string, string][] = [
     ['<html lang="en">', `<html lang="en" style="${style}">`],
-    ["<head>", `<head><script>${HOST_STUB}</script>`],
+    [
+      "<head>",
+      `<head><script>${webviewState === undefined ? "" : `window.__gsState = ${JSON.stringify(webviewState)};`}${HOST_STUB}</script>`,
+    ],
     ['<body class="layout-list">', `<body class="layout-list ${BODY_CLASS[theme]}">`],
   ];
   for (const [from, to] of swaps) {
@@ -219,6 +273,12 @@ const KEYS: Record<string, { code: string; vk: number }> = {
   PageDown: { code: "PageDown", vk: 34 },
   Home: { code: "Home", vk: 36 },
   End: { code: "End", vk: 35 },
+  " ": { code: "Space", vk: 32 },
+  a: { code: "KeyA", vk: 65 },
+  F10: { code: "F10", vk: 121 },
+  ContextMenu: { code: "ContextMenu", vk: 93 },
+  Delete: { code: "Delete", vk: 46 },
+  Backspace: { code: "Backspace", vk: 8 },
 };
 
 /** The DevTools protocol's modifier bits. */
@@ -239,8 +299,8 @@ export class ChangesPage {
   }
 
   static async open(
-    theme: VsCodeTheme,
-    opts: { width?: number; height?: number; scale?: number } = {},
+    theme: PageTheme,
+    opts: { width?: number; height?: number; scale?: number; webviewState?: unknown } = {},
   ): Promise<ChangesPage> {
     const chrome = findChrome();
     if (!chrome) throw new Error("no windowless Chrome on this machine (set GS_CHROME)");
@@ -252,7 +312,7 @@ export class ChangesPage {
     const page = await browser.newPage(width, height, opts.scale ?? 1);
     const dir = mkdtempSync(join(tmpdir(), "gs-changes-page-"));
     const file = join(dir, "changes.html");
-    writeFileSync(file, changesViewHtml(theme));
+    writeFileSync(file, changesViewHtml(theme, opts.webviewState));
     await browser.goto(page, pathToFileURL(file).href);
     await page.waitFor(`typeof window.__send === "function" && !!document.getElementById("branch-pill")`);
     return new ChangesPage(browser, page, dir);
@@ -262,9 +322,36 @@ export class ChangesPage {
     return this.page.eval<T>(expression);
   }
 
+  /** Load the page afresh — every piece of the script's state gone — and wait until it is up. */
+  async reload(): Promise<void> {
+    await this.page.eval("window.__gsStale = true");
+    await this.page.send("Page.reload", { ignoreCache: true });
+    // The page's own "ready" (its script's last line): the stub's __send and the
+    // markup exist before the script has run, and a message sent then is lost.
+    await this.page.waitFor(
+      `!window.__gsStale && document.readyState === "complete" && window.__posted.some(function (m) { return m.type === "ready"; })`,
+    );
+  }
+
   /** Deliver a host message to the page. */
   async send(msg: unknown): Promise<void> {
     await this.page.eval(`window.__send(${JSON.stringify(msg)})`);
+  }
+
+  /**
+   * The name a screen reader announces for the element `expression` yields,
+   * as Chrome's accessibility tree computes it — what a hover-only tip or a
+   * display:none word never reaches.
+   */
+  async accessibleName(expression: string): Promise<string> {
+    await this.page.send("Accessibility.enable");
+    const r = await this.page.send<{ result: { objectId?: string } }>("Runtime.evaluate", { expression });
+    if (!r.result.objectId) throw new Error(`not an element: ${expression}`);
+    const tree = await this.page.send<{ nodes: { name?: { value?: string } }[] }>("Accessibility.getPartialAXTree", {
+      objectId: r.result.objectId,
+      fetchRelatives: false,
+    });
+    return tree.nodes[0]?.name?.value ?? "";
   }
 
   /** Everything the page has posted to the host so far. */
@@ -273,12 +360,23 @@ export class ChangesPage {
   }
 
   /** A real key press on whatever has focus. `repeat` marks it as a held key's repeat; `with` holds modifiers down. */
-  async key(name: keyof typeof KEYS | string, opts: { repeat?: boolean; with?: Modifier[] } = {}): Promise<void> {
+  async key(
+    name: keyof typeof KEYS | string,
+    opts: { repeat?: boolean; with?: Modifier[]; typed?: boolean } = {},
+  ): Promise<void> {
     const k = KEYS[name];
     if (!k) throw new Error(`no key mapping for ${name}`);
     const modifiers = (opts.with ?? []).reduce((m, x) => m | MODIFIERS[x], 0);
     const base = { key: name, code: k.code, windowsVirtualKeyCode: k.vk, nativeVirtualKeyCode: k.vk, autoRepeat: !!opts.repeat, modifiers };
-    await this.page.send("Input.dispatchKeyEvent", { type: "rawKeyDown", ...base });
+    // `typed`: the key also types its character, as a real press does — which
+    // is what makes Enter or Space press a focused <button>. Without it only
+    // keydown handlers see the key.
+    const text = name === "Enter" ? "\r" : name.length === 1 ? name : undefined;
+    if (opts.typed && text !== undefined) {
+      await this.page.send("Input.dispatchKeyEvent", { type: "keyDown", text, unmodifiedText: text, ...base });
+    } else {
+      await this.page.send("Input.dispatchKeyEvent", { type: "rawKeyDown", ...base });
+    }
     await this.page.send("Input.dispatchKeyEvent", { type: "keyUp", ...base });
   }
 

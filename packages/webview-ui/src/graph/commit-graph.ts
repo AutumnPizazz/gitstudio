@@ -686,13 +686,14 @@ export class CommitGraph extends LitElement {
     }
     .gh-preset:hover { background: var(--gs-hover); }
     .gh-preset:focus-visible { outline: 1px solid var(--gs-accent); outline-offset: 1px; }
-    /* The same wash the scoped trigger and the current-branch pill wear — and
-       the menu's own ink on it, not the accent's. Link-blue on a violet wash
-       read 3.34:1 in light (link-blue on the bare light menu is only 4.40:1);
-       the wash and its border say "active" on their own. */
+    /* Lit, never outlined: the selected tint and its soft glow, with the
+       same neutral edge as the idle presets beside it. It used to add an
+       accent border, which is the line the owner's rule bans. The menu's own
+       ink goes on it, not the accent's: link-blue on a violet wash read
+       3.34:1 in light (on the bare light menu it is only 4.40:1). */
     .gh-preset.active {
-      background: color-mix(in srgb, var(--gs-accent) 22%, transparent);
-      border-color: color-mix(in srgb, var(--gs-accent) 30%, transparent);
+      background: var(--gs-sel-fill);
+      box-shadow: var(--gs-sel-glow-soft);
     }
     .gh-preset[disabled] { opacity: 0.5; cursor: default; }
     .gh-preset[disabled]:hover { background: transparent; }
@@ -736,16 +737,32 @@ export class CommitGraph extends LitElement {
     .gh-menuitem:hover .gh-ref-cur,
     .gh-menuitem:focus-visible .gh-ref-cur { color: inherit; opacity: 0.8; }
 
-    /* Search highlight: matches glow, the rest recede. */
-    .row.is-match {
-      background: color-mix(in srgb, var(--vscode-charts-yellow, #e2c08d) 12%, transparent);
-      box-shadow: inset 2px 0 0 var(--vscode-charts-yellow, #e2c08d);
+    /* Search highlight: matches are washed in a soft yellow and the rest
+       recede. There is no bar down the edge; a match is a highlight, and the
+       owner's rule covers matched rows as well as selected ones. A SELECTED
+       match keeps the selection's fill (.row.selected.is-match below); the
+       :where() keeps these at the specificity they had, so hover still
+       wins over the wash. */
+    .row.is-match:where(:not(.selected)) {
+      background: color-mix(in srgb, var(--vscode-charts-yellow, #e2c08d) 16%, transparent);
     }
-    .row.is-nomatch .subject,
-    .row.is-nomatch .refs,
-    .row.is-nomatch .changes,
-    .row.is-nomatch .meta { opacity: 0.4; }
-    .row.is-nomatch .avatar { opacity: 0.45; }
+    /* On the wash the muted words take the foreground's ink: Dark+'s
+       secondary text read 4.37:1 on it, the SHA 3.95:1 and the desktop's
+       "+1" chip 3.90:1. A match reads at full strength anyway, beside the
+       rows that recede. */
+    .row.is-match:where(:not(.selected)) .meta,
+    .row.is-match:where(:not(.selected)) .changes,
+    .row.is-match:where(:not(.selected)) .sha,
+    .row.is-match:where(:not(.selected)) .chip-overflow {
+      color: var(--vscode-foreground);
+    }
+    /* The rows a search does not match recede, but never a SELECTED one:
+       the commit you picked stays readable while you search. */
+    .row.is-nomatch:where(:not(.selected)) .subject,
+    .row.is-nomatch:where(:not(.selected)) .refs,
+    .row.is-nomatch:where(:not(.selected)) .changes,
+    .row.is-nomatch:where(:not(.selected)) .meta { opacity: 0.4; }
+    .row.is-nomatch:where(:not(.selected)) .avatar { opacity: 0.45; }
 
     @container (max-width: 560px) {
       .gh-search { min-width: 130px; flex-basis: 200px; }
@@ -1021,8 +1038,8 @@ export class CommitGraph extends LitElement {
       align-items: stretch;
       height: 26px;
       padding-right: 12px;
-      /* Mirror the rows' selection border so header cells sit exactly over
-         their column content. */
+      /* Mirror the rows' transparent spacer border so header cells sit
+         exactly over their column content. */
       border-left: 2px solid transparent;
       border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
       background: color-mix(in srgb, var(--vscode-foreground) 2%, var(--vscode-editor-background));
@@ -1101,7 +1118,7 @@ export class CommitGraph extends LitElement {
     .col-resize.dragging::after {
       width: 2px;
       height: 100%;
-      background: var(--vscode-focusBorder);
+      background: var(--gs-accent);
     }
     .col-resize:focus-visible {
       outline: 1px solid var(--vscode-focusBorder);
@@ -1230,6 +1247,8 @@ export class CommitGraph extends LitElement {
       padding-right: 12px;
       cursor: default;
       user-select: none;
+      /* A spacer the header mirrors (.colhead), so header cells sit over
+         their columns. It is never coloured: nothing here draws a bar. */
       border-left: 2px solid transparent;
       --gs-graph-node-hole: var(--vscode-editor-background, #1e1e1e);
       will-change: transform;
@@ -1239,23 +1258,64 @@ export class CommitGraph extends LitElement {
       --gs-graph-node-hole: var(--vscode-list-hoverBackground,
         var(--vscode-editor-background));
     }
-    /* Selected rows share the selection fill; the FOCUSED row — the one the
-       keyboard is on, what Enter opens — carries the accent bar. With one row
-       selected they are the same row and it reads as it always has; with
-       several (issue #32) the bar says which one is the cursor, and a
-       Cmd-click that deselects a row leaves the bar on it with no fill. */
+    /* Lit, never barred. Selected rows share the selection fill. The
+       FOCUSED row is the keyboard's cursor and what Enter opens; it is lit,
+       with more of the accent mixed into that same fill. It used to wear a
+       2px accent bar down its left edge, which is the line the owner's rule
+       bans. With one row selected, that row is both. With several (issue
+       #32), the lit row is the cursor. A Cmd-click that deselects the row
+       under the cursor leaves a faint accent wash on it and nothing else.
+       --gs-row-fill is the row's fill, so the avatar's hole ring and the
+       node's hole stay the colour of the row they sit in. */
     .row.selected {
-      background: var(--vscode-list-activeSelectionBackground);
+      --gs-row-fill: var(--vscode-list-activeSelectionBackground);
+      background: var(--gs-row-fill);
       color: var(--vscode-list-activeSelectionForeground, inherit);
-      --gs-graph-node-hole: var(--vscode-list-activeSelectionBackground,
-        var(--vscode-editor-background));
+      --gs-graph-node-hole: var(--gs-row-fill, var(--vscode-editor-background));
     }
-    .row.focused {
-      border-left-color: var(--vscode-focusBorder, var(--vscode-list-focusOutline,
-        #007fd4));
+    .row.selected.focused {
+      --gs-row-fill: color-mix(in srgb, var(--gs-accent) 28%,
+        var(--vscode-list-activeSelectionBackground));
     }
+    .row.focused:not(.selected):not(:hover) {
+      background: color-mix(in srgb, var(--gs-accent) 10%, transparent);
+      --gs-graph-node-hole: color-mix(in srgb, var(--gs-accent) 10%,
+        var(--vscode-editor-background, #1e1e1e));
+    }
+    /* A selected commit that is also a search match stays selected: the
+       selection's own fill, with a little of the match's yellow mixed in so
+       it still reads as a match. Never the match wash alone (the rail's
+       did that once and hid the selection). */
+    .row.selected.is-match {
+      --gs-row-fill: color-mix(in srgb, var(--vscode-charts-yellow, #e2c08d) 14%,
+        var(--vscode-list-activeSelectionBackground));
+    }
+    .row.selected.focused.is-match {
+      --gs-row-fill: color-mix(in srgb, var(--vscode-charts-yellow, #e2c08d) 14%,
+        color-mix(in srgb, var(--gs-accent) 28%, var(--vscode-list-activeSelectionBackground)));
+    }
+    /* Words on a lit row take full ink. Light+'s secondary text read 4.35:1
+       on the cursor's wash and the SHA 2.83:1. The selection foreground at
+       85% read 4.14:1 on the cursor's brighter fill. */
+    .row.focused:not(.selected) .meta,
+    .row.focused:not(.selected) .changes,
+    .row.focused:not(.selected) .sha {
+      color: var(--vscode-foreground);
+    }
+    .row.selected.focused .meta { opacity: 1; }
     .row.selected:hover {
-      background: var(--vscode-list-activeSelectionBackground);
+      background: var(--gs-row-fill);
+    }
+    /* High contrast paints no selection fill. VS Code draws a selection there
+       as a whole dashed ring in contrastActiveBorder, and the cursor as a
+       solid one. That is a full ring, never a side. */
+    :host-context(body.vscode-high-contrast) .row.selected,
+    :host-context(body.vscode-high-contrast) .row.focused {
+      outline: 1px dashed var(--vscode-contrastActiveBorder, var(--vscode-focusBorder));
+      outline-offset: -1px;
+    }
+    :host-context(body.vscode-high-contrast) .row.selected.focused {
+      outline-style: solid;
     }
 
     /* ── Author avatar — sits ON the commit node (GitKraken-style) ──────── */
@@ -1281,7 +1341,7 @@ export class CommitGraph extends LitElement {
     .row.selected .avatar {
       box-shadow:
         0 0 0 1.5px var(--gs-av-ring, var(--vscode-focusBorder)),
-        0 0 0 3px var(--vscode-list-activeSelectionBackground, var(--gs-graph-node-hole));
+        0 0 0 3px var(--gs-graph-node-hole);
     }
     .avatar img {
       /* Positioned so it paints ABOVE the absolutely-positioned initials
@@ -1441,7 +1501,7 @@ export class CommitGraph extends LitElement {
         var(--vscode-textLink-foreground, var(--vscode-focusBorder)) 88%, var(--vscode-foreground));
       border-color: transparent;
       background: color-mix(in srgb,
-        var(--vscode-focusBorder) 13%, var(--vscode-editor-background));
+        var(--gs-accent) 13%, var(--vscode-editor-background));
     }
     .chip-head .ico { color: inherit; }
     /* remote = the quietest kind. It is context ("this also exists upstream"),
@@ -1492,15 +1552,22 @@ export class CommitGraph extends LitElement {
       background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
       border-radius: 3px;
     }
-    /* On a selected (accent-filled) row, lift chip contrast a touch so the
-       tinted fills don't muddy against the active-selection background. */
+    /* On a selected (accent-filled) row the chips sit on a layer of the
+       editor's own ground, so their inks read as they do on a plain row. At
+       78% the selection showed through enough to take them under AA in
+       Light+ (the branch name 4.16:1, "+3" 4.41:1); at 90% they clear it. */
     .row.selected .chip-head,
     .row.selected .chip-remote,
     .row.selected .chip-tag,
     .row.selected .chip-overflow {
       background: color-mix(in srgb,
-        var(--vscode-editor-background) 78%, transparent);
+        var(--vscode-editor-background) 90%, transparent);
     }
+    /* The "+N" count on a lit row takes the foreground: the secondary ink
+       read 4.29:1 on the lit cursor in the desktop's light theme, and 3.98:1
+       on the cursor's row under the pointer in Light+. */
+    .row.selected .chip-overflow,
+    .row.focused:where(:not(.selected)) .chip-overflow { color: var(--vscode-foreground); }
 
     .subject {
       min-width: 0;
@@ -1628,6 +1695,11 @@ export class CommitGraph extends LitElement {
     .row.selected .meta {
       color: inherit;
       opacity: 0.85;
+    }
+    /* The file count takes the selection's ink too: the muted count read
+       3.6:1 on the desktop's selection and 2.65:1 on its lit cursor. */
+    .row.selected .changes {
+      color: inherit;
     }
     .row.selected .sha { opacity: 1; }
 
