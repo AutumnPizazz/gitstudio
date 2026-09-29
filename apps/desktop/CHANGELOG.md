@@ -26,12 +26,69 @@ but they share the same engine, so most Git behaviour lands in both at once.
   tip) open the page in your browser, and so do the two buttons in **Settings
   ▸ About**, the two entries in the **⌘K** palette, and one small line at the
   foot of Home. Nothing pops up and nothing ever asks.
+- **A switch for commit authors' pictures.** To show an author's picture in
+  the graph, commit details and the Branches list, GitStudio sends an MD5 hash
+  of their email address to Gravatar (`www.gravatar.com`), or, for a GitHub
+  noreply address, asks GitHub (`avatars.githubusercontent.com`) for that
+  account's picture. **Settings ▸ Appearance ▸ Load author pictures from
+  Gravatar** (on by default, as before) turns that off: every author is drawn
+  as coloured initials, and neither request is sent.
+- **The updater knows which macOS a release needs.** When a future release
+  needs a newer macOS than your Mac runs, it isn't offered to you, and
+  **Check for updates** says why instead of saying you're up to date with
+  nothing more.
+
+### Changed
+- **PRIVACY.md now lists everything the app sends.** It used to say crash
+  reports were the one thing; the update check, authors' pictures, GitHub
+  while you're signed in, images inside Markdown, and AI once you connect a
+  provider are there too now, each with when it happens, what it carries, and
+  how to turn it off where it can be. It also corrects one detail about crash
+  reports (a remote's host name is kept), and lists the times reports carried
+  more than it says they may, with the release that fixed each.
 
 ### Fixed
 - **Your tabs come back after you quit.** Quitting GitStudio saved an empty
   list of open tabs, so the next launch opened on Home instead of the
   repositories you had open. The tabs are now saved before anything shuts
   down, and they come back as they were.
+- **Installing on macOS 11 is refused before anything downloads.** GitStudio
+  2.3.0 and later need macOS 12 Monterey. The Homebrew cask now tells
+  Homebrew so, and the one-line installer stops on macOS 11 and points you to
+  2.2.1, the last version for it (`GITSTUDIO_VERSION=2.2.1` installs that).
+- **Releases no longer carry a stray `builder-debug.yml`**, an electron-builder
+  debug file that was uploaded with the Windows installer.
+- **A computer without Git is told so, and how to get it.** GitStudio uses
+  the Git installed on your computer. Without one, every view failed with
+  "spawn git ENOENT", a folder you opened was said to have a damaged `.git`
+  folder, and the tabs from your last session were dropped as gone. Now the
+  window says Git isn't installed (on a Mac, that Apple's Command Line Tools
+  are missing), shows the command that installs it on your system, and
+  carries on, tabs and all, when you click **Check again**. Your tabs are
+  kept until then.
+- **Git installed by Homebrew or the Windows installer is found** even when
+  it isn't on the PATH GitStudio was started with: an app opened from the
+  Dock doesn't get your shell's PATH, and a Windows app keeps the PATH it
+  started with.
+
+### Security
+- **Crash reports no longer carry a commit's subject, or a branch name git
+  prints without quotes.** When a rebase, cherry-pick, revert or `git am`
+  stopped, git's message named the commit by its subject line, and the
+  scrubber let those words through. It let a branch name through too, in the
+  failures where git doesn't quote one, such as pulling a branch the remote
+  doesn't have or pushing one with no upstream. It now takes both out.
+- **The Assistant's replies no longer load images from the web.** A reply is
+  Markdown, and text hidden in a file, commit or pull request the Assistant
+  read could make it write an image whose address carries what it read to
+  someone else, fetched the moment the reply appeared. An image in a reply now
+  shows its description instead.
+- **An image in Markdown could make Windows connect to a file share.** An
+  image written as `//server/share/a.png` (or with backslashes) in a pull
+  request, an issue or a README took the scheme of the app's own page, which
+  is a local file, and on Windows that is a network share: viewing the page
+  made Windows connect to the server and offer it your sign-in credentials.
+  Such an address now means https, as it does on the web.
 
 ## [2.3.0] - 2026-09-28
 

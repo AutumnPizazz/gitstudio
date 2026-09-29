@@ -48,6 +48,37 @@
     document.documentElement.appendChild(still);
   }
 
+  // `imgwatch=1`: record the source of every <img> the page ever attaches,
+  // in the document AND in every shadow root (the graph, the commit details),
+  // in order. The DOM at the end of a scene cannot say what was ASKED for: a
+  // picture that fails to load — every remote one here, where Chrome reaches
+  // nothing — is swapped for initials (the desktop's avatar()) or hidden (the
+  // graph's rows), and the request it made is gone with it. The author-picture
+  // checks read `__gsImgSrcs()`: what was requested, not what is left.
+  if (params.get("imgwatch") === "1") {
+    const seen = [];
+    const note = (node) => {
+      if (!node || node.nodeType !== 1) return;
+      if (node.tagName === "IMG" && node.getAttribute("src")) seen.push(node.getAttribute("src"));
+      for (const img of node.querySelectorAll?.("img[src]") ?? []) seen.push(img.getAttribute("src"));
+    };
+    const watcher = new MutationObserver((records) => {
+      for (const r of records) {
+        if (r.type === "attributes") note(r.target);
+        else r.addedNodes.forEach(note);
+      }
+    });
+    const watch = (root) => watcher.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["src"] });
+    watch(document.documentElement);
+    const attachShadow = Element.prototype.attachShadow;
+    Element.prototype.attachShadow = function (init) {
+      const root = attachShadow.call(this, init);
+      watch(root);
+      return root;
+    };
+    window.__gsImgSrcs = () => seen.slice();
+  }
+
   // Pre-seed prefs so the app boots straight into the scene's view, terminal
   // collapsed, fixed rail width — deterministic screenshots.
   //
@@ -70,6 +101,9 @@
       // in, the ticks that ARE the staging model in that mode were unreachable
       // from the harness and never looked at.
       stagingModel: params.get("staging") === "checkboxes" ? "checkboxes" : "split",
+      // ?gravatar=0: Settings ▸ Appearance ▸ "Load author pictures from
+      // Gravatar" turned off. Left out, the app's own default (on) applies.
+      ...(params.get("gravatar") === "0" ? { gravatar: false } : {}),
       // ?tabviews=1: the last session left gistudio.dev's tab on Branches
       // (#32) — each restored tab comes back on its own view.
       ...(params.get("tabviews")
@@ -1589,7 +1623,28 @@
 
   /** The Assistant's saved agent choices (ai:settings / ai:setAgentConfig). */
   const agentConfig = { permission: "write", thinking: "medium", modelId: "claude-opus-5" };
+  // Is Git there (app:gitCheck, main/gitCheck.ts)? Yes, unless the scene says:
+  // ?nogit=missing|xcode|broken is what the launch check finds, on
+  // ?gitplatform=darwin|win32|linux (darwin by default), and ?gitfix=1 means a
+  // "Check again" then finds it — the user installed Git meanwhile.
+  const noGit = params.get("nogit");
+  let gitChecks = 0;
   const dynamic = {
+    "app:gitCheck": (req) => {
+      gitChecks++;
+      window.__gsGitChecks = gitChecks;
+      if (!noGit || (req && req.recheck && params.get("gitfix") === "1")) return { ok: true, version: "2.46.0" };
+      return {
+        ok: false,
+        reason: noGit,
+        platform: params.get("gitplatform") || "darwin",
+        ...(noGit === "xcode"
+          ? { detail: "xcrun: error: invalid active developer path (/Library/Developer/CommandLineTools), missing xcrun at: /Library/Developer/CommandLineTools/usr/bin/xcrun" }
+          : noGit === "broken"
+            ? { detail: "error while loading shared libraries: libpcre2-8.so.0: cannot open shared object file" }
+            : {}),
+      };
+    },
     // A READ that the fallback used to answer with a mutation shape. Present so
     // the AI-gating path is exercised instead of silently failing open.
     // ?ai=1 → a CONNECTED model. Without this the Assistant is permanently

@@ -2549,6 +2549,13 @@ export interface IpcChannels {
   "repos:deleteEmptyFolder": [string, OkResult];
   // ── App info + updates ──
   "app:info": [void, { version: string; platform: string }];
+  /**
+   * Is the git the app runs there, and does it work? The desktop app does not
+   * bundle git, so this is the first thing the window asks. The launch answer
+   * is kept; `recheck` looks again (the "Check again" button), and a yes then
+   * brings back the tabs a launch without git could not open.
+   */
+  "app:gitCheck": [{ recheck?: boolean } | void, GitAvailability];
   /** Poll the release feed now (the Settings "Check for updates" button). */
   "update:check": [void, UpdateCheckResult];
   /** Start the user-confirmed download; completion arrives as update:ready. */
@@ -2996,13 +3003,29 @@ export interface UpdateReady {
   /** For "installer": where the download landed (~/Downloads). */
   path?: string;
 }
+/**
+ * What `app:gitCheck` found (main/gitCheck.ts).
+ *
+ * Not ok, `reason` says which of three things the user is looking at:
+ *  - "missing": no git on the PATH, nor in the places installers put it;
+ *  - "xcode":   macOS's /usr/bin/git stub, which runs Apple's Command Line
+ *               Tools — not installed, or broken by a macOS update;
+ *  - "broken":  a git that is there and would not run; `detail` is the first
+ *               thing it said.
+ * `platform` is Node's (darwin, win32, linux): the install steps differ.
+ */
+export type GitAvailability =
+  | { ok: true; version: string }
+  | { ok: false; reason: "missing" | "xcode" | "broken"; platform: string; detail?: string };
+
 export interface UpdateCheckResult {
   status: "uptodate" | "available" | "downloading" | "ready" | "disabled" | "error";
   /** The version currently running. */
   current: string;
   /** For available/downloading/ready: the newer version in question. */
   version?: string;
-  /** For error/disabled: why. */
+  /** For error/disabled: why. For uptodate: set when a newer release exists
+   *  that this Mac's macOS cannot run (its `minimum-macos`), and says so. */
   message?: string;
 }
 

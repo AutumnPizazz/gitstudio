@@ -13,6 +13,35 @@ All notable changes to **GitStudio** are documented here. This project adheres t
   tip) and opens the one you pick in your browser. It is in the command
   palette, at the bottom of the Changes view's **…** menu, and on the last
   step of Get Started. It never opens by itself.
+- **A switch for commit authors' pictures.** To show an author's picture in
+  the Commit Graph, the Commits view and commit details, GitStudio sends an
+  MD5 hash of their email address to Gravatar (`www.gravatar.com`), or, for a
+  GitHub noreply address, asks GitHub (`avatars.githubusercontent.com`) for
+  that account's picture. The new `gitstudio.avatars.gravatar` setting (on by
+  default, as before) turns that off: every author is drawn as coloured
+  initials, and neither request is sent.
+
+### Changed
+- **What the extension sends, in one place.** A new
+  [PRIVACY.md](PRIVACY.md) lists every connection GitStudio makes (crash
+  reports, authors' pictures, GitHub, AI), when, what it carries, and the
+  setting that turns each one off, and the times crash reports carried more
+  than they should have, with the release that fixed each. The crash-report
+  setting's description now says what is scrubbed, including that a remote's
+  host name is kept.
+
+### Fixed
+- **An image in a pull request written as `//host/a.png` shows.** An address
+  that starts with two slashes now means https, as it does on GitHub; it used
+  to resolve against the page itself and show as a broken image.
+
+### Security
+- **Crash reports no longer carry a commit's subject, or a branch name git
+  prints without quotes.** When a rebase, cherry-pick, revert or `git am`
+  stopped, git's message named the commit by its subject line, and the
+  scrubber let those words through. It let a branch name through too, in the
+  failures where git doesn't quote one, such as pulling a branch the remote
+  doesn't have or pushing one with no upstream. It now takes both out.
 
 ## [1.16.0] - 2026-09-28
 
