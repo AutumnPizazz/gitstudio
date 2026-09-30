@@ -325,7 +325,12 @@ export async function saveStash(
     stagedOnly,
   });
   if (!result.ok) {
-    void vscode.window.showErrorMessage(failed("Stash", result.stderr));
+    // Git can refuse without a word: with a stale .git/index.lock in place,
+    // `git stash push` exits 1 having printed nothing at all, and "Stash
+    // failed." on its own leaves nobody anything to look at.
+    void vscode.window.showErrorMessage(
+      failed("Stash", result.stderr.trim() || l10n.t("git refused")),
+    );
     return;
   }
   // A zero exit is not proof anything was stashed: `git stash push` with nothing
