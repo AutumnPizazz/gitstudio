@@ -18,6 +18,11 @@
  * pass to the `l10nT()` global: those live inside `String.raw` strings, where
  * no extractor can see a call, so they are collected from the built bundles'
  * own source.
+ *
+ * The extractor (`@vscode/l10n-dev`) is maintainer tooling, not a dependency of
+ * the workspace: `npm ci` does not install it. `--write` uses a local copy when
+ * there is one and otherwise fetches that exact version with npx, so the
+ * command still works on a fresh clone.
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -58,12 +63,24 @@ const locales = readdirSync(L10N)
   .filter(Boolean)
   .sort();
 
+/** The version whose output the committed bundles were generated with. */
+const EXTRACTOR = "@vscode/l10n-dev@0.0.35";
+
 if (write) {
-  execFileSync(
-    process.execPath,
-    [join(ROOT, "node_modules/@vscode/l10n-dev/dist/cli.js"), "export", "-o", L10N, ...SOURCES],
-    { stdio: "inherit", cwd: ROOT },
-  );
+  const local = join(ROOT, "node_modules/@vscode/l10n-dev/dist/cli.js");
+  const [command, ...prefix] = existsSync(local)
+    ? [process.execPath, local]
+    : process.platform === "win32"
+      ? ["npx.cmd", "--yes", EXTRACTOR]
+      : ["npx", "--yes", EXTRACTOR];
+  try {
+    execFileSync(command, [...prefix, "export", "-o", L10N, ...SOURCES], { stdio: "inherit", cwd: ROOT });
+  } catch {
+    console.error(
+      `bundle-nls: the extractor did not run — install ${EXTRACTOR} (\`npm i -D ${EXTRACTOR}\`) or retry with a network connection, since npx has to fetch it`,
+    );
+    process.exit(1);
+  }
   const bundle = readJson(SOURCE);
   const inline = execFileSync(
     process.execPath,
