@@ -450,7 +450,16 @@ export class SyncStatusItem implements vscode.Disposable {
     if (!branch) {
       return false;
     }
-    const upstream = (await active.ctx.sync.currentUpstream()) ?? l10n.t("its upstream");
+    // From config, not `@{u}`: Sync's fetch --prune has already removed the
+    // remote-tracking ref by the time we get here, so `@{u}` no longer resolves
+    // and the question only ever said "tracks its upstream". The config still
+    // names it. A "." remote is this repository — its branch needs no prefix.
+    const tracked = await active.ctx.branches.upstreamOf(branch);
+    const upstream = tracked
+      ? tracked.remote === "."
+        ? tracked.branch
+        : `${tracked.remote}/${tracked.branch}`
+      : l10n.t("its upstream");
     const choice = await promptPick({
       title: l10n.t("\"{0}\" tracks {1}, which no longer exists", branch, upstream),
       hint: l10n.t("Someone deleted or renamed that remote branch."),
