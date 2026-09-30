@@ -86,6 +86,7 @@ import {
   sameRows,
   type Selection,
 } from "./multiSelect";
+import * as l10n from "@vscode/l10n";
 
 // ── Layout constants (the visual contract; tuned to GitLens proportions) ─────
 const ROW_HEIGHT = 34;
@@ -202,7 +203,7 @@ const COLUMN_SPECS: readonly ColumnSpec[] = [
   // Branch/Tag is a fixed, resizable track (not auto-fit) so subjects start at
   // the same x on every row — a real scanability win, GitLens-style. Default is
   // lean so empty-ref rows don't waste width; drag wider for busy ref sets.
-  { id: "refs", label: "Branch / Tag", cssVar: "--col-refs-w", def: 260, min: 60, max: 640 },
+  { id: "refs", label: l10n.t("Branch / Tag"), cssVar: "--col-refs-w", def: 260, min: 60, max: 640 },
   { id: "changes", label: "Changes", cssVar: "--col-changes-w", def: 100, min: 76, max: 220 },
   { id: "author", label: "Author", cssVar: "--col-author-w", def: 112, min: 76, max: 240 },
   { id: "date", label: "Date", cssVar: "--col-date-w", def: 84, min: 58, max: 170 },
@@ -3390,7 +3391,7 @@ export class CommitGraph extends LitElement {
           );
     const label = esc(
       isWip
-        ? "Uncommitted changes"
+        ? l10n.t("Uncommitted changes")
         : `${row.shortSha}: ${row.subject} — ${row.author}, ${relTime(row.authorDate)}`,
     );
     return (
@@ -3399,7 +3400,7 @@ export class CommitGraph extends LitElement {
       // as you arrowed through history — every row carries a good aria-label
       // and none of them was ever announced.
       `<div class="${cls}" role="row" id="gs-row-${row.sha}" data-sha="${row.sha}" ` +
-      (canReorder ? `title="Drag to reorder" ` : "") +
+      (canReorder ? `title="${l10n.t("Drag to reorder")}" ` : "") +
       (this.chainShas.length > 0 && this.isFirstInert(row.sha)
         ? `data-inert-why="${esc(stopReason(this.chainStop))}" `
         : "") +
@@ -4206,24 +4207,24 @@ export class CommitGraph extends LitElement {
           ? `${this.searchMatches.length.toLocaleString()}${this.hasMore ? "+" : ""} match${this.searchMatches.length === 1 ? "" : "es"}`
           : `${this.matchIdx + 1}/${this.searchMatches.length}${this.hasMore ? "+" : ""}`
         : this.hasMore
-          ? `No results in ${n.toLocaleString()} loaded`
-          : "No results"
+          ? l10n.t("No results in {0} loaded", n.toLocaleString())
+          : l10n.t("No results")
       : "";
     return html`<div class="gheader">
       <span
         class="gh-branch ${branch ? "" : "is-detached"}"
         title=${branch
-          ? `${branch} (current branch)`
+          ? l10n.t("{0} (current branch)", branch)
           : this.head
-            ? `Detached HEAD at ${this.head.slice(0, 8)} — commits here belong to no branch`
-            : "Detached HEAD"}
+            ? l10n.t("Detached HEAD at {0} — commits here belong to no branch", this.head.slice(0, 8))
+            : l10n.t("Detached HEAD")}
       >
         <span
           class="codicon codicon-${branch ? "git-branch" : "warning"}"
           aria-hidden="true"
         ></span>
         <span class="nm"
-          >${branch || (this.head ? this.head.slice(0, 8) : "no commits yet")}</span
+          >${branch || (this.head ? this.head.slice(0, 8) : l10n.t("no commits yet"))}</span
         >
       </span>
       ${count ? html`<span class="gh-count">${count}</span>` : nothing}
@@ -4236,7 +4237,7 @@ export class CommitGraph extends LitElement {
           class="gh-input"
           type="text"
           placeholder=${this.searchPlaceholder()}
-          aria-label="Search commits"
+          aria-label="${l10n.t("Search commits")}"
           .value=${this.searchQuery}
           @input=${this.onSearchInput}
           @keydown=${this.onSearchKey}
@@ -4280,11 +4281,11 @@ export class CommitGraph extends LitElement {
 
   private searchPlaceholder(): string {
     switch (this.searchScope) {
-      case "message": return "Search messages…";
-      case "author": return "Search authors…";
-      case "sha": return "Search SHA…";
-      case "refs": return "Search branches & tags…";
-      default: return "Search commits, authors, refs…";
+      case "message": return l10n.t("Search messages…");
+      case "author": return l10n.t("Search authors…");
+      case "sha": return l10n.t("Search SHA…");
+      case "refs": return l10n.t("Search branches & tags…");
+      default: return l10n.t("Search commits, authors, refs…");
     }
   }
 
@@ -4373,10 +4374,10 @@ export class CommitGraph extends LitElement {
     return html`<div
       class="gh-pop gh-branches-pop"
       role="menu"
-      aria-label="Branches"
+      aria-label="${l10n.t("Branches")}"
       @keydown=${this.onPopoverKeyDown}
     >
-      <div class="gh-pop-title">Show branches</div>
+      <div class="gh-pop-title">${l10n.t("Show branches")}</div>
       <div class="gh-presets">
         ${REF_PRESETS.map((p) => {
           const why = presetUnavailable(p.id, refs);
@@ -4400,8 +4401,8 @@ export class CommitGraph extends LitElement {
         <span class="codicon codicon-search" aria-hidden="true"></span>
         <input
           type="text"
-          placeholder="Filter branches…"
-          aria-label="Filter the branch list"
+          placeholder="${l10n.t("Filter branches…")}"
+          aria-label="${l10n.t("Filter the branch list")}"
           .value=${this.branchQuery}
           @input=${this.onBranchQueryInput}
         />
@@ -4477,7 +4478,7 @@ export class CommitGraph extends LitElement {
         @click=${() => pick(m.refs)}
       >
         <span class="codicon codicon-filter" aria-hidden="true"></span>
-        <span class="lbl">${m.kind === "tag" ? "Show only this tag" : "Show only this branch"}</span>
+        <span class="lbl">${m.kind === "tag" ? l10n.t("Show only this tag") : l10n.t("Show only this branch")}</span>
       </button>
       ${this.refFilter
         ? html`<button
@@ -4489,7 +4490,7 @@ export class CommitGraph extends LitElement {
                 pick(inFilter ? removeRefs(this.refFilter, m.refs) : addRefs(this.refFilter, m.refs))}
             >
               <span class="codicon codicon-${inFilter ? "dash" : "add"}" aria-hidden="true"></span>
-              <span class="lbl">${inFilter ? "Remove from filter" : "Add to filter"}</span>
+              <span class="lbl">${inFilter ? l10n.t("Remove from filter") : l10n.t("Add to filter")}</span>
             </button>
             <div class="gh-pop-sep"></div>
             <button
@@ -4533,8 +4534,8 @@ export class CommitGraph extends LitElement {
       <button
         class="gh-iconbtn gh-columns-btn"
         type="button"
-        title="Columns"
-        aria-label="Show or hide columns"
+        title="${l10n.t("Columns")}"
+        aria-label="${l10n.t("Show or hide columns")}"
         aria-haspopup="menu"
         aria-expanded=${this.columnsOpen ? "true" : "false"}
         @click=${this.toggleColumnsPopover}
@@ -4575,8 +4576,8 @@ export class CommitGraph extends LitElement {
             <div class="gh-pop-sep"></div>
             <div class="gh-pop-hint">
               ${hiddenCount === 0
-                ? "Graph & message are always shown"
-                : `${hiddenCount} hidden · drag header edges to resize`}
+                ? l10n.t("Graph & message are always shown")
+                : l10n.t("{0} hidden · drag header edges to resize", hiddenCount)}
             </div>
           </div>`
         : nothing}
@@ -4588,20 +4589,20 @@ export class CommitGraph extends LitElement {
     if (this.status === "error") {
       return html`${header}<div class="placeholder">
           <span class="ph-icon codicon codicon-warning"></span>
-          <div class="ph-title">Couldn't load the history</div>
+          <div class="ph-title">${l10n.t("Couldn't load the history")}</div>
           ${this.errorMessage
             ? html`<div class="ph-detail">${this.errorMessage}</div>`
             : nothing}
           <button class="ph-retry" @click=${() => this.onAction({ type: "refresh" })}>
-            <span class="codicon codicon-refresh"></span> Retry
+            <span class="codicon codicon-refresh"></span> ${l10n.t("Retry")}
           </button>
         </div>${nothing}`;
     }
     if (this.status === "no-repo") {
       return html`${header}<div class="placeholder">
           <span class="ph-icon codicon codicon-source-control"></span>
-          <div class="ph-title">No repository open</div>
-          <div class="ph-detail">Open a folder that's under Git and its history will appear here.</div>
+          <div class="ph-title">${l10n.t("No repository open")}</div>
+          <div class="ph-detail">${l10n.t("Open a folder that's under Git and its history will appear here.")}</div>
         </div>${nothing}`;
     }
     if (this.status === "discovering") {
@@ -4609,27 +4610,27 @@ export class CommitGraph extends LitElement {
       // repository open" while one may still be found.
       return html`${header}<div class="placeholder" role="status">
           <div class="spinner" aria-hidden="true"></div>
-          <div class="ph-title">Looking for a repository…</div>
+          <div class="ph-title">${l10n.t("Looking for a repository…")}</div>
         </div>${nothing}`;
     }
     if (this.status === "empty") {
       return html`${header}<div class="placeholder">
           <span class="ph-icon codicon codicon-git-commit"></span>
-          <div class="ph-title">No commits yet</div>
-          <div class="ph-detail">Make your first commit and the history will appear here.</div>
+          <div class="ph-title">${l10n.t("No commits yet")}</div>
+          <div class="ph-detail">${l10n.t("Make your first commit and the history will appear here.")}</div>
         </div>${nothing}`;
     }
     if (this.status === "loading" && this.rows.length === 0) {
       return html`${header}<div class="placeholder">
           <div class="spinner"></div>
-          <div>Loading history…</div>
+          <div>${l10n.t("Loading history…")}</div>
         </div>${nothing}`;
     }
     return html`${header}${this.colHeadHtml()}<div
         class="scroller"
         tabindex="0"
         role="grid"
-        aria-label="Commit graph"
+        aria-label="${l10n.t("Commit graph")}"
         aria-multiselectable="true"
         aria-rowcount=${this.rows.length}
         aria-activedescendant=${this.selectedSha ? `gs-row-${this.selectedSha}` : nothing}
@@ -4709,27 +4710,27 @@ export class CommitGraph extends LitElement {
   private colHeadHtml() {
     return html`<div class="colhead">
       <span class="ch-graph"
-        ><span class="ch-label">Graph</span>${this.resizeHandle("graph")}</span
+        ><span class="ch-label">${l10n.t("Graph")}</span>${this.resizeHandle("graph")}</span
       >
       <span class="ch-refs"
-        ><span class="ch-label">Branch / Tag</span>${this.resizeHandle("refs")}</span
+        ><span class="ch-label">${l10n.t("Branch / Tag")}</span>${this.resizeHandle("refs")}</span
       >
       <span class="ch-subject"
-        ><span class="ch-label">Commit message</span>${this.resizeHandle(
+        ><span class="ch-label">${l10n.t("Commit message")}</span>${this.resizeHandle(
           "changes",
           true,
         )}</span
       >
       <span class="ch-changes"
-        ><span class="ch-label">Changes</span>${this.resizeHandle("changes")}</span
+        ><span class="ch-label">${l10n.t("Changes")}</span>${this.resizeHandle("changes")}</span
       >
       <span class="ch-author"
-        ><span class="ch-label">Author</span>${this.resizeHandle("author")}</span
+        ><span class="ch-label">${l10n.t("Author")}</span>${this.resizeHandle("author")}</span
       >
       <span class="ch-date"
-        ><span class="ch-label">Date</span>${this.resizeHandle("date")}</span
+        ><span class="ch-label">${l10n.t("Date")}</span>${this.resizeHandle("date")}</span
       >
-      <span class="ch-sha"><span class="ch-label">SHA</span></span>
+      <span class="ch-sha"><span class="ch-label">${l10n.t("SHA")}</span></span>
     </div>`;
   }
 
@@ -4747,15 +4748,15 @@ export class CommitGraph extends LitElement {
       role="separator"
       aria-orientation="vertical"
       aria-label=${invert
-        ? "Resize Commit message / Changes divider"
-        : `Resize ${spec.label} column`}
+        ? l10n.t("Resize Commit message / Changes divider")
+        : l10n.t("Resize {0} column", spec.label)}
       /* A divider resizes the column to its LEFT, which is the table
          convention but is not self-evident when the label you are standing
          next to is the one on the RIGHT ("I dragged Author and Changes
          moved"). Name the column out loud. */
       title=${invert
-        ? "Drag to resize Commit message / Changes"
-        : `Drag to resize ${spec.label}  ·  double-click to reset`}
+        ? l10n.t("Drag to resize Commit message / Changes")
+        : l10n.t("Drag to resize {0}  ·  double-click to reset", spec.label)}
       aria-valuenow=${Math.round(w)}
       aria-valuemin=${spec.min}
       aria-valuemax=${spec.max}
@@ -4828,7 +4829,7 @@ function chipHtml(entry: ChipEntry): string {
   const { ref, label, remotes, twins } = entry;
   const nm = refNameHtml(ref, label);
   const tail = tailHtml(remotes);
-  const also = remotes.length ? ` · also on ${esc(remotes.join(", "))}` : "";
+  const also = remotes.length ? l10n.t(" · also on {0}", esc(remotes.join(", "))) : "";
   const tip = esc(tipData([{ name: ref.name, label, fullName: ref.fullName, kind: ref.kind, remotes, twins }]));
   // `data-full` / `data-twins` are what the chip's filter menu (issue #30)
   // resolves by: the chip's own full name and the folded twins', so "main ☁"
@@ -4843,13 +4844,13 @@ function chipHtml(entry: ChipEntry): string {
     case "currentHead":
       // No leading dot: the filled accent already marks the current branch, and
       // the dot + name + cloud tail read as clutter at chip size.
-      return `<span ${attrs("chip chip-current", "current HEAD")}>${BRANCH_ICON}${nm}${tail}</span>`;
+      return `<span ${attrs("chip chip-current", l10n.t("current HEAD"))}>${BRANCH_ICON}${nm}${tail}</span>`;
     case "head":
-      return `<span ${attrs("chip chip-head", "local branch")}>${BRANCH_ICON}${nm}${tail}</span>`;
+      return `<span ${attrs("chip chip-head", l10n.t("local branch"))}>${BRANCH_ICON}${nm}${tail}</span>`;
     case "remoteHead":
-      return `<span ${attrs("chip chip-remote", "remote branch")}>${REMOTE_ICON}${nm}</span>`;
+      return `<span ${attrs("chip chip-remote", l10n.t("remote branch"))}>${REMOTE_ICON}${nm}</span>`;
     case "tag":
-      return `<span ${attrs("chip chip-tag", "tag")}>${TAG_ICON}${nm}</span>`;
+      return `<span ${attrs("chip chip-tag", l10n.t("tag"))}>${TAG_ICON}${nm}</span>`;
   }
 }
 

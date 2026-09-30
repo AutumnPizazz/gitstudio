@@ -16,6 +16,7 @@
 // senders are thin.
 
 import * as vscode from "vscode";
+import * as l10n from "@vscode/l10n";
 
 const PREFIX = "GitStudio: ";
 
@@ -36,15 +37,15 @@ export function failed(action: string, reason?: string): string {
     .map((l) => l.trim())
     .filter(Boolean)
     .join(" ");
-  return notice(why ? `${action} failed — ${why}` : `${action} failed`);
+  return notice(why ? l10n.t("{0} failed — {1}", action, why) : `${action} failed`);
 }
 
 /** The one sentence for "there is no repository to act on". */
-export const NO_REPOSITORY = notice("No repository is open");
+export const NO_REPOSITORY = notice(l10n.t("No repository is open"));
 
 /** What the status bar says after a copy. */
 export function copiedText(what: string): string {
-  return `$(check) Copied ${what}`;
+  return l10n.t("$(check) Copied {0}", what);
 }
 
 export function notifyInfo(text: string, ...items: string[]): Thenable<string | undefined> {

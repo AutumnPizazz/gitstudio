@@ -22,6 +22,7 @@ import type {
   CommitFileChange,
   WireRef,
 } from "@gitstudio/host-bridge/commitDetailsProtocol";
+import * as l10n from "@vscode/l10n";
 
 interface ActionDef {
   id: CommitDetailsActionId;
@@ -57,10 +58,10 @@ const COMMIT_ACTIONS: ActionDef[] = [
 
 const WIP_ACTIONS: ActionDef[] = [
   { id: "commit", label: "Commit…", icon: "git-commit", primary: true },
-  { id: "stage-all", label: "Stage all", icon: "add" },
-  { id: "unstage-all", label: "Unstage all", icon: "dash" },
+  { id: "stage-all", label: l10n.t("Stage all"), icon: "add" },
+  { id: "unstage-all", label: l10n.t("Unstage all"), icon: "dash" },
   { id: "stash", label: "Stash", icon: "archive" },
-  { id: "discard-all", label: "Discard all", icon: "discard", danger: true },
+  { id: "discard-all", label: l10n.t("Discard all"), icon: "discard", danger: true },
 ];
 
 /**
@@ -836,8 +837,8 @@ export class CommitDetails extends LitElement {
   /** Close (X) affordance for the docked details panel — the host collapses the
    * dock so the graph reclaims the space. */
   private closeButton() {
-    return html`<button class="icon-btn close-details" title="Close details (Esc)"
-      aria-label="Close details"
+    return html`<button class="icon-btn close-details" title="${l10n.t("Close details (Esc)")}"
+      aria-label="${l10n.t("Close details")}"
       @click=${() => this.emit("gs-close", {})}>
       <span class="codicon codicon-close"></span></button>`;
   }
@@ -850,7 +851,7 @@ export class CommitDetails extends LitElement {
     if (!d) {
       return html`<div class="empty">
         <span class="codicon codicon-git-commit"></span>
-        <span class="et">Select a commit to see its details</span>
+        <span class="et">${l10n.t("Select a commit to see its details")}</span>
       </div>`;
     }
     const isWip = d.kind === "wip";
@@ -865,14 +866,14 @@ export class CommitDetails extends LitElement {
         </div>
         <div
           class="col-split"
-          aria-label="Resize the details column"
+          aria-label="${l10n.t("Resize the details column")}"
           aria-valuemin="280"
           aria-valuemax="560"
           aria-valuenow=${this.leftW ?? 380}
           role="separator"
           aria-orientation="vertical"
           tabindex="0"
-          title="Drag to resize · double-click to reset"
+          title="${l10n.t("Drag to resize · double-click to reset")}"
           @pointerdown=${this.onColSplitPointerDown}
           @keydown=${this.onColSplitKey}
           @dblclick=${this.resetColSplit}
@@ -1013,10 +1014,10 @@ export class CommitDetails extends LitElement {
         <span class="fallback"><span class="codicon codicon-edit"></span></span>
       </span>
       <div class="id">
-        <div class="author">Uncommitted changes
-          <span class="when">in your working tree</span>
+        <div class="author">${l10n.t("Uncommitted changes")}
+          <span class="when">${l10n.t("in your working tree")}</span>
         </div>
-        <div class="sub-when">Stage, commit, stash, or discard below</div>
+        <div class="sub-when">${l10n.t("Stage, commit, stash, or discard below")}</div>
       </div>
       <div class="head-tools">${this.closeButton()}</div>
     </div>`;
@@ -1159,16 +1160,16 @@ export class CommitDetails extends LitElement {
       return nothing;
     }
     if (state === "loading") {
-      return html`<div class="rrow"><span class="rlabel">in</span
-        ><span class="rvals"><span class="quiet">checking\u2026</span></span></div>`;
+      return html`<div class="rrow"><span class="rlabel">${l10n.t("in")}</span
+        ><span class="rvals"><span class="quiet">${l10n.t("checking…")}</span></span></div>`;
     }
     const list = this.containsList;
     if (list.length === 0) {
-      return html`<div class="rrow"><span class="rlabel">in</span
-        ><span class="rvals"><span class="quiet">no branches</span></span></div>`;
+      return html`<div class="rrow"><span class="rlabel">${l10n.t("in")}</span
+        ><span class="rvals"><span class="quiet">${l10n.t("no branches")}</span></span></div>`;
     }
     const n = `${list.length}${this.containsTruncated ? "+" : ""}`;
-    return html`<div class="rrow"><span class="rlabel">in</span
+    return html`<div class="rrow"><span class="rlabel">${l10n.t("in")}</span
       ><span class="rvals">
         <button class="linkish" @click=${this.toggleContains}
           >${n} ${list.length === 1 ? "branch" : "branches"}</button>
@@ -1191,10 +1192,10 @@ export class CommitDetails extends LitElement {
     // labelled and shaped differently: the sha is a copy target, each parent is
     // a link with a "go there" arrow.
     return html`<div class="meta-row">
-      <span class="mlabel">commit</span>
+      <span class="mlabel">${l10n.t("commit")}</span>
       <button
         class="sha-row ${copied ? "is-copied" : ""}"
-        title="Copy the full 40-character SHA"
+        title="${l10n.t("Copy the full 40-character SHA")}"
         aria-live="polite"
         @click=${() => this.copyWithFeedback(d.sha, "sha")}>
         ${copied
@@ -1273,7 +1274,7 @@ export class CommitDetails extends LitElement {
           </div>
           <div class="head-tools">${this.closeButton()}</div>
         </div>
-        <ul class="sum-list" aria-label="Selected commits">
+        <ul class="sum-list" aria-label="${l10n.t("Selected commits")}">
           ${s.commits.map(
             (c) => html`<li><button
               class="sum-row"
@@ -1318,7 +1319,7 @@ export class CommitDetails extends LitElement {
     </div>`;
 
     if (files.length === 0) {
-      return html`${header}<div class="group-label" style="text-transform:none;letter-spacing:0">No file changes.</div>`;
+      return html`${header}<div class="group-label" style="text-transform:none;letter-spacing:0">${l10n.t("No file changes.")}</div>`;
     }
 
     // WIP splits into staged / unstaged groups.

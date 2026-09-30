@@ -140,7 +140,7 @@ test("every toast is built by notice(), failed() or NO_REPOSITORY, or is a 'GitS
   // one, or git's stderr passed straight through went unread, and the
   // graph's failures ("Cherry-pick failed: error: …"), about twenty branch
   // actions (git's stderr alone) and the rebase refusals were all of those.
-  const built = /^(notice\(|failed\(|NO_REPOSITORY\b|["'`]GitStudio: )/;
+  const built = /^(notice\(|failed\(|NO_REPOSITORY\b|l10n\.t\(["'`]GitStudio: )/;
   const seen = new Set<number>();
   const hits = calls()
     .filter((c) => {

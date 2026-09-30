@@ -30,6 +30,7 @@ import type {
 } from "@gitstudio/host-bridge/conflictsProtocol";
 import { HOLD_TO_UNDO_MS } from "@gitstudio/host-bridge/conflictsProtocol";
 import { StashEndTracker, type StashEnd } from "@gitstudio/engine/conflict/stashEnd";
+import * as l10n from "@vscode/l10n";
 
 export interface DashboardOptions {
   brand: ConflictsState["brand"];
@@ -260,7 +261,7 @@ export function pendingCount(files: readonly ConflictFileView[]): number {
 /** The dashboard's title: "Conflicts (2)" while any remain. */
 export function dashboardTitle(state: Pick<ConflictsState, "files">): string {
   const pending = pendingCount(state.files);
-  return pending > 0 ? `Conflicts (${pending})` : "Conflicts";
+  return pending > 0 ? l10n.t("Conflicts ({0})", pending) : "Conflicts";
 }
 
 const NO_OP: ConflictsState["op"] = {

@@ -14,6 +14,7 @@ import { checkoutPullRequest } from "./checkoutPr";
 import { PrCreatePage } from "./prCreatePage";
 import { contextFor as targetContext } from "./prTargets";
 import { listGitHubRemotes, type GitHubRepoContext } from "./repoContext";
+import * as l10n from "@vscode/l10n";
 
 // Wires the pull request feature: GitHub auth + API, the Pull Requests list (a
 // webview view: the shared packages/webview-ui list), the pull request's page
@@ -122,7 +123,7 @@ export function registerPrFeature(
     // signed in first, so a fork's parent can be asked for.
     const entry = repos.getActive();
     if (!entry || (await listGitHubRemotes(entry)).length === 0) {
-      void vscode.window.showInformationMessage("This repository isn't connected to GitHub.");
+      void vscode.window.showInformationMessage(l10n.t("This repository isn't connected to GitHub."));
       return undefined;
     }
     if (!(await auth.getToken({ interactive: true }))) {
@@ -130,17 +131,17 @@ export function registerPrFeature(
     }
     const ctx = await contextNow();
     if (!ctx) {
-      void vscode.window.showInformationMessage("This repository isn't connected to GitHub.");
+      void vscode.window.showInformationMessage(l10n.t("This repository isn't connected to GitHub."));
       return undefined;
     }
     try {
       const pulls = (await api.listOpenPulls(ctx.owner, ctx.repo, { interactiveAuth: true })).items;
       if (pulls.length === 0) {
-        void vscode.window.showInformationMessage("No open pull requests.");
+        void vscode.window.showInformationMessage(l10n.t("No open pull requests."));
         return undefined;
       }
       const picked = await promptPick({
-        title: "Open pull requests",
+        title: l10n.t("Open pull requests"),
         choices: pulls.map((p) => ({
           id: String(p.number),
           label: p.title,
@@ -152,7 +153,7 @@ export function registerPrFeature(
       const pr = pulls.find((p) => String(p.number) === picked);
       return pr ? { pr, ctx } : undefined;
     } catch (err) {
-      void warn(err, "Couldn't list pull requests.");
+      void warn(err, l10n.t("Couldn't list pull requests."));
       return undefined;
     }
   };
@@ -164,14 +165,14 @@ export function registerPrFeature(
   const reviewKeyFor = async (thread: unknown, verb: string): Promise<string | undefined> => {
     const keys = review.reviewKeys();
     if (keys.length === 0) {
-      void vscode.window.showInformationMessage("No review is under way. Start one from a pull request's page.");
+      void vscode.window.showInformationMessage(l10n.t("No review is under way. Start one from a pull request's page."));
       return undefined;
     }
     const fromThread = thread && typeof thread === "object" && "comments" in (thread as object) ? review.keyOfThread(thread as vscode.CommentThread) : undefined;
     const direct = fromThread ?? review.reviewOfActiveEditor() ?? (keys.length === 1 ? keys[0] : undefined);
     if (direct) return direct;
     return promptPick({
-      title: `${verb} which review?`,
+      title: l10n.t("{0} which review?", verb),
       choices: keys.map((k) => {
         const r = review.reviewInfo(k)!;
         const n = review.pendingCount(k);
@@ -197,7 +198,7 @@ export function registerPrFeature(
       // `again`: GitHub refused the session there is (the list's 401 row).
       // Asked plainly, VS Code would hand that same session back.
       const token = arg?.again
-        ? await auth.signInAgain("GitHub no longer accepts this sign-in. Sign in again to see pull requests.")
+        ? await auth.signInAgain(l10n.t("GitHub no longer accepts this sign-in. Sign in again to see pull requests."))
         : await auth.getToken({ interactive: true });
       if (token) {
         void list.refresh();
@@ -208,7 +209,7 @@ export function registerPrFeature(
       // says and who looks at it — and what it will have.
       const entry = repos.getActive();
       if (!entry) {
-        void vscode.window.showInformationMessage("Open a Git repository to open a pull request from it.");
+        void vscode.window.showInformationMessage(l10n.t("Open a Git repository to open a pull request from it."));
         return;
       }
       PrCreatePage.show(createDeps, entry, typeof arg?.head === "string" ? { head: arg.head } : {});
@@ -252,9 +253,11 @@ export function registerPrFeature(
       const n = review.pendingCount(key);
       if (n > 0) {
         const ok = await promptConfirm({
-          title: `Discard ${n} pending comment${n === 1 ? "" : "s"} on #${r.number}?`,
-          message: "They haven't been sent to GitHub, and discarding them can't be undone.",
-          confirmLabel: "Discard",
+          title: n === 1
+            ? l10n.t("Discard 1 pending comment on #{0}?", r.number)
+            : l10n.t("Discard {0} pending comments on #{1}?", n, r.number),
+          message: l10n.t("They haven't been sent to GitHub, and discarding them can't be undone."),
+          confirmLabel: l10n.t("Discard"),
           danger: true,
         });
         if (!ok) return;
@@ -288,7 +291,7 @@ export function registerPrFeature(
       const resolved = await resolvePr(arg);
       if (resolved) {
         await vscode.env.clipboard.writeText(resolved.pr.htmlUrl);
-        notifyCopied(`the link to pull request #${resolved.pr.number}`);
+        notifyCopied(l10n.t("the link to pull request #{0}", resolved.pr.number));
       }
     }),
     vscode.commands.registerCommand("gitstudio.pr.merge", async (arg?: PrCommandArg) => {

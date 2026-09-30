@@ -4,6 +4,7 @@ import * as https from "node:https";
 import * as http from "node:http";
 import { URL } from "node:url";
 import { randomId, safeShort, scrub, scrubExtra, scrubGitMessage } from "@gitstudio/host-bridge/scrub";
+import * as l10n from "@vscode/l10n";
 
 /**
  * Anonymous, PII-scrubbed crash reporting — so during the beta we hear about
@@ -194,7 +195,7 @@ export class ErrorReporter implements vscode.Disposable {
       event,
       installId: this.installId,
       extVersion: this.extVersion,
-      engine: `VS Code ${vscode.version}`,
+      engine: l10n.t("VS Code {0}", vscode.version),
       product: vscode.env.appName, // "Visual Studio Code" / "Cursor" / "VSCodium"
       platform: process.platform,
       arch: process.arch,

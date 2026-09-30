@@ -4,6 +4,8 @@
 // with Merge Studio and the desktop app (mergeShell.ts); this file only
 // connects it to VS Code's messaging.
 
+import "@gitstudio/l10n/webview";
+
 import { installSolidAccent } from "./styles/solidAccent";
 import "./styles/diff.css";
 import "./styles/shell.css";
@@ -18,6 +20,7 @@ import type {
   MergeInitPayload,
 } from "@gitstudio/host-bridge/protocol";
 import { arrowDown, arrowUp } from "./icons";
+import * as l10n from "@vscode/l10n";
 
 // A see-through theme focus colour (Cursor Dark) gets an opaque accent.
 installSolidAccent();
@@ -77,8 +80,8 @@ function startDiff(root: HTMLElement, first: DiffInitPayload & { type: "diffInit
   const toolbar = document.createElement("div");
   toolbar.className = "jb-toolbar";
 
-  const prevBtn = toolbarIconButton(arrowUp, "Previous change (Shift+F7)");
-  const nextBtn = toolbarIconButton(arrowDown, "Next change (F7)");
+  const prevBtn = toolbarIconButton(arrowUp, l10n.t("Previous change (Shift+F7)"));
+  const nextBtn = toolbarIconButton(arrowDown, l10n.t("Next change (F7)"));
 
   const wsSelect = whitespaceSelect((mode) =>
     view.setRenderOptions({ whitespace: mode }),
@@ -123,13 +126,13 @@ function startDiff(root: HTMLElement, first: DiffInitPayload & { type: "diffInit
   view.onLargeFile = (large) => {
     largeNote.hidden = !large;
     largeNote.textContent = large
-      ? "Large file: word-level highlights disabled"
+      ? l10n.t("Large file: word-level highlights disabled")
       : "";
   };
 
   view.onCountsChanged = (changes) => {
     if (changes === 0) {
-      status.textContent = "Contents are identical";
+      status.textContent = l10n.t("Contents are identical");
       status.classList.add("jb-done");
     } else {
       status.textContent = `${changes} difference${changes === 1 ? "" : "s"}`;

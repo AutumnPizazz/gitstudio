@@ -8,6 +8,7 @@ import type {
   CompleteRequest,
   ModelTier,
 } from "./gitBrain";
+import * as l10n from "@vscode/l10n";
 
 // The OpenAI-compatible bring-your-own-endpoint provider. A SINGLE provider that
 // covers OpenAI, Codex, OpenRouter, Ollama, LM Studio, and any other server that
@@ -129,7 +130,7 @@ export class OpenAiProvider implements GitBrainProvider {
     };
     const key = await this.opts.getKey();
     if (typeof key === "string" && key.trim().length > 0) {
-      headers["Authorization"] = `Bearer ${key.trim()}`;
+      headers["Authorization"] = l10n.t("Bearer {0}", key.trim());
     }
     return headers;
   }
@@ -143,13 +144,13 @@ export class OpenAiProvider implements GitBrainProvider {
   private friendlyFor(status: number): string {
     switch (status) {
       case 401:
-        return "GitBrain: the OpenAI-compatible endpoint rejected the API key (401). Run “GitStudio: Set OpenAI API Key”, or clear it for a local server.";
+        return l10n.t("GitBrain: the OpenAI-compatible endpoint rejected the API key (401). Run “GitStudio: Set OpenAI API Key”, or clear it for a local server.");
       case 404:
-        return "GitBrain: the OpenAI-compatible endpoint returned 404 — check the base URL and model ID in settings.";
+        return l10n.t("GitBrain: the OpenAI-compatible endpoint returned 404 — check the base URL and model ID in settings.");
       case 429:
-        return "GitBrain: OpenAI rate limit hit — try again in a moment.";
+        return l10n.t("GitBrain: OpenAI rate limit hit — try again in a moment.");
       default:
-        return `GitBrain: OpenAI-compatible request failed (HTTP ${status}).`;
+        return l10n.t("GitBrain: OpenAI-compatible request failed (HTTP {0}).", status);
     }
   }
 
@@ -160,7 +161,7 @@ export class OpenAiProvider implements GitBrainProvider {
   /** A friendly note for a connection-level failure (local server down, etc.). */
   private reportNetwork(cfg: OpenAiConfig): void {
     this.report(
-      `GitBrain: couldn't reach ${cfg.baseUrl} — is the model server running?`,
+      l10n.t("GitBrain: couldn't reach {0} — is the model server running?", cfg.baseUrl),
     );
   }
 

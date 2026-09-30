@@ -8,6 +8,7 @@
 
 import * as vscode from "vscode";
 import type { MergeProduct, StatusItemLook } from "./product";
+import * as l10n from "@vscode/l10n";
 
 export class ConflictStatusItem implements vscode.Disposable {
   private readonly item: vscode.StatusBarItem;
@@ -19,7 +20,7 @@ export class ConflictStatusItem implements vscode.Disposable {
       10000,
     );
     this.item.name = `${product.displayName}: Conflicts`;
-    this.item.text = "$(warning) Resolve Conflicts";
+    this.item.text = l10n.t("$(warning) Resolve Conflicts");
     this.item.command = product.commands.showConflicts;
   }
 

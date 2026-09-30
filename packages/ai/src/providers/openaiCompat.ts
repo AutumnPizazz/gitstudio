@@ -19,6 +19,7 @@ import {
   type StopReason,
   type ToolCall,
 } from "../types";
+import * as l10n from "@vscode/l10n";
 
 export interface OpenAiCompatOptions {
   baseUrl: string;
@@ -66,7 +67,7 @@ export class OpenAiCompatProvider implements Provider {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     const key = await this.opts.getKey();
     if (typeof key === "string" && key.trim().length > 0) {
-      headers.Authorization = `Bearer ${key.trim()}`;
+      headers.Authorization = l10n.t("Bearer {0}", key.trim());
     }
     return headers;
   }
@@ -123,7 +124,7 @@ export class OpenAiCompatProvider implements Provider {
   async chat(messages: ChatMessage[], opts: ChatOptions = {}): Promise<ChatResult> {
     const model = (opts.modelId ?? this.opts.resolveModel(opts.model));
     if (!model) {
-      throw new AiError("No model configured for this connection.");
+      throw new AiError(l10n.t("No model configured for this connection."));
     }
     const fetchImpl = this.opts.fetchImpl ?? fetch;
     let res: Response;
@@ -136,9 +137,9 @@ export class OpenAiCompatProvider implements Provider {
       });
     } catch (err) {
       if (isAbort(err)) {
-        throw new AiError("Request cancelled.");
+        throw new AiError(l10n.t("Request cancelled."));
       }
-      throw new AiError(`Couldn't reach ${hostOf(this.opts.baseUrl)} — is the endpoint reachable?`, undefined, true);
+      throw new AiError(l10n.t("Couldn't reach {0} — is the endpoint reachable?", hostOf(this.opts.baseUrl)), undefined, true);
     }
     if (!res.ok) {
       throw httpError(res.status, hostOf(this.opts.baseUrl));
@@ -168,7 +169,7 @@ export class OpenAiCompatProvider implements Provider {
   ): Promise<string | null> {
     const model = (opts.modelId ?? this.opts.resolveModel(opts.model));
     if (!model) {
-      throw new AiError("No model configured for this connection.");
+      throw new AiError(l10n.t("No model configured for this connection."));
     }
     const fetchImpl = this.opts.fetchImpl ?? fetch;
     let res: Response;
@@ -183,7 +184,7 @@ export class OpenAiCompatProvider implements Provider {
       if (isAbort(err)) {
         return null;
       }
-      throw new AiError(`Couldn't reach ${hostOf(this.opts.baseUrl)} — is the endpoint reachable?`, undefined, true);
+      throw new AiError(l10n.t("Couldn't reach {0} — is the endpoint reachable?", hostOf(this.opts.baseUrl)), undefined, true);
     }
     if (!res.ok) {
       throw httpError(res.status, hostOf(this.opts.baseUrl));
@@ -215,7 +216,7 @@ export class OpenAiCompatProvider implements Provider {
       }
     } catch (err) {
       if (!isAbort(err)) {
-        throw new AiError(`Stream from ${hostOf(this.opts.baseUrl)} failed.`, undefined, true);
+        throw new AiError(l10n.t("Stream from {0} failed.", hostOf(this.opts.baseUrl)), undefined, true);
       }
     } finally {
       reader.releaseLock();
@@ -231,7 +232,7 @@ export class OpenAiCompatProvider implements Provider {
   ): Promise<ChatResult> {
     const model = (opts.modelId ?? this.opts.resolveModel(opts.model));
     if (!model) {
-      throw new AiError("No model configured for this connection.");
+      throw new AiError(l10n.t("No model configured for this connection."));
     }
     const fetchImpl = this.opts.fetchImpl ?? fetch;
     let res: Response;
@@ -246,7 +247,7 @@ export class OpenAiCompatProvider implements Provider {
       if (isAbort(err)) {
         return { text: "", toolCalls: [], stopReason: "stop" };
       }
-      throw new AiError(`Couldn't reach ${hostOf(this.opts.baseUrl)} — is the endpoint reachable?`, undefined, true);
+      throw new AiError(l10n.t("Couldn't reach {0} — is the endpoint reachable?", hostOf(this.opts.baseUrl)), undefined, true);
     }
     if (!res.ok) {
       throw httpError(res.status, hostOf(this.opts.baseUrl));
@@ -310,7 +311,7 @@ export class OpenAiCompatProvider implements Provider {
       }
     } catch (err) {
       if (!isAbort(err)) {
-        throw new AiError(`Stream from ${hostOf(this.opts.baseUrl)} failed.`, undefined, true);
+        throw new AiError(l10n.t("Stream from {0} failed.", hostOf(this.opts.baseUrl)), undefined, true);
       }
     } finally {
       reader.releaseLock();
@@ -380,13 +381,13 @@ function httpError(status: number, host: string): AiError {
   switch (status) {
     case 401:
     case 403:
-      return new AiError(`${host} rejected the API key (HTTP ${status}). Check the key in Settings ▸ AI.`, status);
+      return new AiError(l10n.t("{0} rejected the API key (HTTP {1}). Check the key in Settings ▸ AI.", host, status), status);
     case 404:
-      return new AiError(`${host} returned 404 — check the base URL and model id.`, status);
+      return new AiError(l10n.t("{0} returned 404 — check the base URL and model id.", host), status);
     case 429:
-      return new AiError(`${host} rate limit hit — try again in a moment.`, status, true);
+      return new AiError(l10n.t("{0} rate limit hit — try again in a moment.", host), status, true);
     default:
-      return new AiError(`${host} request failed (HTTP ${status}).`, status, status >= 500);
+      return new AiError(l10n.t("{0} request failed (HTTP {1}).", host, status), status, status >= 500);
   }
 }
 
