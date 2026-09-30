@@ -9,9 +9,17 @@ The VS Code / Cursor extension has its own changelog at
 separately — desktop releases are tagged `app-v*`, extension releases `ext-v*` —
 but they share the same engine, so most Git behaviour lands in both at once.
 
-## [Unreleased]
+## [2.4.0] - 2026-09-29
 
 ### Added
+- **Dark style: Graphite or Neon.** Settings ▸ Appearance has a new *Dark
+  style* choice, shown as each style's Dock icon beside a swatch of its
+  window, and it sets both at once. **Graphite** (the default) is the grey
+  icon macOS shows while GitStudio is closed, with the familiar dark theme, so
+  opening the app no longer changes the Dock icon. **Neon** is the
+  near-black icon with a deeper, more violet dark theme; its Dock icon applies
+  while GitStudio runs, and macOS still shows the Graphite icon while it is
+  closed. The launch screen opens in the chosen style from its first frame.
 - **A launch screen.** GitStudio's window now opens straight onto the
   whole GitStudio mark — the app icon's cube, its commit graph and the name,
   settling gently into place — instead of appearing late and painting itself
@@ -70,6 +78,28 @@ but they share the same engine, so most Git behaviour lands in both at once.
   it isn't on the PATH GitStudio was started with: an app opened from the
   Dock doesn't get your shell's PATH, and a Windows app keeps the PATH it
   started with.
+
+- **Push no longer re-creates a branch someone deleted on the remote.** When a
+  branch's remote copy was deleted but it still tracked it, Push published it
+  again. It now stops and says the branch it tracks is gone.
+- **A repository with no commits yet shows "No commits yet"** in the graph,
+  not "Couldn't load history".
+- **A failed clone says why.** The clone sheet showed git's last line — often
+  a fragment like "and the repository exists." — instead of the reason.
+- **On Windows, repositories are grouped inside the folders they sit in.**
+  The folders you track came from the folder picker with backslashes, and
+  every repository landed outside them.
+- **Release tags show their date.** Annotated tags — most releases — came
+  back with no date.
+- **A reword keeps its `#` lines after the rebase pauses**, a rebase git
+  refuses up front is no longer shown as stopped on conflicts, and Stash &
+  Retry is not offered for a branch or commit git doesn't know.
+- **Merge editor: a conflict is written where it happened**, and an add/add
+  conflict no longer carries an extra blank line on each side.
+- **The Assistant:** cancelling a chat just as its message was sent could
+  crash the app's main process; an Azure OpenAI address ending in `/` before
+  its `?api-version=` produced a broken URL; and the first connection added on
+  a fresh install could leak into later ones.
 
 ### Security
 - **Crash reports no longer carry a commit's subject, or a branch name git
