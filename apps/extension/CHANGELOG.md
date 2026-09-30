@@ -4,7 +4,7 @@ All notable changes to **GitStudio** are documented here. This project adheres t
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.17.0] - 2026-09-29
 
 ### Added
 - **Support GitStudio…** GitStudio is free and open source, and if it saves
@@ -29,8 +29,38 @@ All notable changes to **GitStudio** are documented here. This project adheres t
   than they should have, with the release that fixed each. The crash-report
   setting's description now says what is scrubbed, including that a remote's
   host name is kept.
+- **The AI features are just called AI.** Settings, Get Started, the commit
+  box, progress and error messages no longer use an old name for them.
 
 ### Fixed
+- **Push no longer re-creates a branch someone deleted on the remote.** When a
+  branch's remote copy was deleted but it still tracked it, Push (and pushing
+  a branch from the Branches view) published it again. It now stops and says
+  the branch it tracks is gone.
+- **A reword keeps its `#` lines after the rebase pauses.** Lines like
+  "#123 was the ticket" in a reworded message were deleted once the rebase
+  had stopped for a conflict or an edit.
+- **A rebase git refuses is no longer shown as stopped on conflicts.** With
+  `rebase.autoStash` on and conflicts still unresolved, the rebase is refused
+  up front, with the reason.
+- **Stash & Retry is not offered for a name git doesn't know.** A rebase onto,
+  or a cherry-pick or revert of, something that doesn't exist blamed your
+  changes; git refuses the name before it looks at them.
+- **An unreadable repository says so.** A `.git` file pointing nowhere read
+  as a detached HEAD, and the push review said "HEAD is detached".
+- **On Windows, File History, Line History, Open Changes and the Timeline
+  find the file's repository.** They compared paths with `/`, so on Windows
+  every file was "not inside an open Git repository".
+- **Sync's "upstream no longer exists" question names the upstream** — "tracks
+  origin/topic" — instead of leaving it out.
+- **Merge editor: a conflict is written where it happened.** A conflict both
+  sides inserted between two lines was written after the next line when only
+  that line had been edited. And an add/add conflict (no common base) no
+  longer carries an extra blank line on each side or loses the file's last
+  line break — left untouched, the file is exactly what git wrote.
+- **Closing a repository whose git could not start no longer signals the
+  editor's own processes.** Stopping a git that never started sent the signal
+  to the whole process group.
 - **An image in a pull request written as `//host/a.png` shows.** An address
   that starts with two slashes now means https, as it does on GitHub; it used
   to resolve against the page itself and show as a broken image.
@@ -1983,7 +2013,7 @@ commit that builds green on every platform.
 - **Changed-files badge** on the activity-bar icon, matching the built-in Source
   Control behaviour, with incoming-commit count in the tooltip. Disable with
   `gitstudio.changesBadge`.
-- **Disable AI Features** command, so turning GitBrain off no longer means
+- **Disable AI Features** command, so turning the AI features off no longer means
   hunting for a provider setting.
 
 ### Changed
@@ -2186,7 +2216,7 @@ and Cursor, with the full workflow in one extension.
   list, open, check out, review (inline comments + submit), merge, and create pull requests.
 
 ### Assist (optional)
-- **GitBrain AI** — bring-your-own-key (Anthropic) or zero-key (GitHub Copilot's model):
+- **AI features** — bring-your-own-key (Anthropic) or zero-key (GitHub Copilot's model):
   AI commit messages, explain-this-diff, and change summaries. Off until enabled; the key is
   stored in SecretStorage and never reaches a webview; AI never gates a Git operation.
 

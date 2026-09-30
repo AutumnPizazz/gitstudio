@@ -124,7 +124,7 @@ The lanes, chips and avatars follow your theme — the same graph in Light Moder
 
 ## Optional AI, on your terms
 
-**Optional, and it never gates a Git operation.** With GitHub Copilot (or Cursor's models) it works with nothing to set up; otherwise it stays off until you connect a provider, and *GitStudio: Disable AI Features* turns it off entirely. GitBrain adds **Generate Commit Message**, **Explain Diff**, **Summarize Changes**, and **Review Changes** — a structured review of your working tree with a customizable prompt — plus a ✨ button in the commit box that drafts a message from your staged diff.
+**Optional, and it never gates a Git operation.** With GitHub Copilot (or Cursor's models) it works with nothing to set up; otherwise it stays off until you connect a provider, and *GitStudio: Disable AI Features* turns it off entirely. It adds **Generate Commit Message**, **Explain Diff**, **Summarize Changes**, and **Review Changes** — a structured review of your working tree with a customizable prompt — plus a ✨ button in the commit box that drafts a message from your staged diff.
 
 Connect it however you already pay for AI:
 
@@ -187,6 +187,7 @@ In the Settings editor GitStudio's options are grouped — *General*, *Changes &
 | `gitstudio.ai.commitStyle` | `conventional` | `conventional` · `concise` · `descriptive` |
 | `gitstudio.pr.defaultMergeMethod` | `squash` | `merge` · `squash` · `rebase` |
 | `gitstudio.errorReporting.enabled` | `true` | Anonymous, scrubbed crash reports (honors VS Code's telemetry setting) |
+| `gitstudio.avatars.gravatar` | `true` | Look commit authors' pictures up on Gravatar (by a hash of their email) |
 
 ## Requirements
 
@@ -200,7 +201,14 @@ In the Settings editor GitStudio's options are grouped — *General*, *Changes &
 
 ## Privacy
 
-No accounts, no usage tracking, no analytics — GitStudio never reports what you *do*. The one thing it sends, during the beta, is **anonymous crash reports** when a command fails, so bugs get found without waiting for someone to file them. Each report is only the *shape* of a failure — an error type with a scrubbed message, or the name of the git operation that failed — tagged with a random install id and your OS/editor version. Absolute paths, home directories, emails, remote URLs, tokens, and full commit SHAs are stripped before anything leaves your machine. Never your code, file names, commit messages, or branch names. It honors VS Code's global `telemetry.telemetryLevel`, and you can opt out of just this with `gitstudio.errorReporting.enabled: false`.
+No accounts, no usage tracking, no analytics — GitStudio never reports what you *do*. What it does send, and when:
+
+- **Anonymous crash reports** when a command fails, on by default: the *shape* of a failure (an error type with a scrubbed message, or the git operation that failed), a random install id and your OS and editor version. Paths, emails, remote URLs, tokens and full commit SHAs are stripped on your machine; never your code, file names, commit messages or branch names. They follow VS Code's `telemetry.telemetryLevel`, and `gitstudio.errorReporting.enabled: false` turns just these off.
+- **Commit authors' pictures**, from Gravatar (asked by a hash of the author's email) or GitHub. `gitstudio.avatars.gravatar: false` turns Gravatar off.
+- **GitHub requests**, with your own sign-in, when you use the GitHub features.
+- **Your diff, to the AI provider you chose**, only when you run an AI command.
+
+Every connection, in full: [PRIVACY.md](https://github.com/GitStudioHQ/gitstudio/blob/main/apps/extension/PRIVACY.md).
 
 ## Support
 
