@@ -610,7 +610,12 @@ async function askFolderAndCreate(
     const holder = (await a.ctx.worktrees.list()).find((e) => sameFolder(e.path, target));
     if (holder) {
       const gone = !existsSync(holder.path);
-      hint = l10n.t("git still has a worktree at {0} ({1}){2} — {3} that worktree in Worktrees, or choose another folder. {4}", tildify(target), holder.branch ?? l10n.t("detached at {0}", holder.head.slice(0, 7)), gone ? l10n.t(", though its folder is gone") : "", gone ? l10n.t("forget") : l10n.t("remove"), intro);
+      const where = holder.branch ?? l10n.t("detached at {0}", holder.head.slice(0, 7));
+      // Whole messages: the clause sits mid-sentence, where a spliced fragment
+      // reads wrong once the sentence is Chinese (see the i18n notes).
+      hint = gone
+        ? l10n.t("git still has a worktree at {0} ({1}), though its folder is gone — {2} that worktree in Worktrees, or choose another folder. {3}", tildify(target), where, l10n.t("forget"), intro)
+        : l10n.t("git still has a worktree at {0} ({1}) — {2} that worktree in Worktrees, or choose another folder. {3}", tildify(target), where, l10n.t("remove"), intro);
       continue;
     }
     break;
@@ -836,8 +841,11 @@ async function askAndRemove(
     return;
   }
   const verb = removal.kind === "present" ? "remove" : "forget";
+  const why = res.stderr.trim() || "git worktree failed.";
   void vscode.window.showErrorMessage(
-    l10n.t("GitStudio: couldn't {0} the worktree {1}{2} — {3}", verb, label, res.stashed ? l10n.t(" — its changes were stashed first, and are in the stash list") : "", res.stderr.trim() || "git worktree failed."),
+    res.stashed
+      ? l10n.t("GitStudio: couldn't {0} the worktree {1} — its changes were stashed first, and are in the stash list — {2}", verb, label, why)
+      : l10n.t("GitStudio: couldn't {0} the worktree {1} — {2}", verb, label, why),
   );
   refresh();
 }
@@ -999,8 +1007,12 @@ export async function pruneWorktrees(
   flash(
     pruned.length > 0
       ? pruned.length === 1
-        ? l10n.t("Pruned 1 worktree{0}: {1}", allGone ? l10n.t(" whose folder was gone") : "", names(pruned))
-        : l10n.t("Pruned {0} worktrees{1}: {2}", pruned.length, allGone ? l10n.t(" whose folder was gone") : "", names(pruned))
+        ? allGone
+          ? l10n.t("Pruned 1 worktree whose folder was gone: {0}", names(pruned))
+          : l10n.t("Pruned 1 worktree: {0}", names(pruned))
+        : allGone
+          ? l10n.t("Pruned {0} worktrees whose folder was gone: {1}", pruned.length, names(pruned))
+          : l10n.t("Pruned {0} worktrees: {1}", pruned.length, names(pruned))
       : l10n.t("Nothing was pruned"),
   );
   refresh();

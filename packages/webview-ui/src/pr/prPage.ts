@@ -652,7 +652,11 @@ export class PullRequestPage {
       const text = el("div", "prp-status-text");
       const title = el("div", "prp-status-title");
       if (pr.kind === "merged") {
-        title.append(l10n.t("Merged{0} into {1} ", pr.mergedBy ? l10n.t(" by {0}", who(pr.mergedBy)) : "", pr.baseRef));
+        title.append(
+          pr.mergedBy
+            ? l10n.t("Merged by {0} into {1} ", who(pr.mergedBy), pr.baseRef)
+            : l10n.t("Merged into {0} ", pr.baseRef),
+        );
         if (pr.mergedAt) title.appendChild(when(pr.mergedAt, s.now));
       } else {
         title.append(l10n.t("Closed without merging "));

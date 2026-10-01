@@ -99,8 +99,18 @@ const SRC = join(__dirname, "..", "src", "changes", "commitView.ts");
  * harness sees `post(data)` (a host message), `posted` (what the page sent),
  * `tick()` (a macrotask), `expect(cond, what)`, `fails`, `notes`, and ends
  * the run by the verdict it returns. `width` narrows the body to a sidebar.
+ *
+ * `messages` is the bundle the words are read from — the zh-cn one, for a test
+ * of the Chinese page. It must agree with whatever `@gitstudio/l10n` was
+ * configured with, so the template's words and the script's bundle match; see
+ * pageHoles.ts.
  */
-export function changesViewPage(opts: { theme: ThemeName; harness: string; width?: number }): string {
+export function changesViewPage(opts: {
+  theme: ThemeName;
+  harness: string;
+  width?: number;
+  messages?: Record<string, string>;
+}): string {
   const theme = THEMES[opts.theme];
   const codicons = pathToFileURL(join(ROOT, "node_modules", "@vscode", "codicons", "dist", "codicon.css")).href;
   const tokens = readFileSync(join(ROOT, "packages", "webview-ui", "src", "styles", "tokens.css"), "utf8");
@@ -141,7 +151,7 @@ export function changesViewPage(opts: { theme: ThemeName; harness: string; width
     // The words and the bundle: see pageHoles.ts.
     ...l10nHoles("harness"),
   };
-  return filledTemplate("commitView.ts html()", SRC, "<!DOCTYPE html>", holes)
+  return filledTemplate("commitView.ts html()", SRC, "<!DOCTYPE html>", holes, opts.messages)
     .replace('<body class="layout-list">', () => `<body class="layout-list ${theme.bodyClass}">`)
     .replace("</head>", () => `${prelude}\n</head>`)
     .replace("</body>", () => `${harness}\n</body>`);

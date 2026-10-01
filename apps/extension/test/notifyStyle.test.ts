@@ -149,10 +149,14 @@ test("every toast is built by notice(), failed() or NO_REPOSITORY, or is a 'GitS
   // graph's failures ("Cherry-pick failed: error: …"), about twenty branch
   // actions (git's stderr alone) and the rebase refusals were all of those.
   const built = /^(notice\(|failed\(|NO_REPOSITORY\b|l10n\.t\(["'`]GitStudio: )/;
+  // A ternary whose two branches are both "GitStudio: " messages still says
+  // one, whichever branch runs: the guard reads the branch sentences, not the
+  // choice between them.
+  const branchy = /\?\s*l10n\.t\(["'`]GitStudio: [\s\S]*:\s*l10n\.t\(["'`]GitStudio: /;
   const seen = new Set<number>();
   const hits = calls()
     .filter((c) => {
-      if (PR_SENTENCES_OWED.test(c.rel) || built.test(c.args)) return false;
+      if (PR_SENTENCES_OWED.test(c.rel) || built.test(c.args) || branchy.test(c.args)) return false;
       const i = EXEMPT.findIndex((e) => e.rel === c.rel && e.args.test(c.args.replace(/\s+/g, " ").trim()));
       if (i >= 0) {
         seen.add(i);

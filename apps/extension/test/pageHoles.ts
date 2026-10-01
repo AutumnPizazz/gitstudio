@@ -8,7 +8,9 @@
  * `${l10nWebviewScript(nonce)}` one.
  *
  * Both are filled here, and the page the tests render is the English page —
- * which is what a browser test asserts on:
+ * which is what a browser test asserts on. A test that wants the Chinese page
+ * passes `messages` (the zh-cn bundle) and configures `@gitstudio/l10n` with
+ * it, so the words and the bundle agree:
  *
  *  - `l10n.t("…")` is the host's own call, so its value is the English source
  *    text (in VS Code under a Chinese display language it would be the
@@ -38,12 +40,16 @@ export function l10nHoles(nonce: string): Record<string, string> {
  * The value of one hole of a page template.
  *
  * @param where - Where the template came from, for the error a test would see.
+ * @param messages - The bundle to read the `l10n.t("…")` holes from. Missing
+ *   means the English source text; a bundle without the message means the same,
+ *   which is what VS Code does for a string a translation has not reached yet.
  */
 export function fillHole(
   where: string,
   span: ts.TemplateSpan,
   sf: ts.SourceFile,
   holes: Record<string, string>,
+  messages?: Record<string, string>,
 ): string {
   const name = span.expression.getText(sf);
   if (name in holes) {
@@ -51,7 +57,7 @@ export function fillHole(
   }
   const english = englishMessage(span.expression);
   if (english !== undefined) {
-    return english;
+    return messages?.[english] ?? english;
   }
   throw new Error(`${where}: a hole this page cannot fill: \${${name}}`);
 }
@@ -82,12 +88,15 @@ function englishMessage(expression: ts.Expression): string | undefined {
  *
  * @param where - Where the template came from (`"commitView.ts html()"`), for
  * the error a page that cannot be built would raise.
+ * @param messages - The bundle the `l10n.t("…")` holes are read from; English
+ * source text when it is left out.
  */
 export function filledTemplate(
   where: string,
   file: string,
   marker: string,
   holes: Record<string, string>,
+  messages?: Record<string, string>,
 ): string {
   const source = readFileSync(file, "utf8");
   const sf = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
@@ -110,7 +119,7 @@ export function filledTemplate(
   // head "`…${", middle "}…${", tail "}…`" — the delimiters come off.
   let html = tpl.head.getText(sf).slice(1, -2);
   for (const span of tpl.templateSpans) {
-    html += fillHole(where, span, sf, holes);
+    html += fillHole(where, span, sf, holes, messages);
     const lit = span.literal.getText(sf);
     html += ts.isTemplateTail(span.literal) ? lit.slice(1, -1) : lit.slice(1, -2);
   }
