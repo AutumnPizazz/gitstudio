@@ -187,7 +187,8 @@ export async function movePrBranch(
     return { code: 1, stdout: "", stderr: l10n.t("{0} doesn't exist yet.", plan.local) };
   }
   return proc.run(
-    ["update-ref", "-m", l10n.t("GitStudio: update {0} to pull request head", plan.local), plan.ref, plan.sha, plan.localSha],
+    // English on purpose: the `-m` text is the reflog entry git stores.
+    ["update-ref", "-m", `GitStudio: update ${plan.local} to pull request head`, plan.ref, plan.sha, plan.localSha],
     opts,
   );
 }

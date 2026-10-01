@@ -175,7 +175,7 @@ async function runRefCheckout(
     }
   }
   const plan = c.plan;
-  await reportApplied(await applyOrAsk(a.ctx, checkoutOp(plan.args)), plan.success, refresh, "Checkout");
+  await reportApplied(await applyOrAsk(a.ctx, checkoutOp(plan.args)), plan.success, refresh, l10n.t("Checkout"));
 }
 
 /**
@@ -279,7 +279,7 @@ export async function mergeBranchIntoCurrent(
       a.ctx,
       result,
       l10n.t("Merged {0}", name),
-      "Merge",
+      l10n.t("Merge"),
       "MERGE_HEAD",
       refresh,
     );
@@ -330,7 +330,7 @@ export async function rebaseCurrentOnto(
       a.ctx,
       result,
       l10n.t("Rebased onto {0}", name),
-      "Rebase",
+      l10n.t("Rebase"),
       "REBASE_HEAD",
       refresh,
     );
@@ -490,7 +490,7 @@ export async function deleteBranch(
   const ok = await confirm(
     l10n.t("Delete branch {0}?", name),
     l10n.t("The branch label is removed. Its commits stay reachable from anywhere else that points at them, and GitStudio's Undo can put the branch back."),
-    "Delete",
+    l10n.t("Delete"),
   );
   if (!ok) {
     return;
@@ -582,7 +582,7 @@ export async function pushBranch(
       branch: name,
       setUpstream: true,
     });
-    report(result, l10n.t("Published {0} to {1}", name, remote), refresh, "Publish");
+    report(result, l10n.t("Published {0} to {1}", name, remote), refresh, l10n.t("Publish"));
     return;
   }
   // Push the ref we were invoked ON, not whatever happens to be checked out.
@@ -596,7 +596,7 @@ export async function pushBranch(
     // would need its own ahead/behind check against that branch's upstream.
     ? await a.ctx.sync.push({ remote, branch: name })
     : await a.ctx.sync.push();
-  report(result, l10n.t("Pushed {0}", name), refresh, "Push");
+  report(result, l10n.t("Pushed {0}", name), refresh, l10n.t("Push"));
 }
 
 export async function setUpstream(
@@ -848,7 +848,7 @@ export async function deleteTag(
   const ok = await confirm(
     l10n.t("Delete tag {0}?", name),
     l10n.t("This deletes the tag locally. If it was already pushed, it stays on the remote until you delete it there too."),
-    "Delete",
+    l10n.t("Delete"),
   );
   if (!ok) {
     return;
@@ -896,7 +896,7 @@ export async function fetchAll(
     return;
   }
   const result = await a.ctx.sync.fetch({ all: true, prune: pruneOnFetch() });
-  report(result, l10n.t("Fetched all remotes"), refresh, "Fetch");
+  report(result, l10n.t("Fetched all remotes"), refresh, l10n.t("Fetch"));
 }
 
 /** `gitstudio.addRemote` — add a new remote. */
@@ -920,7 +920,7 @@ export async function addRemote(
   }
   const url = await promptInput({
     title: l10n.t("Add remote {0}", name),
-    hint: "An https:// URL, an ssh URL, git@host:owner/repo.git, or a local path.",
+    hint: l10n.t("An https:// URL, an ssh URL, git@host:owner/repo.git, or a local path."),
     placeholder: "https://github.com/owner/repo.git",
     confirmLabel: l10n.t("Add Remote"),
     validate: "url",
@@ -984,11 +984,11 @@ export async function manageRemotes(
     title: l10n.t("Remote: {0}", remote.name),
     hint: remote.fetchUrl,
     choices: [
-      { id: "fetch", label: "Fetch", icon: "sync", description: l10n.t("Update this remote's branches.") },
+      { id: "fetch", label: l10n.t("Fetch"), icon: "sync", description: l10n.t("Update this remote's branches.") },
       { id: "prune", label: l10n.t("Prune Stale Branches"), icon: "trash", description: l10n.t("Drop remote-tracking branches that no longer exist on the server.") },
       { id: "url", label: l10n.t("Edit URL"), icon: "link", description: remote.fetchUrl },
-      { id: "rename", label: "Rename", icon: "edit" },
-      { id: "remove", label: "Remove", icon: "trash", danger: true },
+      { id: "rename", label: l10n.t("Rename"), icon: "edit" },
+      { id: "remove", label: l10n.t("Remove"), icon: "trash", danger: true },
     ],
   });
   if (!action) {
@@ -1000,7 +1000,7 @@ export async function manageRemotes(
         await a.ctx.remotes.fetch(remote.name, { prune: pruneOnFetch() }),
         l10n.t("Fetched {0}", remote.name),
         refresh,
-        "Fetch",
+        l10n.t("Fetch"),
       );
       break;
     case "prune":
@@ -1008,7 +1008,7 @@ export async function manageRemotes(
         await a.ctx.remotes.prune(remote.name),
         l10n.t("Pruned {0}", remote.name),
         refresh,
-        "Prune",
+        l10n.t("Prune"),
       );
       break;
     case "url": {
@@ -1053,7 +1053,7 @@ export async function manageRemotes(
       const ok = await confirm(
         l10n.t("Remove remote {0}?", remote.name),
         l10n.t("Its remote-tracking branches go with it. Nothing on the server changes."),
-        "Remove",
+        l10n.t("Remove"),
       );
       if (!ok) {
         return;

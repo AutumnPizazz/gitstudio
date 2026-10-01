@@ -321,7 +321,7 @@ export class PullRequestCreate {
     if (s.status !== "message") {
       const flow = el("div", "prc-flow");
       flow.setAttribute("role", "group");
-      flow.setAttribute("aria-label", "Branches");
+      flow.setAttribute("aria-label", l10n.t("Branches"));
       const arrow = el("span", "prc-flow-arrow");
       arrow.appendChild(codicon("arrow-left"));
       const h = s.head;
@@ -335,11 +335,11 @@ export class PullRequestCreate {
           spaced(sum, el("span", "prp-dot", "·"), el("span", "prp-add", `+${c.additions.toLocaleString("en-US")}`), el("span", "prp-del", `−${c.deletions.toLocaleString("en-US")}`));
         }
       } else if (s.compare.status === "loading") {
-        sum.textContent = "Comparing…";
+        sum.textContent = l10n.t("Comparing…");
       }
       spaced(
         flow,
-        el("span", "prc-flow-word", "Into"),
+        el("span", "prc-flow-word", l10n.t("Into")),
         this.branchButton("base", s.base, "git-branch", s.base ? l10n.t("Into {0} — choose the branch it goes into", s.base) : l10n.t("Choose the branch it goes into"), l10n.t("Pick a base")),
         arrow,
         el("span", "prc-flow-word", "from"),
@@ -390,13 +390,13 @@ export class PullRequestCreate {
     const titleProblem = this.tried && !this.title.trim();
 
     const tf = el("label", "prp-field prc-title-field");
-    tf.appendChild(el("span", "prp-field-label", "Title"));
+    tf.appendChild(el("span", "prp-field-label", l10n.t("Title")));
     const title = el("input", `prp-input prc-title${titleProblem ? " is-invalid" : ""}`);
     title.type = "text";
     title.dataset.key = "title";
     title.spellcheck = true;
     title.placeholder = l10n.t("What the pull request does");
-    title.setAttribute("aria-label", "Title");
+    title.setAttribute("aria-label", l10n.t("Title"));
     title.setAttribute("aria-required", "true");
     if (titleProblem) {
       title.setAttribute("aria-invalid", "true");
@@ -413,16 +413,16 @@ export class PullRequestCreate {
 
     const bf = el("div", "prp-field prc-body-field");
     const bh = el("div", "prc-body-head");
-    const bl = el("label", "prp-field-label", "Description");
+    const bl = el("label", "prp-field-label", l10n.t("Description"));
     bl.htmlFor = "prc-body";
     bh.appendChild(bl);
     const tools = el("div", "prc-tools");
     tools.setAttribute("role", "toolbar");
-    tools.setAttribute("aria-label", "Description");
+    tools.setAttribute("aria-label", l10n.t("Description"));
     if (s.templates.length > 0) {
       const t = button("prp-ghost prc-tool", "pick-template", "pick");
       t.dataset.picker = "template";
-      t.append(codicon("file"), el("span", "", s.template ? l10n.t("Template: {0}", baseName(s.template)) : "Template"), codicon("chevron-down"));
+      t.append(codicon("file"), el("span", "", s.template ? l10n.t("Template: {0}", baseName(s.template)) : l10n.t("Template")), codicon("chevron-down"));
       t.title = l10n.t("Start the description from one of the repository's templates");
       t.setAttribute("aria-haspopup", "listbox");
       t.disabled = busy;
@@ -437,7 +437,7 @@ export class PullRequestCreate {
     }
     if (s.ai) {
       const a = button("prp-ghost prc-tool", "ai-draft", "aiDraft");
-      a.append(codicon(s.busy === "ai" ? "loading" : "sparkle", s.busy === "ai" ? "codicon-modifier-spin" : ""), el("span", "", s.busy === "ai" ? "Drafting…" : l10n.t("Draft with AI")));
+      a.append(codicon(s.busy === "ai" ? "loading" : "sparkle", s.busy === "ai" ? "codicon-modifier-spin" : ""), el("span", "", s.busy === "ai" ? l10n.t("Drafting…") : l10n.t("Draft with AI")));
       a.title = l10n.t("Write the description from the commits and the diff with AI (replaces what is there)");
       a.disabled = busy || s.compare.status !== "ready";
       tools.appendChild(a);
@@ -505,12 +505,12 @@ export class PullRequestCreate {
     const create = button("gs-btn gs-btn--primary prp-btn prc-create", "create", "create");
     create.append(
       codicon(s.busy === "create" ? "loading" : "git-pull-request", s.busy === "create" ? "codicon-modifier-spin" : ""),
-      el("span", "prp-btn-label", s.busy === "create" ? (needsPush ? l10n.t("Pushing and creating…") : "Creating…") : needsPush ? l10n.t("Push and create pull request") : l10n.t("Create pull request")),
+      el("span", "prp-btn-label", s.busy === "create" ? (needsPush ? l10n.t("Pushing and creating…") : l10n.t("Creating…")) : needsPush ? l10n.t("Push and create pull request") : l10n.t("Create pull request")),
     );
     create.title = needsPush ? l10n.t("Push {0}, then create the pull request on {1}", s.head?.branch ?? "", s.target) : l10n.t("Create the pull request on {0}", s.target);
     create.disabled = busy || !!s.problem || s.status !== "ready";
     if (s.problem) create.setAttribute("aria-describedby", "prc-problem");
-    const cancel = button("gs-btn prp-btn prc-cancel", "cancel", "cancel", "Cancel");
+    const cancel = button("gs-btn prp-btn prc-cancel", "cancel", "cancel", l10n.t("Cancel"));
     cancel.title = l10n.t("Close this form — nothing is created");
     cancel.disabled = s.busy === "create";
     const mac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
@@ -558,14 +558,14 @@ export class PullRequestCreate {
       row.appendChild(x);
       return row;
     };
-    side.appendChild(section("reviewers", "Reviewers", this.reviewers.map((l) => personRow(l, "reviewers")), l10n.t("No one yet")));
+    side.appendChild(section("reviewers", l10n.t("Reviewers"), this.reviewers.map((l) => personRow(l, "reviewers")), l10n.t("No one yet")));
     let assignSelf: HTMLElement | undefined;
     if (s.canSetMetadata && s.viewer && this.assignees.length === 0) {
       assignSelf = button("prp-link prc-self", "assign-self", "assignSelf");
       assignSelf.textContent = l10n.t("Assign yourself");
       assignSelf.title = l10n.t("Assign it to {0}", s.viewer.login);
     }
-    side.appendChild(section("assignees", "Assignees", this.assignees.map((l) => personRow(l, "assignees")), l10n.t("No one"), assignSelf));
+    side.appendChild(section("assignees", l10n.t("Assignees"), this.assignees.map((l) => personRow(l, "assignees")), l10n.t("No one"), assignSelf));
     const colors = new Map((s.options?.labels ?? []).map((l) => [l.name, l.color] as const));
     const labelRow = el("div", "prp-labels");
     for (const name of this.labels) {
@@ -583,7 +583,7 @@ export class PullRequestCreate {
       chip.appendChild(x);
       labelRow.appendChild(chip);
     }
-    side.appendChild(section("labels", "Labels", this.labels.length ? [labelRow] : [], l10n.t("None yet")));
+    side.appendChild(section("labels", l10n.t("Labels"), this.labels.length ? [labelRow] : [], l10n.t("None yet")));
     if (!s.canSetMetadata && s.metadataNote) side.appendChild(el("p", "prp-hint prc-side-note", s.metadataNote));
     return side;
   }
@@ -593,7 +593,7 @@ export class PullRequestCreate {
     box.setAttribute("aria-label", l10n.t("What the pull request will have"));
     const c = s.compare;
     if (c.status === "failed") {
-      box.appendChild(this.buildMessage({ icon: "warning", tone: "warning", title: l10n.t("Couldn't compare the branches"), detail: c.error, buttons: [{ label: "Retry", icon: "refresh", action: { kind: "retry" } }] }, "prp-notice", "compare-failed"));
+      box.appendChild(this.buildMessage({ icon: "warning", tone: "warning", title: l10n.t("Couldn't compare the branches"), detail: c.error, buttons: [{ label: l10n.t("Retry"), icon: "refresh", action: { kind: "retry" } }] }, "prp-notice", "compare-failed"));
       return box;
     }
     if (c.stale) {
@@ -603,7 +603,7 @@ export class PullRequestCreate {
     const commits = el("div", "prc-block");
     commits.dataset.key = "block-commits";
     const ch = el("h2", "prc-block-title");
-    ch.append(codicon("git-commit"), el("span", "", "Commits"), el("span", "prp-count", c.status === "ready" ? c.commitsTotal.toLocaleString("en-US") : "…"));
+    ch.append(codicon("git-commit"), el("span", "", l10n.t("Commits")), el("span", "prp-count", c.status === "ready" ? c.commitsTotal.toLocaleString("en-US") : "…"));
     commits.appendChild(ch);
     if (c.status === "loading" || c.status === "idle") {
       commits.appendChild(this.rowsSkeleton("commits"));
@@ -662,12 +662,12 @@ export class PullRequestCreate {
     const name = el("span", "prc-file-name", slash >= 0 ? f.path.slice(slash + 1) : f.path);
     const dir = el("span", "prc-file-dir", slash >= 0 ? f.path.slice(0, slash) : "");
     const counts = el("span", "prc-file-counts");
-    if (f.binary) counts.appendChild(el("span", "prp-hint", "Binary"));
+    if (f.binary) counts.appendChild(el("span", "prp-hint", l10n.t("Binary")));
     else spaced(counts, ...[...(f.additions > 0 ? [el("span", "prp-add", `+${f.additions}`)] : []), ...(f.deletions > 0 ? [el("span", "prp-del", `−${f.deletions}`)] : [])]);
     spaced(b, letter, name, dir, counts);
     const was = f.previousPath ? l10n.t(" (renamed from {0})", f.previousPath) : "";
     b.title = l10n.t("{0}{1} — {2}. Open its diff", f.path, was, st.word);
-    b.setAttribute("aria-label", `${st.word}: ${f.path}${was}. Open its diff`);
+    b.setAttribute("aria-label", l10n.t("{0}: {1}{2}. Open its diff", st.word, f.path, was));
     li.appendChild(b);
     return li;
   }
@@ -950,7 +950,7 @@ export class PullRequestCreate {
     if (all.length === 0) list.appendChild(el("div", "prc-picker-empty", words.empty));
     m.appendChild(list);
     if (p.kind === "labels" || p.kind === "reviewers" || p.kind === "assignees") {
-      const foot = el("div", "prc-picker-foot", this.state.options?.truncated ? "Only the first 100 are listed; type to find others." : "");
+      const foot = el("div", "prc-picker-foot", this.state.options?.truncated ? l10n.t("Only the first 100 are listed; type to find others.") : "");
       if (foot.textContent) m.appendChild(foot);
     }
     this.placePicker();

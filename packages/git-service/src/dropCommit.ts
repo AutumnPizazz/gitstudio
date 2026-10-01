@@ -463,7 +463,8 @@ async function undoOnBranch(
 
 /** The reflog entry an undo of `what` writes on each branch it puts back. */
 function undoReflog(what: string): string {
-  return what === "drop" ? l10n.t("GitStudio undo: drop commit") : l10n.t("GitStudio undo: {0}", what);
+  // English on purpose: a reflog entry, stored in the repository itself.
+  return what === "drop" ? "GitStudio undo: drop commit" : `GitStudio undo: ${what}`;
 }
 
 /** The carried branches back, each by compare-and-swap. */

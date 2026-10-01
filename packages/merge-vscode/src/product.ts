@@ -413,7 +413,7 @@ export function statusItemLook(s: {
   if (s.op?.pause) {
     return {
       text: l10n.t("$(debug-pause) Rebase paused"),
-      tooltip: l10n.t("{0}. Open the Conflicts view to continue.", s.op.pause.detail || "Paused"),
+      tooltip: l10n.t("{0}. Open the Conflicts view to continue.", s.op.pause.detail || l10n.t("Paused")),
       warning: false,
     };
   }

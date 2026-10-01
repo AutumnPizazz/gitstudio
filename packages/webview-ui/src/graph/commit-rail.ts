@@ -1450,7 +1450,7 @@ export class CommitRail extends LitElement {
         `<button class="ibtn" data-act="open" tabindex="-1" title="${l10n.t("Open in Commit Graph")}"><span class="codicon codicon-link-external"></span></button>` +
         `</span>`
       : `<span class="acts">` +
-        `<button class="ibtn" data-act="copy" tabindex="-1" title="Copy SHA ${esc(row.shortSha)}"><span class="codicon codicon-copy"></span></button>` +
+        `<button class="ibtn" data-act="copy" tabindex="-1" title="${l10n.t("Copy SHA {0}", esc(row.shortSha))}"><span class="codicon codicon-copy"></span></button>` +
         `<button class="ibtn" data-act="open" tabindex="-1" title="${l10n.t("Open in Commit Graph")}"><span class="codicon codicon-link-external"></span></button>` +
         `</span>`;
 
@@ -1490,7 +1490,7 @@ export class CommitRail extends LitElement {
       twins: e.twins,
       title:
         e.ref.kind === "tag"
-          ? `tag: ${e.label}`
+          ? l10n.t("tag: {0}", e.label)
           : [e.label, ...e.twins.map((t) => refDisplayName(t))].join(", "),
     }));
 
@@ -2105,7 +2105,7 @@ export class CommitRail extends LitElement {
           <input
             type="text"
             placeholder="${l10n.t("Search commits")}"
-            aria-label="Search commits (${this.scopeLabel()})"
+            aria-label="${l10n.t("Search commits ({0})", this.scopeLabel())}"
             .value=${this.searchQuery}
             @input=${this.onSearchInput}
             @keydown=${this.onSearchKeyDown}
@@ -2117,21 +2117,21 @@ export class CommitRail extends LitElement {
                 >
                 <button
                   class="ibtn nav"
-                  title="Previous match (Shift+Enter)"
+                  title="${l10n.t("Previous match (Shift+Enter)")}"
                   @click=${() => this.stepMatch(-1)}
                 >
                   <span class="codicon codicon-chevron-up"></span>
                 </button>
                 <button
                   class="ibtn nav"
-                  title="Next match (Enter)"
+                  title="${l10n.t("Next match (Enter)")}"
                   @click=${() => this.stepMatch(1)}
                 >
                   <span class="codicon codicon-chevron-down"></span>
                 </button>
                 <button
                   class="ibtn"
-                  title="Clear (Esc)"
+                  title="${l10n.t("Clear (Esc)")}"
                   @click=${() => {
                     this.clearSearch();
                     this.focusSearch();
@@ -2143,7 +2143,7 @@ export class CommitRail extends LitElement {
             : html`
                 <button
                   class="ibtn anchor ${this.searchScope !== "all" ? "scoped" : ""}"
-                  title="Search in: ${this.scopeLabel()}"
+                  title="${l10n.t("Search in: {0}", this.scopeLabel())}"
                   aria-haspopup="menu"
                   aria-expanded=${this.scopeOpen ? "true" : "false"}
                   @click=${(e: MouseEvent) => {
@@ -2159,7 +2159,7 @@ export class CommitRail extends LitElement {
         ${this.headInGraph()
           ? html`<button
               class="ibtn"
-              title="Jump to HEAD"
+              title="${l10n.t("Jump to HEAD")}"
               @click=${() => this.reveal(this.head)}
             >
               <span class="codicon codicon-target"></span>
@@ -2193,7 +2193,7 @@ export class CommitRail extends LitElement {
   }
 
   private scopeLabel(): string {
-    return SEARCH_SCOPES.find((s) => s.id === this.searchScope)?.label ?? "All";
+    return SEARCH_SCOPES.find((s) => s.id === this.searchScope)?.label ?? l10n.t("All");
   }
 
   /**
@@ -2207,8 +2207,8 @@ export class CommitRail extends LitElement {
     return html`
       <button
         class="ibtn anchor branches ${filtered ? "scoped" : ""}"
-        title="Branches: ${label}"
-        aria-label="Filter branches: ${label}"
+        title="${l10n.t("Branches: {0}", label)}"
+        aria-label="${l10n.t("Filter branches: {0}", label)}"
         aria-haspopup="menu"
         aria-expanded=${this.branchesOpen ? "true" : "false"}
         @click=${(e: MouseEvent) => {
@@ -2306,16 +2306,16 @@ export class CommitRail extends LitElement {
                 >
                   <span class="codicon codicon-${kindIcon(r.kind)}" aria-hidden="true"></span>
                   <span class="nm">${refDisplayName(r.fullName)}</span>
-                  ${r.isCurrent ? html`<span class="cur">current</span>` : nothing}
+                  ${r.isCurrent ? html`<span class="cur">${l10n.t("current")}</span>` : nothing}
                   ${selected.has(r.fullName)
                     ? html`<span class="codicon codicon-check check"></span>`
                     : nothing}
                 </button>`,
               )}
-              ${g.hidden ? html`<div class="hint">${g.hidden} more — type to narrow</div>` : nothing}`,
+              ${g.hidden ? html`<div class="hint">${l10n.t("{0} more — type to narrow", g.hidden)}</div>` : nothing}`,
           )}
           ${groups.length === 0 && refs.length
-            ? html`<div class="hint">No branches match</div>`
+            ? html`<div class="hint">${l10n.t("No branches match")}</div>`
             : nothing}
         </div>
         <div class="sep" role="separator"></div>
@@ -2380,7 +2380,7 @@ export class CommitRail extends LitElement {
       <div
         class="pop chipmenu"
         role="menu"
-        aria-label="Filter by ${title}"
+        aria-label="${l10n.t("Filter by {0}", title)}"
         style="left:${m.x}px;top:${m.y}px"
         @keydown=${this.onPopKeyDown}
       >
@@ -2411,7 +2411,7 @@ export class CommitRail extends LitElement {
               <div class="sep" role="separator"></div>
               <button class="mi" role="menuitem" data-chip-action="all" @click=${() => pick(null)}>
                 <span class="codicon codicon-list-flat"></span>
-                Show all branches
+                ${l10n.t("Show all branches")}
               </button>
             `
           : nothing}
@@ -2437,7 +2437,7 @@ export class CommitRail extends LitElement {
         ${known
           ? nothing
           : html`<div class="sep" role="separator"></div>
-              <div class="hint">Not in the branch list yet — refresh</div>`}
+              <div class="hint">${l10n.t("Not in the branch list yet — refresh")}</div>`}
       </div>
     `;
   }

@@ -284,7 +284,8 @@ export async function moveLocalBranch(
   opts?: { signal?: AbortSignal },
 ): Promise<GitRunResult> {
   if (!plan.localSha) return { code: 1, stdout: "", stderr: l10n.t("{0} doesn't exist yet.", plan.local) };
-  return proc.run(["update-ref", "-m", l10n.t("GitStudio: {0}", why), plan.ref, plan.sha, plan.localSha], opts);
+  // English on purpose: the `-m` text is the reflog entry git stores.
+  return proc.run(["update-ref", "-m", `GitStudio: ${why}`, plan.ref, plan.sha, plan.localSha], opts);
 }
 
 /**

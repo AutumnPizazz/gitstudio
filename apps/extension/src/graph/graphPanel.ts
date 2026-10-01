@@ -851,8 +851,8 @@ export class CommitGraphPanel {
       title: count === 1 ? l10n.t("Reorder 1 commit?") : l10n.t("Reorder {0} commits?", count),
       hint: l10n.t("They are rewritten, so they get new identities. Undo is available afterwards."),
       choices: [
-        { id: "go", label: "Reorder", icon: "git-commit" },
-        { id: "no", label: "Cancel", icon: "close" },
+        { id: "go", label: l10n.t("Reorder"), icon: "git-commit" },
+        { id: "no", label: l10n.t("Cancel"), icon: "close" },
       ],
     });
     return picked === "go" ? false : undefined;
@@ -888,7 +888,7 @@ export class CommitGraphPanel {
           icon: "git-commit",
           description: l10n.t("They keep pointing at the commits as they are now."),
         },
-        { id: "no", label: "Cancel", icon: "close" },
+        { id: "no", label: l10n.t("Cancel"), icon: "close" },
       ],
     });
     if (picked === "carry") return true;

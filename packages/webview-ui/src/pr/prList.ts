@@ -56,7 +56,7 @@ export interface PullRequestListOptions {
 // ── Small DOM helpers ────────────────────────────────────────────────────────
 
 /** The search box's placeholders, longest first: the one that fits whole is shown. */
-const SEARCH_PLACEHOLDERS = [l10n.t("Search pull requests"), "Search"];
+const SEARCH_PLACEHOLDERS = [l10n.t("Search pull requests"), l10n.t("Search")];
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text?: string): HTMLElementTagNameMap[K] {
   const n = document.createElement(tag);
@@ -396,8 +396,8 @@ export class PullRequestList {
     const filter = button(`prl-filter-btn${n > 0 ? " is-active" : ""}`, "filter", "filter");
     filter.setAttribute("aria-haspopup", "menu");
     filter.title = n > 0 ? l10n.t("Filter by author, review requested, assignee or label ({0} on)", n) : l10n.t("Filter by author, review requested, assignee or label");
-    filter.setAttribute("aria-label", n > 0 ? l10n.t("Filter, {0} on", n) : "Filter");
-    filter.append(codicon("filter"), el("span", "prl-filter-word", "Filter"));
+    filter.setAttribute("aria-label", n > 0 ? l10n.t("Filter, {0} on", n) : l10n.t("Filter"));
+    filter.append(codicon("filter"), el("span", "prl-filter-word", l10n.t("Filter")));
     if (n > 0) filter.appendChild(el("span", "prl-badge", String(n)));
     tools.appendChild(filter);
     head.appendChild(tools);
@@ -562,7 +562,7 @@ export class PullRequestList {
     // row's accessible name still says it), never cut in half.
     const chips = el("span", "prl-status");
     if (r.draft && r.kind !== "closed" && r.kind !== "merged") {
-      const d = el("span", "prl-pill is-draft", "Draft");
+      const d = el("span", "prl-pill is-draft", l10n.t("Draft"));
       d.title = l10n.t("A draft: not ready for review, and GitHub won't merge it yet");
       chips.appendChild(d);
     }
@@ -647,7 +647,7 @@ export class PullRequestList {
     if (s.hasMore) {
       const b = button("gs-btn prl-btn prl-more-btn", "load-more", "load-more");
       b.disabled = s.loadingMore;
-      b.appendChild(el("span", "", s.loadingMore ? "Loading…" : l10n.t("Load more")));
+      b.appendChild(el("span", "", s.loadingMore ? l10n.t("Loading…") : l10n.t("Load more")));
       b.title = l10n.t("Show the next pull requests ({0} of {1} shown)", shown.toLocaleString("en-US"), s.total.toLocaleString("en-US"));
       box.appendChild(b);
     }
@@ -910,7 +910,7 @@ export class PullRequestList {
     this.openMenu(anchor, () => ({
       label: l10n.t("Pull request #{0}", n),
       items: [
-        { label: "Open", icon: PR_STATES[row.kind].codicon, detail: l10n.t("The pull request's page"), run: () => this.opts.post({ type: "open", number: n }) },
+        { label: l10n.t("Open"), icon: PR_STATES[row.kind].codicon, detail: l10n.t("The pull request's page"), run: () => this.opts.post({ type: "open", number: n }) },
         {
           label: PR_ACTIONS.checkout.label,
           icon: PR_ACTIONS.checkout.icon,
@@ -956,7 +956,7 @@ export class PullRequestList {
         items: PR_FACETS.map((k) => ({
           label: PR_FACET_WORDS[k],
           icon: { author: "account", reviewRequested: "eye", assignee: "person", label: "tag" }[k],
-          detail: f[k] ? filterWord(k, f[k] as string, this.state?.viewer?.login) : k === "label" ? "Any" : "Anyone",
+          detail: f[k] ? filterWord(k, f[k] as string, this.state?.viewer?.login) : k === "label" ? l10n.t("Any") : l10n.t("Anyone"),
           drill: true,
           run: () => {
             query = "";
@@ -975,7 +975,7 @@ export class PullRequestList {
         this.setFacet(k, value);
       };
       const q = query.trim().toLowerCase();
-      if (!q) items.push({ label: k === "label" ? l10n.t("Any label") : "Anyone", icon: "circle-slash", checked: !current, run: pick(undefined) });
+      if (!q) items.push({ label: k === "label" ? l10n.t("Any label") : l10n.t("Anyone"), icon: "circle-slash", checked: !current, run: pick(undefined) });
       if (k === "label") {
         if (!s?.facetOptions && !s?.facetOptionsLoading) this.opts.post({ type: "facetOptions" });
         for (const l of s?.facetOptions?.labels ?? []) {
@@ -986,7 +986,7 @@ export class PullRequestList {
         }
       } else {
         if (!q || "you".includes(q) || (viewer ?? "").toLowerCase().includes(q)) {
-          items.push({ label: viewer ? `You (@${viewer})` : "You", lead: avatar(s?.viewer ?? null, 16), checked: current === "@me", run: pick("@me") });
+          items.push({ label: viewer ? l10n.t("You (@{0})", viewer) : l10n.t("You"), lead: avatar(s?.viewer ?? null, 16), checked: current === "@me", run: pick("@me") });
         }
         if (k === "assignee" && (!q || "no one".includes(q))) {
           items.push({ label: l10n.t("No one"), icon: "circle-slash", detail: l10n.t("Not assigned"), checked: current === NO_ONE, run: pick(NO_ONE) });
@@ -1019,7 +1019,7 @@ export class PullRequestList {
           },
         },
         items,
-        empty: s?.facetOptionsLoading ? "Loading…" : k === "label" ? l10n.t("No labels match") : l10n.t("No one matches"),
+        empty: s?.facetOptionsLoading ? l10n.t("Loading…") : k === "label" ? l10n.t("No labels match") : l10n.t("No one matches"),
       };
     };
     this.openMenu(anchor, facet ? () => sub(facet) : top);

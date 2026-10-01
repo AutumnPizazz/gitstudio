@@ -114,7 +114,7 @@ export class ComparePanel {
     this.head = head;
     this.panel = vscode.window.createWebviewPanel(
       "gitstudio.compare",
-      "Compare",
+      l10n.t("Compare"),
       vscode.ViewColumn.Active,
       {
         enableScripts: true,

@@ -317,7 +317,7 @@ async function checkoutRef(
       // The switch is not an Undo entry of its own: undoing a checkout by
       // resetting HEAD would move the branch just reset. The reset's entry
       // undoes it where it stands (`reset --keep` on the checked-out branch).
-      return runCheckout(ctx, plan.args, plan.success, "Checkout");
+      return runCheckout(ctx, plan.args, plan.success, l10n.t("Checkout"));
     }
   }
   if (plan.detaches) {
@@ -332,7 +332,7 @@ async function checkoutRef(
     }
   }
   return withUndo(undo, plan.undoLabel, () =>
-    runCheckout(ctx, plan.args, plan.success, "Checkout"),
+    runCheckout(ctx, plan.args, plan.success, l10n.t("Checkout")),
   );
 }
 
@@ -453,7 +453,7 @@ function detachAt(
   undo?: UndoRunner,
 ): Promise<boolean> {
   return withUndo(undo, l10n.t("Checkout {0}", short(commit.sha)), () =>
-    runCheckout(ctx, ["checkout", "--detach", commit.sha], l10n.t("Checked out"), "Checkout"),
+    runCheckout(ctx, ["checkout", "--detach", commit.sha], l10n.t("Checked out"), l10n.t("Checkout")),
   );
 }
 
@@ -528,7 +528,7 @@ async function cherryPick(
       );
       return true;
     }
-    await showGitError(ctx, "Cherry-pick", stderr);
+    await showGitError(ctx, l10n.t("Cherry-pick"), stderr, "Cherry-pick failed");
     return true;
   });
 }
@@ -644,7 +644,7 @@ async function revert(
       );
       return true;
     }
-    await showGitError(ctx, "Revert", stderr);
+    await showGitError(ctx, l10n.t("Revert"), stderr, "Revert failed");
     return true;
   });
 }
@@ -661,21 +661,21 @@ async function resetTo(
     choices: [
       {
         id: "--soft",
-        label: "Soft",
+        label: l10n.t("Soft"),
         icon: "history",
         detail: "--soft",
         description: l10n.t("Move the branch. Keep your working tree AND everything staged."),
       },
       {
         id: "--mixed",
-        label: "Mixed",
+        label: l10n.t("Mixed"),
         icon: "list-flat",
         detail: "--mixed",
         description: l10n.t("Move the branch, keep the working tree, unstage everything. Git's default."),
       },
       {
         id: "--hard",
-        label: "Hard",
+        label: l10n.t("Hard"),
         icon: "trash",
         detail: "--hard",
         danger: true,
@@ -717,7 +717,7 @@ async function resetTo(
       ctx,
       ["reset", mode.value, commit.sha],
       l10n.t("Reset to {0}", short(commit.sha)),
-      "Reset",
+      l10n.t("Reset"),
     ),
   );
 }
@@ -774,7 +774,7 @@ async function dropCommitHere(
           description: l10n.t("They keep pointing at the commits as they are now."),
           danger: true,
         },
-        { id: "no", label: "Cancel", icon: "close" },
+        { id: "no", label: l10n.t("Cancel"), icon: "close" },
       ],
     });
     if (picked !== "carry" && picked !== "only") {
@@ -981,7 +981,12 @@ async function applyMany(
       notifyPaused(l10n.t("GitStudio: {0}", applyManyMessage(verb, n, "stopped")));
       return true;
     }
-    await showGitError(ctx, `${verb === "cherry-pick" ? "Cherry-picking" : "Reverting"} ${n} commits`, result.stderr.trim());
+    await showGitError(
+      ctx,
+      verb === "cherry-pick" ? l10n.t("Cherry-picking {0} commits", n) : l10n.t("Reverting {0} commits", n),
+      result.stderr.trim(),
+      `${verb === "cherry-pick" ? "Cherry-picking" : "Reverting"} ${n} commits failed`,
+    );
     return true;
   });
 }
@@ -1032,7 +1037,10 @@ async function rewriteManyHere(
   }
 
   let carry = false;
+  // The undo entry's label goes into git (the reflog and the revert commit), so
+  // it stays English: only the words this dialog shows are translated.
   const Verb = verb === "drop" ? "Drop" : "Squash";
+  const verbWord = verb === "drop" ? l10n.t("Drop") : l10n.t("Squash");
   if (plan.carryable.length > 0) {
     // A squash's own words here: the editor's "with the message below" is
     // not what is below this question — its choices are.
@@ -1043,19 +1051,19 @@ async function rewriteManyHere(
       choices: [
         {
           id: "carry",
-          label: `${Verb} and move those branches`,
+          label: l10n.t("{0} and move those branches", verbWord),
           icon: "git-branch",
           description: l10n.t("They follow onto the rewritten commits."),
           danger: true,
         },
         {
           id: "only",
-          label: `${Verb} on this branch only`,
+          label: l10n.t("{0} on this branch only", verbWord),
           icon: "git-commit",
           description: l10n.t("They keep pointing at the commits as they are now."),
           danger: true,
         },
-        { id: "no", label: "Cancel", icon: "close" },
+        { id: "no", label: l10n.t("Cancel"), icon: "close" },
       ],
     });
     if (picked !== "carry" && picked !== "only") {

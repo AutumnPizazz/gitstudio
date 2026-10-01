@@ -202,7 +202,8 @@ export class GitHubApi {
       res = await fetch(url, {
         method,
         headers: {
-          Authorization: l10n.t("Bearer {0}", token),
+          // English on purpose: an HTTP header value, spoken to GitHub.
+      Authorization: `Bearer ${token}`,
           Accept: init?.accept ?? "application/vnd.github+json",
           "X-GitHub-Api-Version": "2022-11-28",
           "User-Agent": "GitStudio",

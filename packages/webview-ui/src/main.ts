@@ -96,11 +96,11 @@ function startDiff(root: HTMLElement, first: DiffInitPayload & { type: "diffInit
 
   const status = document.createElement("span");
   status.className = "jb-counter";
-  status.textContent = "Loading…";
+  status.textContent = l10n.t("Loading…");
 
   const label = document.createElement("span");
   label.className = "jb-toolbar-label";
-  label.textContent = "Diff";
+  label.textContent = l10n.t("Diff");
 
   toolbar.append(
     prevBtn,
@@ -175,8 +175,8 @@ function startDiff(root: HTMLElement, first: DiffInitPayload & { type: "diffInit
   const handle = (message: HostMessage) => {
     if (message?.type === "diffInit") {
       label.textContent = message.fileName
-        ? message.fileName.split(/[\\/]/).pop() ?? "Diff"
-        : "Diff";
+        ? message.fileName.split(/[\\/]/).pop() ?? l10n.t("Diff")
+        : l10n.t("Diff");
       view.render(message);
     } else if (message?.type === "stagingState") {
       view.setStagingState(message.indexText);

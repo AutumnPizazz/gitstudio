@@ -687,15 +687,15 @@ export function activate(context: vscode.ExtensionContext): GitStudioApi {
         saveStash(repos, refreshStashes),
       ),
       vscode.commands.registerCommand("gitstudio.stash.apply", async (arg?: { sha?: string }) => {
-        const sha = arg?.sha ?? (await pickStash(repos, "Apply"));
+        const sha = arg?.sha ?? (await pickStash(repos, l10n.t("Apply")));
         if (sha) await applyStash(repos, sha, refreshStashes);
       }),
       vscode.commands.registerCommand("gitstudio.stash.pop", async (arg?: { sha?: string }) => {
-        const sha = arg?.sha ?? (await pickStash(repos, "Pop"));
+        const sha = arg?.sha ?? (await pickStash(repos, l10n.t("Pop")));
         if (sha) await popStash(repos, sha, refreshStashes);
       }),
       vscode.commands.registerCommand("gitstudio.stash.drop", async (arg?: { sha?: string }) => {
-        const sha = arg?.sha ?? (await pickStash(repos, "Drop"));
+        const sha = arg?.sha ?? (await pickStash(repos, l10n.t("Drop")));
         if (sha) await dropStash(repos, sha, refreshStashes);
       }),
       vscode.commands.registerCommand("gitstudio.stash.branch", async (arg?: { sha?: string }) => {

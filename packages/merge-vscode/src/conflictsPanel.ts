@@ -125,7 +125,7 @@ export class ConflictsDashboard implements vscode.Disposable {
   private create(focus: boolean): void {
     const panel = vscode.window.createWebviewPanel(
       this.host.product.viewTypes.conflicts,
-      "Conflicts",
+      l10n.t("Conflicts"),
       { viewColumn: vscode.ViewColumn.Active, preserveFocus: !focus },
       {
         enableScripts: true,

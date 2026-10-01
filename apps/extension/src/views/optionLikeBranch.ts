@@ -19,7 +19,7 @@ import * as l10n from "@vscode/l10n";
 // name (renameArgs: `git branch -m -- -f <new>`), never a short form.
 
 /** The one action the warning offers, for a local branch. */
-export const RENAME_OPTION_LIKE = "Rename…";
+export const RENAME_OPTION_LIKE = l10n.t("Rename…");
 
 /** What a door needs to run the rename: something that runs git. */
 export interface OptionLikeRenameContext {

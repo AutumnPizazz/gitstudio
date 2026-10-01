@@ -229,7 +229,7 @@ export class SyncStatusItem implements vscode.Disposable {
         const seen = await active.ctx.sync.upstreamTip();
         const fetched = await active.ctx.sync.fetch({ prune: pruneOnFetch() });
         if (!fetched.ok) {
-          reportSync(fetched, "Fetch");
+          reportSync(fetched, l10n.t("Fetch"));
           return;
         }
         // Do NOT pull over a rewrite of our own tip. After amending a pushed
@@ -283,7 +283,7 @@ export class SyncStatusItem implements vscode.Disposable {
           if (settlePushUnseen(pushed)) {
             return;
           }
-          reportSync(pushed, "Push", "Pushed");
+          reportSync(pushed, l10n.t("Push"), l10n.t("Pushed"));
           break;
         }
         // What git had stopped on BEFORE this pull: a stop the engine does not
@@ -325,14 +325,14 @@ export class SyncStatusItem implements vscode.Disposable {
           if (await this.offerUpstreamRepair(active, pull.stderr)) {
             return;
           }
-          reportSync(pull, "Pull", undefined, stoppedByThisCommand(before, await detectOperation(active.ctx)));
+          reportSync(pull, l10n.t("Pull"), undefined, stoppedByThisCommand(before, await detectOperation(active.ctx)));
           return;
         }
         // push-force-reviewed: only reached once the pull SUCCEEDED, so the
         // remote tip is an ancestor of HEAD — by fast-forward, by the merge
         // commit, or by the rebase. Either way this push is a fast-forward by
         // construction, and the rewrite case returned before getting here.
-        reportSync(await active.ctx.sync.push(), "Push", "Synced");
+        reportSync(await active.ctx.sync.push(), l10n.t("Push"), l10n.t("Synced"));
         break;
       }
       case "pull": {
@@ -378,8 +378,8 @@ export class SyncStatusItem implements vscode.Disposable {
         }
         reportSync(
           pulled,
-          "Pull",
-          "Pulled",
+          l10n.t("Pull"),
+          l10n.t("Pulled"),
           !pulled.ok && stoppedByThisCommand(before, await detectOperation(active.ctx)),
         );
         break;
@@ -393,7 +393,7 @@ export class SyncStatusItem implements vscode.Disposable {
         if (settlePushUnseen(pushed)) {
           return;
         }
-        reportSync(pushed, "Push", "Pushed");
+        reportSync(pushed, l10n.t("Push"), l10n.t("Pushed"));
         break;
       }
       case "publish": {
@@ -406,7 +406,7 @@ export class SyncStatusItem implements vscode.Disposable {
           // push-force-reviewed: publish — the remote has no such branch yet, so
           // there is nothing there to overwrite.
           await active.ctx.sync.push({ remote, branch, setUpstream: true }),
-          "Publish",
+          l10n.t("Publish"),
           l10n.t("Published {0}", branch),
         );
         break;
@@ -414,8 +414,8 @@ export class SyncStatusItem implements vscode.Disposable {
       case "fetch":
         reportSync(
           await active.ctx.sync.fetch({ prune: pruneOnFetch() }),
-          "Fetch",
-          "Fetched",
+          l10n.t("Fetch"),
+          l10n.t("Fetched"),
         );
         break;
       default:
@@ -474,7 +474,7 @@ export class SyncStatusItem implements vscode.Disposable {
           id: "unset",
           label: l10n.t("Stop Tracking"),
           icon: "debug-disconnect",
-          description: "Leave the branch local-only; set a new upstream later.",
+          description: l10n.t("Leave the branch local-only; set a new upstream later."),
         },
       ],
     });
@@ -487,7 +487,7 @@ export class SyncStatusItem implements vscode.Disposable {
         // push-force-reviewed: publish — the remote has no such branch yet, so
         // there is nothing there to overwrite.
         await active.ctx.sync.push({ remote, branch, setUpstream: true }),
-        "Publish",
+        l10n.t("Publish"),
         l10n.t("Published {0}", branch),
       );
       return true;
@@ -558,7 +558,7 @@ export class SyncStatusItem implements vscode.Disposable {
       choices: [
         {
           id: "push",
-          label: "Push",
+          label: l10n.t("Push"),
           icon: "arrow-up",
           description: l10n.t("A normal push. Refused if the remote has commits you don't have."),
         },

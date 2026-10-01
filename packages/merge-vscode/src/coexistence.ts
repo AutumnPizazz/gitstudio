@@ -115,8 +115,9 @@ export async function maybeOfferCoexistence(host: MergeHostCore): Promise<void> 
     await config.update(key, off, vscode.ConfigurationTarget.Global);
   }
   await context.globalState.update(product.coexistencePromptKey, true);
-  void host.notify("info", l10n.t("VS Code's own merge editor and conflict highlights are off."), "Undo").then((c) => {
-    if (c === "Undo") {
+  const undo = l10n.t("Undo");
+  void host.notify("info", l10n.t("VS Code's own merge editor and conflict highlights are off."), undo).then((c) => {
+    if (c === undo) {
       void restoreBuiltIns(host);
     }
   });
@@ -235,7 +236,7 @@ export async function offerRestoreAfterAutoOpenOff(host: MergeHostCore): Promise
   const { context, product } = host;
   if (host.settings().autoOpen) return;
   if (!context.globalState.get(previousKey(product.coexistencePromptKey))) return;
-  const restore = "Restore";
+  const restore = l10n.t("Restore");
   const choice = await host.notify(
     "info",
     l10n.t("automatic opening is off. Turn VS Code's own merge editor and conflict highlights back on?"),

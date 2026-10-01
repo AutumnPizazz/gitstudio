@@ -1033,7 +1033,7 @@ function formatGutter(
   ordinals: Map<string, number>,
 ): string {
   if (commit.sha === UNCOMMITTED_SHA) {
-    return "Uncommitted";
+    return l10n.t("Uncommitted");
   }
   const parts: string[] = [];
   for (const field of opts.fields) {

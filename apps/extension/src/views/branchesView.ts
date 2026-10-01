@@ -11,9 +11,9 @@ import * as l10n from "@vscode/l10n";
 type RefCategory = "local" | "remotes" | "tags";
 
 const CATEGORY_LABELS: Record<RefCategory, string> = {
-  local: "Local",
-  remotes: "Remotes",
-  tags: "Tags",
+  local: l10n.t("Local"),
+  remotes: l10n.t("Remotes"),
+  tags: l10n.t("Tags"),
 };
 
 /** Union of the rows the Branches tree renders. */

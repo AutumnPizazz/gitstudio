@@ -246,8 +246,8 @@ const TAB_WORDS: Record<PrPageTab, { label: string; icon: string }> = PR_TABS;
 
 type Verdict = "COMMENT" | "APPROVE" | "REQUEST_CHANGES";
 const VERDICT_WORDS: Record<Verdict, { label: string; icon: string; hint: string }> = {
-  COMMENT: { label: "Comment", icon: "comment", hint: l10n.t("Feedback without an explicit approval") },
-  APPROVE: { label: "Approve", icon: "check", hint: l10n.t("The change is good to merge") },
+  COMMENT: { label: l10n.t("Comment"), icon: "comment", hint: l10n.t("Feedback without an explicit approval") },
+  APPROVE: { label: l10n.t("Approve"), icon: "check", hint: l10n.t("The change is good to merge") },
   REQUEST_CHANGES: { label: l10n.t("Request changes"), icon: "request-changes", hint: l10n.t("Must be addressed before merging") },
 };
 
@@ -594,7 +594,7 @@ export class PullRequestPage {
       }
       const busyWord: Partial<Record<PrPageAction, [string, string]>> = {
         markReady: ["ready", l10n.t("Marking ready…")],
-        reopen: ["reopen", "Reopening…"],
+        reopen: ["reopen", l10n.t("Reopening…")],
         checkout: ["checkout", l10n.t("Checking out…")],
       };
       const busy = busyWord[a];
@@ -603,7 +603,7 @@ export class PullRequestPage {
         b.disabled = true;
       }
       if (a === "merge" && this.isBusy("merge")) {
-        label = "Merging…";
+        label = l10n.t("Merging…");
         b.disabled = true;
       }
       b.appendChild(el("span", "prp-btn-label", label));
@@ -640,7 +640,7 @@ export class PullRequestPage {
   /** Reviews, checks, and whether it can be merged — or how it ended. */
   private buildStatus(s: PrPageViewState, pr: PrDetail): HTMLElement | undefined {
     const box = el("section", "prp-status");
-    box.setAttribute("aria-label", "Status");
+    box.setAttribute("aria-label", l10n.t("Status"));
     if (pr.kind === "merged" || pr.kind === "closed") {
       const line = el("div", `prp-status-row tone-${PR_STATES[pr.kind].tone}`);
       line.dataset.key = "status-done";
@@ -672,9 +672,9 @@ export class PullRequestPage {
     // requires no review has none, and the reviewers' own verdicts speak.
     const decision = pr.reviewDecision;
     if (decision === "CHANGES_REQUESTED" || (!decision && blockers.length > 0)) {
-      reviewLine = { tone: "failure", icon: REVIEW_DECISIONS.CHANGES_REQUESTED.codicon, title: l10n.t("Changes requested"), detail: blockers.length ? `By ${blockers.join(", ")}.` : undefined };
+      reviewLine = { tone: "failure", icon: REVIEW_DECISIONS.CHANGES_REQUESTED.codicon, title: l10n.t("Changes requested"), detail: blockers.length ? l10n.t("By {0}.", blockers.join(", ")) : undefined };
     } else if (decision === "APPROVED" || (!decision && approvers.length > 0)) {
-      reviewLine = { tone: "success", icon: REVIEW_DECISIONS.APPROVED.codicon, title: "Approved", detail: approvers.length ? `By ${approvers.join(", ")}.` : undefined };
+      reviewLine = { tone: "success", icon: REVIEW_DECISIONS.APPROVED.codicon, title: l10n.t("Approved"), detail: approvers.length ? l10n.t("By {0}.", approvers.join(", ")) : undefined };
     } else if (decision === "REVIEW_REQUIRED") {
       reviewLine = { tone: "pending", icon: REVIEW_DECISIONS.REVIEW_REQUIRED.codicon, title: l10n.t("Review required"), detail: waiting.length ? l10n.t("Waiting on {0}.", waiting.join(", ")) : l10n.t("At least one approving review is required to merge.") };
     } else {
@@ -701,10 +701,10 @@ export class PullRequestPage {
       // The fix, unless the header's own primary action is already it.
       if (m.fix && !(m.fix === "markReady" && prPageActions(pr).primary === "markReady")) {
         const words = {
-          updateBranch: [PR_PAGE_ACTION_WORDS.updateBranch.label, PR_PAGE_ACTION_WORDS.updateBranch.icon, l10n.t("Merge {0} into this branch on GitHub", pr.baseRef), "updateBranch", "Updating…"],
+          updateBranch: [PR_PAGE_ACTION_WORDS.updateBranch.label, PR_PAGE_ACTION_WORDS.updateBranch.icon, l10n.t("Merge {0} into this branch on GitHub", pr.baseRef), "updateBranch", l10n.t("Updating…")],
           checkout: [l10n.t("Checkout to resolve"), PR_PAGE_ACTION_WORDS.checkout.icon, l10n.t("Check out its branch here, to merge the base into it and resolve the conflicts"), "checkout", l10n.t("Checking out…")],
           markReady: [PR_PAGE_ACTION_WORDS.markReady.label, PR_PAGE_ACTION_WORDS.markReady.icon, PR_PAGE_ACTION_WORDS.markReady.title, "markReady", l10n.t("Marking ready…")],
-          refresh: ["Refresh", "refresh", l10n.t("Ask GitHub again"), "refresh", "Refreshing…"],
+          refresh: [l10n.t("Refresh"), "refresh", l10n.t("Ask GitHub again"), "refresh", l10n.t("Refreshing…")],
         }[m.fix];
         const b = button("gs-btn prp-btn prp-status-fix", `fix-${m.fix}`, words[3]);
         b.appendChild(codicon(words[1]));
@@ -801,10 +801,10 @@ export class PullRequestPage {
     const foot = el("div", "prp-panel-foot");
     const go = button("gs-btn gs-btn--primary prp-btn", "merge-confirm", "mergeConfirm");
     go.appendChild(codicon(MERGE_METHODS[method].icon));
-    go.appendChild(el("span", "prp-btn-label", this.isBusy("merge") ? "Merging…" : MERGE_METHODS[method].confirm));
+    go.appendChild(el("span", "prp-btn-label", this.isBusy("merge") ? l10n.t("Merging…") : MERGE_METHODS[method].confirm));
     go.disabled = this.isBusy("merge");
     go.title = MERGE_METHODS[method].what(pr.commitCount || 1, pr.baseRef);
-    const cancel = button("gs-btn prp-btn", "merge-cancel", "closePanel", "Cancel");
+    const cancel = button("gs-btn prp-btn", "merge-cancel", "closePanel", l10n.t("Cancel"));
     cancel.title = l10n.t("Close without merging");
     foot.append(go, cancel);
     panel.appendChild(foot);
@@ -851,7 +851,7 @@ export class PullRequestPage {
     }
     panel.appendChild(list);
     const field = el("label", "prp-field");
-    field.appendChild(el("span", "prp-field-label", "Summary"));
+    field.appendChild(el("span", "prp-field-label", l10n.t("Summary")));
     const area = el("textarea", "prp-textarea prp-review-body");
     area.dataset.key = "review-body";
     area.dataset.draft = "review";
@@ -895,7 +895,7 @@ export class PullRequestPage {
       q.setAttribute("role", "alertdialog");
       q.setAttribute("aria-label", l10n.t("Discard your pending comments?"));
       q.append(codicon("warning"), el("span", "prp-confirm-text", l10n.t("Discard {0}? They haven't been sent to GitHub, and this can't be undone.", plural(pending.length, l10n.t("pending comment"), l10n.t("pending comments")))));
-      const yes = button("gs-btn prp-btn prp-btn-danger", "discard-yes", "discardYes", "Discard");
+      const yes = button("gs-btn prp-btn prp-btn-danger", "discard-yes", "discardYes", l10n.t("Discard"));
       yes.title = l10n.t("Delete them — nothing is sent");
       const no = button("gs-btn prp-btn", "discard-no", "discardNo", l10n.t("Keep them"));
       no.title = l10n.t("Keep your pending comments");
@@ -905,7 +905,7 @@ export class PullRequestPage {
       const busy = this.isBusy("review");
       const go = button("gs-btn gs-btn--primary prp-btn", "review-submit", "submitReview");
       go.appendChild(codicon(VERDICT_WORDS[this.verdict].icon));
-      go.appendChild(el("span", "prp-btn-label", busy ? "Submitting…" : l10n.t("Submit review")));
+      go.appendChild(el("span", "prp-btn-label", busy ? l10n.t("Submitting…") : l10n.t("Submit review")));
       go.disabled = busy;
       go.title = l10n.t("Send your review as {0}{1}", VERDICT_WORDS[this.verdict].label, pending.length ? l10n.t(", with {0}", plural(pending.length, l10n.t("comment"), l10n.t("comments"))) : "");
       foot.appendChild(go);
@@ -915,7 +915,7 @@ export class PullRequestPage {
         discard.disabled = busy;
         foot.appendChild(discard);
       }
-      const cancel = button("gs-btn prp-btn", "review-close", "closePanel", "Close");
+      const cancel = button("gs-btn prp-btn", "review-close", "closePanel", l10n.t("Close"));
       cancel.title = pending.length ? l10n.t("Close this box — your pending comments are kept") : l10n.t("Close this box");
       foot.appendChild(cancel);
     }
@@ -1009,10 +1009,10 @@ export class PullRequestPage {
     main.appendChild(this.composer(s));
 
     // The rail: who reviews it, who it is assigned to, its labels.
-    rail.appendChild(this.railSection("Reviewers", pr.reviewers.length === 0 ? l10n.t("No one yet") : undefined, pr.reviewers.map((r) => this.reviewerRow(r))));
+    rail.appendChild(this.railSection(l10n.t("Reviewers"), pr.reviewers.length === 0 ? l10n.t("No one yet") : undefined, pr.reviewers.map((r) => this.reviewerRow(r))));
     rail.appendChild(
       this.railSection(
-        "Assignees",
+        l10n.t("Assignees"),
         pr.assignees.length === 0 ? l10n.t("No one") : undefined,
         pr.assignees.map((a) => {
           const row = el("div", "prp-person");
@@ -1029,7 +1029,7 @@ export class PullRequestPage {
       c.title = l10n.t("Label: {0}", l.name);
       labels.appendChild(c);
     }
-    rail.appendChild(this.railSection("Labels", pr.labels.length === 0 ? "None" : undefined, pr.labels.length ? [labels] : []));
+    rail.appendChild(this.railSection(l10n.t("Labels"), pr.labels.length === 0 ? l10n.t("None") : undefined, pr.labels.length ? [labels] : []));
   }
 
   private railSection(title: string, empty: string | undefined, rows: HTMLElement[]): HTMLElement {
@@ -1092,7 +1092,7 @@ export class PullRequestPage {
 
   private timelineItem(item: PrTimelineItem, s: PrPageViewState, pr: PrDetail, threads: PrThread[]): HTMLElement {
     if (item.kind === "comment") {
-      const sending = item.sending ? el("span", "prp-sending", "Sending…") : undefined;
+      const sending = item.sending ? el("span", "prp-sending", l10n.t("Sending…")) : undefined;
       return this.entry(item.id, item.author, "commented", item.createdAt, s, prose(item.body, s.repo, item.id), item.sending ? "is-sending" : "", sending);
     }
     if (item.kind === "review") {
@@ -1105,7 +1105,7 @@ export class PullRequestPage {
       line.appendChild(badge);
       const text = el("span", "prp-event-text");
       text.append(avatar(item.author, 18), el("strong", "prp-author", who(item.author)), ` ${v.verb} `, when(item.createdAt, s.now));
-      if (item.sending) text.appendChild(el("span", "prp-sending", "Sending…"));
+      if (item.sending) text.appendChild(el("span", "prp-sending", l10n.t("Sending…")));
       line.appendChild(text);
       wrap.appendChild(line);
       if (item.body.trim()) {
@@ -1144,13 +1144,13 @@ export class PullRequestPage {
     where.append(codicon("file"), place);
     where.title = t.outdated ? l10n.t("Open {0} — the lines this was written on have changed since", t.path ?? "") : l10n.t("Open {0} at line {1}", t.path, line ?? "");
     head.appendChild(where);
-    if (t.outdated) head.appendChild(this.tag("Outdated", "history", l10n.t("The code it was written on has changed since")));
-    if (t.resolved) head.appendChild(this.tag(t.resolvedBy ? l10n.t("Resolved by {0}", t.resolvedBy) : "Resolved", "check", l10n.t("This conversation is resolved")));
+    if (t.outdated) head.appendChild(this.tag(l10n.t("Outdated"), "history", l10n.t("The code it was written on has changed since")));
+    if (t.resolved) head.appendChild(this.tag(t.resolvedBy ? l10n.t("Resolved by {0}", t.resolvedBy) : l10n.t("Resolved"), "check", l10n.t("This conversation is resolved")));
     head.appendChild(el("span", "prp-grow"));
     if (t.resolved) {
       const toggle = button("prp-link", `thread-toggle-${t.id}`, "toggleThread");
       toggle.dataset.thread = t.id;
-      toggle.textContent = collapsed ? l10n.t("Show {0}", plural(t.comments.length, l10n.t("comment"), l10n.t("comments"))) : "Hide";
+      toggle.textContent = collapsed ? l10n.t("Show {0}", plural(t.comments.length, l10n.t("comment"), l10n.t("comments"))) : l10n.t("Hide");
       toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
       head.appendChild(toggle);
     }
@@ -1161,7 +1161,7 @@ export class PullRequestPage {
       row.dataset.key = `comment-${c.id}`;
       const top = el("div", "prp-thread-comment-head");
       top.append(avatar(c.author, 20), el("strong", "prp-author", who(c.author)), " ", when(c.createdAt, s.now));
-      if (c.sending) top.appendChild(el("span", "prp-sending", "Sending…"));
+      if (c.sending) top.appendChild(el("span", "prp-sending", l10n.t("Sending…")));
       row.appendChild(top);
       row.appendChild(prose(c.body, s.repo, c.id, " "));
       box.appendChild(row);
@@ -1173,10 +1173,10 @@ export class PullRequestPage {
       area.dataset.key = `reply-${t.id}`;
       area.dataset.draft = `reply:${t.id}`;
       area.rows = 1;
-      area.placeholder = "Reply…";
+      area.placeholder = l10n.t("Reply…");
       area.setAttribute("aria-label", l10n.t("Reply to the conversation on {0}", t.path));
       foot.appendChild(area);
-      const send = button("gs-btn prp-btn", `reply-send-${t.id}`, "reply", this.isBusy(`reply:${t.id}`) ? "Replying…" : "Reply");
+      const send = button("gs-btn prp-btn", `reply-send-${t.id}`, "reply", this.isBusy(`reply:${t.id}`) ? l10n.t("Replying…") : l10n.t("Reply"));
       send.dataset.thread = t.id;
       send.title = l10n.t("Post your reply on GitHub");
       send.disabled = this.isBusy(`reply:${t.id}`) || !(this.drafts.get(`reply:${t.id}`) ?? "").trim();
@@ -1189,7 +1189,7 @@ export class PullRequestPage {
       r.dataset.value = t.resolved ? "unresolve" : "resolve";
       const busy = this.isBusy(`resolve:${t.id}`);
       r.appendChild(codicon(t.resolved ? "issue-reopened" : "check"));
-      r.appendChild(el("span", "prp-btn-label", busy ? (t.resolved ? "Unresolving…" : "Resolving…") : t.resolved ? "Unresolve" : l10n.t("Resolve conversation")));
+      r.appendChild(el("span", "prp-btn-label", busy ? (t.resolved ? l10n.t("Unresolving…") : l10n.t("Resolving…")) : t.resolved ? l10n.t("Unresolve") : l10n.t("Resolve conversation")));
       r.disabled = busy;
       r.title = t.resolved ? l10n.t("Open this conversation again") : l10n.t("Mark this conversation resolved");
       foot.appendChild(r);
@@ -1221,7 +1221,7 @@ export class PullRequestPage {
     foot.appendChild(el("span", "prp-hint", l10n.t("Ctrl+Enter to send")));
     const busy = this.isBusy("comment");
     const send = button("gs-btn gs-btn--primary prp-btn", "comment-send", "comment");
-    send.append(codicon("comment"), el("span", "prp-btn-label", busy ? "Commenting…" : "Comment"));
+    send.append(codicon("comment"), el("span", "prp-btn-label", busy ? l10n.t("Commenting…") : l10n.t("Comment")));
     send.disabled = busy || !(this.drafts.get("comment") ?? "").trim();
     send.title = l10n.t("Post your comment on GitHub");
     foot.appendChild(send);
@@ -1241,7 +1241,7 @@ export class PullRequestPage {
       into.appendChild(el("p", "prp-note", l10n.t("Showing the latest {0} of {1} commits. Open on GitHub for the rest.", pr.commits.length, pr.commitCount)));
     }
     const list = el("ul", "prp-commits");
-    list.setAttribute("aria-label", "Commits");
+    list.setAttribute("aria-label", l10n.t("Commits"));
     for (const c of pr.commits) {
       const li = el("li", "prp-commit");
       li.dataset.key = `commit-${c.sha}`;
@@ -1276,7 +1276,7 @@ export class PullRequestPage {
           p.append(l10n.t("Couldn't load its files. {0} ", files.error ?? ""));
           const retry = button("prp-link", `commit-retry-${c.sha}`, "commitRetry");
           retry.dataset.sha = c.sha;
-          retry.textContent = "Retry";
+          retry.textContent = l10n.t("Retry");
           retry.title = l10n.t("Read its files again");
           p.appendChild(retry);
           detail.appendChild(p);
@@ -1310,7 +1310,7 @@ export class PullRequestPage {
     }
     if (pr.checksTotal > pr.checks.length) into.appendChild(el("p", "prp-note", l10n.t("Showing {0} of {1} checks.", pr.checks.length, pr.checksTotal)));
     const list = el("ul", "prp-checks");
-    list.setAttribute("aria-label", "Checks");
+    list.setAttribute("aria-label", l10n.t("Checks"));
     pr.checks.forEach((c, i) => list.appendChild(this.checkRow(c, i, s)));
     into.appendChild(list);
   }
@@ -1334,13 +1334,13 @@ export class PullRequestPage {
     // Required, and Details: each in its own column, empty or not, so every
     // row's Details sits in the same place.
     const req = el("span", "prp-check-req");
-    if (c.required) req.appendChild(this.tag("Required", "lock", l10n.t("Required to pass before merging")));
+    if (c.required) req.appendChild(this.tag(l10n.t("Required"), "lock", l10n.t("Required to pass before merging")));
     li.appendChild(req);
     const link = el("span", "prp-check-link");
     if (c.url) {
       const b = button("prp-ghost", `check-details-${i}`, "openUrl");
       b.dataset.url = c.url;
-      b.append(codicon("link-external"), el("span", "prp-btn-label", "Details"));
+      b.append(codicon("link-external"), el("span", "prp-btn-label", l10n.t("Details")));
       b.title = l10n.t("Open {0}'s details", c.name);
       b.setAttribute("aria-label", l10n.t("Details of {0}", c.name));
       link.appendChild(b);
@@ -1461,7 +1461,7 @@ export class PullRequestPage {
       }
     }
     const counts = el("span", "prp-file-counts");
-    if (f.noDiff && f.additions === 0 && f.deletions === 0) counts.appendChild(el("span", "prp-file-binary", "Binary"));
+    if (f.noDiff && f.additions === 0 && f.deletions === 0) counts.appendChild(el("span", "prp-file-binary", l10n.t("Binary")));
     if (f.additions > 0) counts.appendChild(el("span", "prp-add", `+${f.additions}`));
     if (f.deletions > 0) counts.appendChild(el("span", "prp-del", `−${f.deletions}`));
     b.appendChild(counts);
@@ -1796,7 +1796,7 @@ export class PullRequestPage {
       const b = button("prp-menu-item", `menu-${a}`, a);
       b.setAttribute("role", "menuitem");
       const busy = a === "close" && this.isBusy("close");
-      b.append(codicon(w.icon), el("span", "prp-menu-label", busy ? "Closing…" : w.label));
+      b.append(codicon(w.icon), el("span", "prp-menu-label", busy ? l10n.t("Closing…") : w.label));
       b.disabled = busy;
       b.title = w.title;
       if (a === "close") b.classList.add("is-danger");

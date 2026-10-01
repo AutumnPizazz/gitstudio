@@ -87,7 +87,7 @@ export function describeNoText(input: NoTextPanelInput): { title: string; detail
         detail:
           l10n.t("{0} is a submodule (a gitlink), and {1} and {2} point it at different ", path, name("yours"), name("theirs")) +
           l10n.t("commits{0}. Accept one side to record its commit. The submodule's own checkout is left as it is: run ", at) +
-          `git submodule update afterwards.`,
+          l10n.t("git submodule update afterwards."),
       };
     }
     case "symlink":
@@ -102,7 +102,7 @@ export function describeNoText(input: NoTextPanelInput): { title: string; detail
         title: l10n.t("Conflicted binary file"),
         detail:
           l10n.t("{0} is binary, so there is no line-by-line merge to make. Accept one side, or replace ", path) +
-          `the file yourself and stage it.`,
+          l10n.t("the file yourself and stage it."),
       };
     case "too-large":
       return {
@@ -110,7 +110,7 @@ export function describeNoText(input: NoTextPanelInput): { title: string; detail
         detail:
           l10n.t("{0} is larger than can be read in one go, so only part of it is available — and ", path) +
           l10n.t("saving a merge built from part of a file would delete the rest. Accept one side, or resolve ") +
-          `it in an editor and stage it.`,
+          l10n.t("it in an editor and stage it."),
       };
     case "both-deleted":
       return {
@@ -118,7 +118,7 @@ export function describeNoText(input: NoTextPanelInput): { title: string; detail
         detail:
           l10n.t("{0} was deleted in {1} and in {2}. There is nothing to ", path, name("yours"), name("theirs")) +
           l10n.t("choose between — the file is going either way. Delete it to accept the deletion and settle ") +
-          `the conflict.`,
+          l10n.t("the conflict."),
       };
     case "added-one-side": {
       const absent = input.missingRole ?? "theirs";
@@ -139,7 +139,7 @@ export function describeNoText(input: NoTextPanelInput): { title: string; detail
       };
     }
     default:
-      return { title: l10n.t("Nothing to merge line by line"), detail: `${path} has no text to merge here.` };
+      return { title: l10n.t("Nothing to merge line by line"), detail: l10n.t("{0} has no text to merge here.", path) };
   }
 }
 

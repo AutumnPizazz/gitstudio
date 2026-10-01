@@ -174,11 +174,12 @@ export class UndoLedger {
       outcome === "stopped"
         ? l10n.t("{0} stopped — finish it, or Undo.", entry.label)
         : outcome === "failed"
-          ? `${entry.label} did not finish.`
+          ? l10n.t("{0} did not finish.", entry.label)
           : l10n.t("{0} — done.", entry.label);
-    void notifyInfo(text, "Undo")
+    const undo = l10n.t("Undo");
+    void notifyInfo(text, undo)
       .then((choice) => {
-        if (choice === "Undo") {
+        if (choice === undo) {
           void this.undoThrough(root, entry);
         }
       });
@@ -313,7 +314,7 @@ export class UndoLedger {
     try {
       plan = await active.ctx.snapshot.plan(snap);
     } catch (err) {
-      void vscode.window.showErrorMessage(failed("Undo", err instanceof Error ? err.message : String(err)));
+      void vscode.window.showErrorMessage(failed(l10n.t("Undo"), err instanceof Error ? err.message : String(err)));
       return false;
     }
     switch (plan.kind) {
@@ -376,7 +377,7 @@ export class UndoLedger {
       await active.ctx.snapshot.execute(snap, again.steps);
       flash(l10n.t("Undid {0}", entry.label));
     } catch (err) {
-      void vscode.window.showErrorMessage(failed("Undo", err instanceof Error ? err.message : String(err)));
+      void vscode.window.showErrorMessage(failed(l10n.t("Undo"), err instanceof Error ? err.message : String(err)));
       return false;
     }
     this.remove(active.root, entry);
@@ -447,7 +448,7 @@ export class UndoLedger {
       // git explains that on stdout.
       void notifyInfo(l10n.t("Nothing to revert — \"{0}\" is already undone.", entry.label));
     } else {
-      void vscode.window.showErrorMessage(failed("Revert", stderr));
+      void vscode.window.showErrorMessage(failed(l10n.t("Revert"), stderr));
     }
     return false;
   }

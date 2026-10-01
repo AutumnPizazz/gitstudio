@@ -96,7 +96,7 @@ function describe(err: unknown): Described {
 
 /** A first read that failed: why, and the one thing that can put it right. */
 export function pageFailure(err: Described, repo: string, n: number): PrListMessage {
-  const retry = { label: "Retry", icon: "refresh", action: { kind: "retry" } as PrListAction };
+  const retry = { label: l10n.t("Retry"), icon: "refresh", action: { kind: "retry" } as PrListAction };
   if (err.kind === "auth" && err.status === 401) {
     return {
       icon: "warning",
@@ -381,7 +381,7 @@ export class PrPage {
             buttons:
               why.kind === "auth" && why.status === 401
                 ? [{ label: l10n.t("Sign in again"), icon: "sign-in", action: { kind: "signIn", again: true } }]
-                : [{ label: "Retry", icon: "refresh", action: { kind: "retry" } }],
+                : [{ label: l10n.t("Retry"), icon: "refresh", action: { kind: "retry" } }],
           };
         } else {
           this.status = "message";
@@ -876,7 +876,7 @@ export class PrPage {
     const out = await this.deps.review.submit(this.key, event, body, { owner: this.ref.owner, repo: this.ref.repo, number: this.n, headSha: d.headSha });
     this.busy.delete("review");
     if (!out.ok) {
-      const said = /[.!?]$/.test(out.message) ? out.message : `${out.message}.`;
+      const said = /[.!?。？！]$/.test(out.message) ? out.message : `${out.message}.`;
       this.notice = { icon: "warning", tone: "warning", title: l10n.t("Couldn't submit your review"), detail: l10n.t("{0} Your comments are kept.", said), buttons: [] };
       this.post();
       return;

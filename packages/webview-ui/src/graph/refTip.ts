@@ -318,7 +318,7 @@ function parse(raw: string | undefined): TipRef[] {
 
 function rowHtml(ref: TipRef): string {
   const also = ref.remotes?.length
-    ? `<span class="tip-also">· also on ${escapeTip(ref.remotes.join(", "))}</span>`
+    ? `<span class="tip-also">${l10n.t("· also on {0}", escapeTip(ref.remotes.join(", ")))}</span>`
     : "";
   // A LINK, like the chips it stands in for. A ref folded behind "+N" used to
   // be the one ref on the row you could read but not open — and on a busy row

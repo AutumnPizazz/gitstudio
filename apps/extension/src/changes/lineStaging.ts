@@ -264,7 +264,7 @@ function finishStaging(
   refresh: StagingRefresh,
 ): void {
   if (!ok) {
-    void vscode.window.showErrorMessage(failed("Staging", stderr));
+    void vscode.window.showErrorMessage(failed(l10n.t("Staging"), stderr));
     return;
   }
   void vscode.window.setStatusBarMessage(l10n.t("$(check) {0}", label), 2500);

@@ -94,22 +94,22 @@ interface ItemWords {
  */
 export const LEGEND_WORDS: Record<LegendItem, ItemWords> = {
   conflict: {
-    label: "Conflict",
-    note: "you choose",
+    label: l10n.t("Conflict"),
+    note: l10n.t("you choose"),
     why: l10n.t("Both sides changed these lines, differently"),
     one: "conflict",
     many: "conflicts",
   },
   same: {
     label: l10n.t("Same on both sides"),
-    note: "either arrow takes it",
+    note: l10n.t("either arrow takes it"),
     why: l10n.t("Both sides added or changed these lines the same way: nothing to choose"),
     one: "change made the same on both sides",
     many: "changes made the same on both sides",
   },
   "one-sided": {
     label: l10n.t("One side only"),
-    note: "safe to take",
+    note: l10n.t("safe to take"),
     why: l10n.t("Only one side added or changed these lines"),
     one: "change made on one side only",
     many: "changes made on one side only",
@@ -152,7 +152,7 @@ const KEY: KeyRow[] = [
   { dots: ["removed"], text: l10n.t("Removed lines (grey): lines removed on one side only, or the same lines removed on both. No conflict: safe to take.") },
   { sample: "column", text: l10n.t("A change still to decide: its line numbers and its link to the Result in the full colour, its lines lighter with the words that changed in the full colour.") },
   { sample: "point", text: l10n.t("A band that meets a line between two rows on the other side: lines added there, or removed.") },
-  { sample: "word", text: "A stronger tint on some words: exactly what changed within the line. A change of whitespace only has none; its tooltip says so." },
+  { sample: "word", text: l10n.t("A stronger tint on some words: exactly what changed within the line. A change of whitespace only has none; its tooltip says so.") },
   { sample: "half", text: l10n.t("A lighter band in the Result, line numbers too: a conflict with one side in, the other still to decide.") },
   { sample: "trace", text: l10n.t("A lighter band, line numbers too, linked to the Result: the side you took. A settled Result keeps it too.") },
   { sample: "done", text: l10n.t("A thin outline with no link: the side you discarded.") },
@@ -182,8 +182,8 @@ export function halfDoneWords(detail: LegendDetail | undefined, pendingConflicts
   if (half.length === 0) return undefined;
   if (half.length === 1 && pendingConflicts === 1) {
     const [{ done, taken }] = half;
-    const doneWord = done === "yours" ? "Yours" : "Theirs";
-    const otherWord = done === "yours" ? "Theirs" : "Yours";
+    const doneWord = done === "yours" ? l10n.t("Yours") : l10n.t("Theirs");
+    const otherWord = done === "yours" ? l10n.t("Theirs") : l10n.t("Yours");
     return l10n.t("{0} {1}, {2} to decide", doneWord, taken ? l10n.t("taken") : l10n.t("ignored"), otherWord);
   }
   return l10n.t("{0} with one side in, the other to decide", half.length);

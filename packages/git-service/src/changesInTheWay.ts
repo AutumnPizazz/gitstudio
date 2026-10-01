@@ -841,7 +841,12 @@ export interface StashRetryOutcome {
   indexRefused?: true;
 }
 
-/** The message a stash-and-retry's stash carries, so it can be found again. */
+/**
+ * The message a stash-and-retry's stash carries, so it can be found again.
+ *
+ * English on purpose: git stores it in refs/stash — `git stash list` shows it to
+ * whoever reads the repository — and the UI quotes the same words back.
+ */
 function stashMessage(op: ApplyOp): string {
   // Named the way the user names it: the doors hand a merge, a rebase and a
   // remote checkout their target by its FULL name (a short one is ambiguous
@@ -850,17 +855,17 @@ function stashMessage(op: ApplyOp): string {
   switch (op.kind) {
     case "cherry-pick":
     case "revert":
-      return l10n.t("GitStudio: before {0} of {1}", op.kind, short(op.commit));
+      return `GitStudio: before ${op.kind} of ${short(op.commit)}`;
     case "merge":
-      return l10n.t("GitStudio: before merging {0}", short(op.target));
+      return `GitStudio: before merging ${short(op.target)}`;
     case "rebase":
-      return l10n.t("GitStudio: before rebasing onto {0}", short(op.onto));
+      return `GitStudio: before rebasing onto ${short(op.onto)}`;
     case "checkout":
-      return l10n.t("GitStudio: before checking out {0}", short(op.target));
+      return `GitStudio: before checking out ${short(op.target)}`;
     case "stash":
       return op.branch !== undefined
-        ? l10n.t("GitStudio: before creating a branch from a stash")
-        : l10n.t("GitStudio: before applying a stash");
+        ? "GitStudio: before creating a branch from a stash"
+        : "GitStudio: before applying a stash";
   }
 }
 
@@ -1009,7 +1014,7 @@ export async function stashAndRetryPull(
     ...(first.dirty.rebase ? { rebase: true as const } : {}),
   };
   const stashes = new StashProvider(proc);
-  const saved = await stashTheWay(proc, stashes, v, l10n.t("GitStudio: before pulling"), signal);
+  const saved = await stashTheWay(proc, stashes, v, "GitStudio: before pulling", signal);
   if ("failed" in saved) {
     return { result: pullRun(first), pulled: first, inTheWay: v, stashFailed: saved.failed };
   }

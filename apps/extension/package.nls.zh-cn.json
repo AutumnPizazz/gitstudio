@@ -210,7 +210,7 @@
   "config.gitstudio.worktrees.prefixWithProjectName.description": "已不再使用：新建工作树现在会在主工作树旁边建议文件夹“<project>-<branch>”，你可以在创建前编辑它。",
   "customEditor.gitstudio.mergeEditor.displayName": "GitStudio 三栏合并",
   "customEditor.gitstudio.rebaseTodoEditor.displayName": "GitStudio 交互式变基",
-  "description": "免费、开源的 VS Code 和 Cursor Git 图形界面与提交图。Git Studio 把 JetBrains 风格的 Git 工作流带入编辑器 — 内联 blame、文件历史、区块与行暂存、三栏合并、带通用撤销的交互式变基、贮藏/搁架、工作树，以及在编辑器内的 GitHub PR。GitLens、GitKraken 与 Sourcetree 的免费替代品。",
+  "description": "免费、开源的 VS Code 和 Cursor Git 图形界面与提交图。Git Studio 把 JetBrains 风格的 Git 工作流带入编辑器 — 行内 blame、文件历史、区块与行暂存、三栏合并、带通用撤销的交互式变基、贮藏/搁置、工作树，以及在编辑器内的 GitHub PR。GitLens、GitKraken 与 Sourcetree 的免费替代品。",
   "displayName": "GitStudio — JetBrains 风格的 Git 图、Blame 与合并",
   "submenu.gitstudio.blame.annotationsMenu.label": "Git Blame 注释",
   "submenu.gitstudio.blame.colorsMenu.label": "颜色",

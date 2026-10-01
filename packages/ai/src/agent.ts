@@ -176,7 +176,8 @@ async function runOneTool(
 ): Promise<{ text: string; isError: boolean }> {
   const tool = toolsByName.get(call.name);
   if (!tool) {
-    const text = l10n.t("Unknown tool: {0}.", call.name);
+    // English on purpose: this text goes back to the model, not to a person.
+    const text = `Unknown tool: ${call.name}.`;
     emit({ type: "tool_result", id: call.id, name: call.name, text, isError: true });
     return { text, isError: true };
   }
@@ -204,7 +205,8 @@ async function runOneTool(
     emit({ type: "tool_result", id: call.id, name: call.name, text: r.text, isError: r.isError === true });
     return { text: r.text, isError: r.isError === true };
   } catch (err) {
-    const text = l10n.t("Tool {0} failed: {1}", call.name, err instanceof Error ? err.message : String(err));
+    // English on purpose: this text goes back to the model, not to a person.
+    const text = `Tool ${call.name} failed: ${err instanceof Error ? err.message : String(err)}`;
     emit({ type: "tool_result", id: call.id, name: call.name, text, isError: true });
     return { text, isError: true };
   }

@@ -176,7 +176,7 @@ export function registerPrFeature(
       choices: keys.map((k) => {
         const r = review.reviewInfo(k)!;
         const n = review.pendingCount(k);
-        return { id: k, label: `${r.owner}/${r.repo}#${r.number}`, icon: "comment-discussion", description: r.title, detail: `${n} pending` };
+        return { id: k, label: `${r.owner}/${r.repo}#${r.number}`, icon: "comment-discussion", description: r.title, detail: l10n.t("{0} pending", n) };
       }),
     });
   };
@@ -243,11 +243,11 @@ export function registerPrFeature(
       await page.startReview();
     }),
     vscode.commands.registerCommand("gitstudio.pr.submitReview", async (thread?: unknown) => {
-      const key = await reviewKeyFor(thread, "Submit");
+      const key = await reviewKeyFor(thread, l10n.t("Submit"));
       if (key) await openReviewPage(key, { open: "review" });
     }),
     vscode.commands.registerCommand("gitstudio.pr.cancelReview", async () => {
-      const key = await reviewKeyFor(undefined, "Discard");
+      const key = await reviewKeyFor(undefined, l10n.t("Discard"));
       if (!key) return;
       const r = review.reviewInfo(key)!;
       const n = review.pendingCount(key);

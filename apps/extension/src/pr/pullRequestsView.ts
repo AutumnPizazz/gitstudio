@@ -233,7 +233,7 @@ function describe(err: unknown): Described {
 
 /** A first load that failed: why, and the one thing that can put it right. */
 export function failureMessage(err: Described, repo: string): PrListMessage {
-  const retry = { label: "Retry", icon: "refresh", action: { kind: "retry" } as PrListAction };
+  const retry = { label: l10n.t("Retry"), icon: "refresh", action: { kind: "retry" } as PrListAction };
   if (err.kind === "auth" && err.status === 401) {
     // Signing in helps only as a NEW sign-in: VS Code hands the refused
     // session straight back to a plain request for one.
@@ -741,7 +741,7 @@ export class PullRequestsViewProvider implements vscode.WebviewViewProvider, vsc
           buttons:
             d.kind === "auth" && d.status === 401
               ? [{ label: l10n.t("Sign in again"), icon: "sign-in", action: { kind: "signIn", again: true } }]
-              : [{ label: "Retry", icon: "refresh", action: { kind: "retry" } }],
+              : [{ label: l10n.t("Retry"), icon: "refresh", action: { kind: "retry" } }],
         };
       } else {
         this.status = "message";
@@ -787,7 +787,7 @@ export class PullRequestsViewProvider implements vscode.WebviewViewProvider, vsc
         icon: "warning",
         tone: "warning",
         title: l10n.t("Couldn't load more: {0}", describe(err).message),
-        buttons: [{ label: "Retry", icon: "refresh", action: { kind: "loadMore" } }],
+        buttons: [{ label: l10n.t("Retry"), icon: "refresh", action: { kind: "loadMore" } }],
       };
     } finally {
       if (this.queryKeyNow() === key) {

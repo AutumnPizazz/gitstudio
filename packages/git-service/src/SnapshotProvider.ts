@@ -738,7 +738,9 @@ export class SnapshotProvider {
 
   /** Run a restore plan's steps, in order. */
   async execute(snap: Snapshot, steps: readonly RestoreStep[], opts?: GitRunOptions): Promise<void> {
-    const message = l10n.t("GitStudio undo: {0}", snap.label);
+    // English on purpose: git writes this into the reflog, where `git reflog`
+    // shows it to whoever reads the repository, whatever their editor says.
+    const message = `GitStudio undo: ${snap.label}`;
     for (const st of steps) {
       switch (st.do) {
         case "abort-rebase": {
@@ -832,7 +834,9 @@ export class SnapshotProvider {
     if (p.mode === "range") {
       return this.process.run(["revert", "--no-edit", `${p.from}..${p.to}`], opts);
     }
-    const msg = l10n.t("Revert \"{0}\"\n\nThis puts back the files as they were before \"{1}\" ({2}), which had already been pushed as {3}.\n", snap.label, snap.label, shortSha(p.from), shortSha(p.to));
+    // English on purpose: this is a commit message, stored in the repository
+    // itself and read by everyone who looks at the history.
+    const msg = `Revert "${snap.label}"\n\nThis puts back the files as they were before "${snap.label}" (${shortSha(p.from)}), which had already been pushed as ${shortSha(p.to)}.\n`;
     const made = await this.process.run(["commit-tree", `${p.from}^{tree}`, "-p", p.to, "-F", "-"], { ...opts, input: msg });
     if (made.code !== 0) return made;
     // The new commit's parent is `p.to`: moving HEAD onto it from anywhere

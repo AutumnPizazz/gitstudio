@@ -128,7 +128,7 @@ async function compareSingle(left: vscode.Uri): Promise<void> {
   const choice = await promptPick({
     title: l10n.t("Compare {0} with…", name),
     choices: [
-      { id: "head", label: "HEAD", icon: "git-commit", description: l10n.t("The last committed version of this file.") },
+      { id: "head", label: l10n.t("HEAD"), icon: "git-commit", description: l10n.t("The last committed version of this file.") },
       { id: "file", label: l10n.t("Another file…"), icon: "file", description: l10n.t("Pick any file on disk to diff against.") },
     ],
   });
@@ -141,7 +141,7 @@ async function compareSingle(left: vscode.Uri): Promise<void> {
   }
   const picked = await vscode.window.showOpenDialog({
     canSelectMany: false,
-    openLabel: "Compare",
+    openLabel: l10n.t("Compare"),
     title: l10n.t("Compare {0} with…", name),
   });
   const right = picked?.[0];

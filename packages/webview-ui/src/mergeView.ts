@@ -73,7 +73,7 @@ const CATEGORY_WORDS: Record<MergeCategory, string> = {
 
 /** How a screen reader names a block before its place in its category ("Conflict 2 of 5"). */
 const CATEGORY_NOUNS: Record<MergeCategory, string> = {
-  conflict: "Conflict",
+  conflict: l10n.t("Conflict"),
   same: l10n.t("Change made the same on both sides"),
   "yours-only": l10n.t("Change on one side only"),
   "theirs-only": l10n.t("Change on one side only"),
@@ -332,7 +332,7 @@ export class MergeView implements MergeViewApi {
 
     const leftBody = this.addPane(grid, 1, payload.oursLabel, true, payload.op?.yours.name);
     this.gutterA = this.addGutter(grid, 2, "a");
-    const resultBody = this.addPane(grid, 3, "Result", false);
+    const resultBody = this.addPane(grid, 3, l10n.t("Result"), false);
     this.gutterB = this.addGutter(grid, 4, "b");
     const rightBody = this.addPane(grid, 5, payload.theirsLabel, true, payload.op?.theirs.name);
 
@@ -453,7 +453,7 @@ export class MergeView implements MergeViewApi {
         this.suppressHistory = wasSuppressed;
       }
     }
-    this.baseline = this.captureSnapshot("Baseline");
+    this.baseline = this.captureSnapshot(l10n.t("Baseline"));
 
     this.refresh();
     this.revealFirstPending();
@@ -542,7 +542,7 @@ export class MergeView implements MergeViewApi {
     title.title = titleText;
     if (readOnly) {
       const lock = iconElement(lockIcon, "jb-svg jb-lock");
-      lock.title = "Read-only";
+      lock.title = l10n.t("Read-only");
       title.appendChild(lock);
     }
     const label = document.createElement("span");
@@ -794,7 +794,7 @@ export class MergeView implements MergeViewApi {
   /** "Yours (test)" / "Theirs (master)": the role, and the side's real name when the host knows it. */
   private sideTitle(side: Side): string {
     const { name } = this.sideWords(side);
-    const role = side === "left" ? "Yours" : "Theirs";
+    const role = side === "left" ? l10n.t("Yours") : l10n.t("Theirs");
     return name ? `${role} (${name})` : role;
   }
 

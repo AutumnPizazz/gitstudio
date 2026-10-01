@@ -789,7 +789,7 @@ async function askAndRemove(
   // a path the question did not list runs nothing — see removeAsAgreed.
   const listed = removal.kind === "present" ? removal.changes : undefined;
   const pastLock = entry.locked ? { reason: entry.lockReason } : undefined;
-  ui.busy?.(entry.path, removal.kind === "present" ? "Removing…" : "Forgetting…");
+  ui.busy?.(entry.path, removal.kind === "present" ? l10n.t("Removing…") : l10n.t("Forgetting…"));
   let res;
   try {
     res = await a.ctx.worktrees.removeAsAgreed(entry.path, {
@@ -1050,7 +1050,7 @@ export async function pullWorktree(
       }
     });
   };
-  ui.busy?.(r.entry.path, "Pulling…");
+  ui.busy?.(r.entry.path, l10n.t("Pulling…"));
   try {
     const ctx = w.entry.ctx;
     const paused = await ctx.sync.pausedOperation();

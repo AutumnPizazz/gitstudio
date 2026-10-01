@@ -97,7 +97,7 @@ export async function openChangeDiff(node: ChangeFileNode): Promise<void> {
     root,
     rel,
     { left: { rev: baseRev }, right: gone ? { rev: EMPTY_TREE } : { rev: undefined } },
-    `${fileName} (${gone ? "Deleted" : label})`,
+    `${fileName} (${gone ? l10n.t("Deleted") : label})`,
   );
 }
 

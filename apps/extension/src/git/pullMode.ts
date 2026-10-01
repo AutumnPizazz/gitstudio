@@ -69,7 +69,7 @@ export function settlePullStop(result: {
   return true;
 }
 
-const PULL = "Pull";
+const PULL = l10n.t("Pull");
 
 /**
  * A FORCE push the engine refused before it ran, because the remote branch's
@@ -156,14 +156,14 @@ export async function askPullMode(
     choices: [
       {
         id: "merge",
-        label: "Merge",
+        label: l10n.t("Merge"),
         icon: "git-merge",
         description:
           l10n.t("Bring their commits in and record a merge commit. Yours keep their shas."),
       },
       {
         id: "rebase",
-        label: "Rebase",
+        label: l10n.t("Rebase"),
         icon: "git-pull-request",
         description:
           l10n.t("Replay your commits on top of theirs. Linear history, new shas."),

@@ -356,7 +356,7 @@ function detachedPushReason(op: OperationBannerData | undefined): string {
   if (!op || !stopped) {
     return DETACHED_PUSH_REASON;
   }
-  const finish = l10n.t("Finish it with {0}", op.continueLabel || "Continue");
+  const finish = l10n.t("Finish it with {0}", op.continueLabel || l10n.t("Continue"));
   return op.rebaseBranch
     ? l10n.t("A rebase of {0} is in progress, so there is no branch to push until it finishes. ", op.rebaseBranch) +
         l10n.t("{0} and these commits land on {1}.", finish, op.rebaseBranch)
@@ -1311,7 +1311,7 @@ export class CommitViewProvider
     const ok = await promptConfirm({
       title: n === 1 ? l10n.t("Discard changes in {0}?", files[0].path) : l10n.t("Discard changes in {0} files?", n),
       message: discardConsequence(files, partlyStaged),
-      confirmLabel: n === 1 ? "Discard" : l10n.t("Discard {0} Files", n),
+      confirmLabel: n === 1 ? l10n.t("Discard") : l10n.t("Discard {0} Files", n),
       danger: true,
     });
     if (!ok) {
@@ -1778,7 +1778,7 @@ export class CommitViewProvider
           stderr ||
           result.stdout.trim() ||
           l10n.t("git refused the commit without saying why. If this repository has a pre-commit hook, check its output.");
-        void vscode.window.showErrorMessage(failed("Commit", detail));
+        void vscode.window.showErrorMessage(failed(l10n.t("Commit"), detail));
         void this.view?.webview.postMessage({
           type: "commitDone",
           ok: false,
@@ -2520,7 +2520,7 @@ export class CommitViewProvider
         },
         {
           id: "cancel",
-          label: "Cancel",
+          label: l10n.t("Cancel"),
           icon: "close",
           description: l10n.t("Nothing is pushed."),
         },
@@ -2566,7 +2566,7 @@ export class CommitViewProvider
     if (result.ok) {
       vscode.window.setStatusBarMessage(l10n.t("$(check) Pushed"), 3000);
     } else if (!settlePushUnseen(result)) {
-      void vscode.window.showErrorMessage(failed("Push", result.stderr));
+      void vscode.window.showErrorMessage(failed(l10n.t("Push"), result.stderr));
     }
     this.invalidateRefs();
     void entry.repo?.status?.();
@@ -2642,7 +2642,7 @@ export class CommitViewProvider
         },
         {
           id: "unstage",
-          label: "Unstage",
+          label: l10n.t("Unstage"),
           icon: "list-flat",
           description: l10n.t("Their changes return as unstaged edits."),
         },
@@ -5455,7 +5455,10 @@ export class CommitViewProvider
       if (node.getAttribute(name) !== value) node.setAttribute(name, value);
     }
     function countWords(n, one, many) {
-      return n === 1 ? "1 " + (one || "file") : n + " " + (many || "files");
+      // The noun is a message of its own so a language can put the count and
+      // the word in its own order (and its own plural form).
+      const word = n === 1 ? one || l10nT("file") : many || l10nT("files");
+      return l10nT("{0} {1}", n, word);
     }
 
     // ---- The tree from the keyboard: one tab stop, arrows move it ---------
@@ -5732,11 +5735,10 @@ export class CommitViewProvider
       const entries = selectionEntries();
       const paths = selectionPaths();
       const n = paths.length;
-      const label = n === 1 ? l10nT("1 File") : String(n) + " Files";
       const stageable = entries.filter((en) => en.kind !== "staged");
       const unstageable = entries.filter((en) => en.kind === "staged");
       const items = [];
-      items.push({ icon: "git-stash", label: "Stash " + label,
+      items.push({ icon: "git-stash", label: l10nT("Stash {0}", countFilesCap(n)),
         fn: () => { vscode.postMessage({ type: "stashPaths", paths: paths }); clearSelection(); } });
       items.push({ sep: true });
       // ONE message per action, never one per file. Per-file messages ran
@@ -5744,7 +5746,7 @@ export class CommitViewProvider
       // failed; and each Discard opened its own confirm, which dismissed the
       // one before it, so only the last file was ever discarded.
       if (stageable.length > 0) {
-        items.push({ icon: "add", label: "Stage " + (stageable.length === 1 ? l10nT("1 File") : String(stageable.length) + " Files"),
+        items.push({ icon: "add", label: l10nT("Stage {0}", countFilesCap(stageable.length)),
           fn: () => {
             const paths = stageable.map((en) => en.path);
             queueFiles(paths, "stage");
@@ -5753,7 +5755,7 @@ export class CommitViewProvider
           } });
       }
       if (unstageable.length > 0) {
-        items.push({ icon: "remove", label: "Unstage " + (unstageable.length === 1 ? l10nT("1 File") : String(unstageable.length) + " Files"),
+        items.push({ icon: "remove", label: l10nT("Unstage {0}", countFilesCap(unstageable.length)),
           fn: () => {
             const paths = unstageable.map((en) => en.path);
             queueFiles(paths, "unstage");
@@ -5765,7 +5767,7 @@ export class CommitViewProvider
       if (discardable.length > 0) {
         items.push({ sep: true });
         // The host confirms before discarding; this only asks for it.
-        items.push({ icon: "discard", label: "Discard " + (discardable.length === 1 ? l10nT("1 File") : String(discardable.length) + " Files"), danger: true,
+        items.push({ icon: "discard", label: l10nT("Discard {0}", countFilesCap(discardable.length)), danger: true,
           fn: () => {
             vscode.postMessage({ type: "discardPaths", paths: discardable.map((en) => en.path) });
             clearSelection();
@@ -5790,8 +5792,8 @@ export class CommitViewProvider
       selbarCopyBtn.hidden = !st;
       if (st) {
         const s = authStashes.find((x) => x.sha === st.sha);
-        selbarCount.textContent = (st.paths.length === 1 ? "1 file" : String(st.paths.length) + " files") +
-          (s ? l10nT(" from “") + s.text + "”" : "");
+        selbarCount.textContent = countWords(st.paths.length) +
+          (s ? l10nT(" from “{0}”", s.text) : "");
         // Their tips say where these files come back, as the rows' do.
         const files = stashFilesOf({ sha: st.sha }, st.paths);
         for (const [b, tip] of [[selbarMoveBtn, tipMove(files)], [selbarCopyBtn, tipCopy(files)]]) {
@@ -5803,7 +5805,9 @@ export class CommitViewProvider
       }
       if (selbarEl.previousElementSibling !== groupsEl) groupsEl.after(selbarEl);
       const files = selectionPaths().length;
-      selbarCount.textContent = files === 1 ? "1 file selected" : String(files) + " files selected";
+      selbarCount.textContent = files === 1
+        ? l10nT("1 file selected")
+        : l10nT("{0} files selected", files);
     }
 
     function updateSelectionChrome() { syncStashButtonLabel(); }
@@ -5875,16 +5879,18 @@ export class CommitViewProvider
     }
     /** What a drop does, in words: [the verb, how Alt/Option picks the other]. */
     function dropWords() {
-      if (drag.kind === "tree") return [l10nT("Drop to stash ") + countWords(drag.paths.length), ""];
+      if (drag.kind === "tree") {
+        return [l10nT("Drop to stash {0}", countWords(drag.paths.length)), ""];
+      }
       if (drag.kind === "stash") {
         return dropAlt
-          ? [l10nT("Drop to pop"), "Release " + ALT_NAME + " to apply"]
-          : [l10nT("Drop to apply"), "Hold " + ALT_NAME + " to pop"];
+          ? [l10nT("Drop to pop"), l10nT("Release {0} to apply", ALT_NAME)]
+          : [l10nT("Drop to apply"), l10nT("Hold {0} to pop", ALT_NAME)];
       }
       const n = countWords(drag.paths.length);
       return dropAlt
-        ? [l10nT("Drop to copy ") + n, "Release " + ALT_NAME + " to move"]
-        : [l10nT("Drop to move ") + n, "Hold " + ALT_NAME + " to copy"];
+        ? [l10nT("Drop to copy {0}", n), l10nT("Release {0} to move", ALT_NAME)]
+        : [l10nT("Drop to move {0}", n), l10nT("Hold {0} to copy", ALT_NAME)];
     }
     /**
      * Where a place shows its words: the Stashes header and the clean note in
@@ -6257,11 +6263,11 @@ export class CommitViewProvider
     // Spell out the one-letter status on hover so the A / U / M / D … column
     // isn't a mystery.
     const STATUS_NAMES = {
-      A: "Added", U: "Untracked", D: "Deleted", R: "Renamed",
-      "!": "Conflict", I: "Ignored", T: l10nT("Type changed"), M: "Modified",
+      A: l10nT("Added"), U: l10nT("Untracked"), D: l10nT("Deleted"), R: l10nT("Renamed"),
+      "!": l10nT("Conflict"), I: l10nT("Ignored"), T: l10nT("Type changed"), M: l10nT("Modified"),
     };
     function statusTitle(letter) {
-      return STATUS_NAMES[letter] || "Modified";
+      return STATUS_NAMES[letter] || l10nT("Modified");
     }
 
     /**
@@ -6271,7 +6277,9 @@ export class CommitViewProvider
      * the same number twice).
      */
     function showMoreLabel(hidden, page) {
-      return hidden > page ? "Show " + page + " more of " + hidden : "Show " + hidden + " more";
+      return hidden > page
+        ? l10nT("Show {0} more of {1}", page, hidden)
+        : l10nT("Show {0} more", hidden);
     }
 
     function el(tag, cls, html) {
@@ -6298,10 +6306,12 @@ export class CommitViewProvider
       counterEl.classList.toggle("over", subject > 72);
       // What the number is, and what the 50/72 convention asks of it.
       counterEl.dataset.tip = subject > 72
-        ? l10nT("Subject line: ") + subject + l10nT(" characters, over 72. GitHub cuts a longer subject short.")
+        ? l10nT("Subject line: {0} characters, over 72. GitHub cuts a longer subject short.", subject)
         : subject > 50
-          ? l10nT("Subject line: ") + subject + " characters, over 50. Aim for 50; 72 at most."
-          : l10nT("Subject line: ") + subject + (subject === 1 ? " character" : " characters") + ". Keep it to 50.";
+          ? l10nT("Subject line: {0} characters, over 50. Aim for 50; 72 at most.", subject)
+          : subject === 1
+            ? l10nT("Subject line: 1 character. Keep it to 50.")
+            : l10nT("Subject line: {0} characters. Keep it to 50.", subject);
     }
     message.addEventListener("input", () => { autoGrow(); updateComposer(); });
 
@@ -6317,7 +6327,7 @@ export class CommitViewProvider
     //  • nothing to do → primary disabled.
     // The Commit button only commits staged work; it shrinks beside the primary.
     function renderCommitButtons() {
-      const verb = amend.checked ? "Amend" : "Commit";
+      const verb = amend.checked ? l10nT("Amend") : l10nT("Commit");
       const hasStaged = stagedCount > 0 || amend.checked;
       // Anything at all to commit? With nothing staged the host offers to commit
       // everything after confirming (issue #16), so the button must be reachable —
@@ -6332,8 +6342,8 @@ export class CommitViewProvider
       // Commit button label + state.
       if (!committing) {
         commitLabel.textContent =
-          stagedCount > 0 ? verb + " " + stagedCount
-          : !amend.checked && totalChanges > 0 ? verb + " all " + totalChanges
+          stagedCount > 0 ? l10nT("{0} {1}", verb, stagedCount)
+          : !amend.checked && totalChanges > 0 ? l10nT("{0} all {1}", verb, totalChanges)
           : verb;
       }
       commitBtn.disabled = committing || hostBusy || !canCommit;
@@ -6350,17 +6360,17 @@ export class CommitViewProvider
       const blocked = pushBlockedReason();
       let mode, label;
       if (hasStaged && !blocked) {
-        mode = "commitpush"; label = (amend.checked ? "Amend" : "Commit") + l10nT(" & Push");
+        mode = "commitpush"; label = l10nT("{0} & Push", verb);
       } else if (!blocked && canPublish && (aheadCount > 0 || !onUpstream)) {
         // An unpublished branch is always actionable: "Publish" even with a
         // zero ahead-count. Only a TRACKED branch that is up to date has
         // genuinely nothing to do.
         mode = "push";
         label = onUpstream
-          ? "Push " + aheadCount
-          : (aheadCount > 0 ? "Publish " + aheadCount : "Publish");
+          ? l10nT("Push {0}", aheadCount)
+          : (aheadCount > 0 ? l10nT("Publish {0}", aheadCount) : l10nT("Publish"));
       } else {
-        mode = "none"; label = "Push";
+        mode = "none"; label = l10nT("Push");
       }
       pushBtn.dataset.mode = mode;
       if (!pushBtn.classList.contains("is-busy")) mainLabel.textContent = label;
@@ -6396,7 +6406,7 @@ export class CommitViewProvider
         // repositories in one workspace can share a folder name.
         const what = l10nT("Switch repository (") + repoCount + l10nT(" in this workspace)");
         repoPill.dataset.tip = (state.repoPath ? state.repoPath + " — " : "") + what;
-        repoPill.setAttribute("aria-label", "Repository " + (state.repoName || "") + ". " + what);
+        repoPill.setAttribute("aria-label", l10nT("Repository {0}. {1}", state.repoName || "", what));
       }
       branchName.textContent = state.branch || l10nT("(no branch)");
       // A detached head is a revision, not a branch — mark it so the pill can
@@ -6404,7 +6414,7 @@ export class CommitViewProvider
       branchPill.classList.toggle("is-detached", !!state.detached);
       branchPill.title = (state.repoName ? state.repoName + " · " : "") +
         (state.detached
-          ? l10nT("Detached HEAD at ") + (state.branch || "an unknown revision") +
+          ? l10nT("Detached HEAD at ") + (state.branch || l10nT("an unknown revision")) +
             l10nT(" — commits here belong to no branch")
           : (state.branch || l10nT("detached HEAD"))) +
         (state.upstream ? "  ↔ " + state.upstream : "");
@@ -6414,8 +6424,10 @@ export class CommitViewProvider
       aheadN.textContent = String(ahead);
       behindN.textContent = String(behind);
       // The count in the name too: a folded pill shows only an arrow and it.
-      aheadEl.setAttribute("aria-label", "Push " + ahead + (ahead === 1 ? " commit" : " commits"));
-      behindEl.setAttribute("aria-label", "Pull " + behind + (behind === 1 ? " commit" : " commits"));
+      aheadEl.setAttribute("aria-label", ahead === 1
+        ? l10nT("Push 1 commit") : l10nT("Push {0} commits", ahead));
+      behindEl.setAttribute("aria-label", behind === 1
+        ? l10nT("Pull 1 commit") : l10nT("Pull {0} commits", behind));
       aheadEl.classList.toggle("visible", ahead > 0);
       behindEl.classList.toggle("visible", behind > 0);
       syncClean.classList.toggle("visible", hasUpstream && ahead === 0 && behind === 0);
@@ -6484,7 +6496,7 @@ export class CommitViewProvider
       }
       committing = true;
       btn.classList.add("is-busy");
-      labelEl.textContent = "Committing…";
+      labelEl.textContent = l10nT("Committing…");
       renderCommitButtons();
       doCommit(push);
     }
@@ -6617,7 +6629,7 @@ export class CommitViewProvider
       const n = selectionPaths().length;
       const label = n === 0
         ? l10nT("Stash all changes…")
-        : (n === 1 ? l10nT("Stash 1 selected file…") : "Stash " + n + l10nT(" selected files…"));
+        : (n === 1 ? l10nT("Stash 1 selected file…") : l10nT("Stash {0} selected files…", n));
       stashChangesBtn.dataset.tip = label;
       stashChangesBtn.setAttribute("aria-label", label);
       stashChangesBtn.classList.toggle("is-scoped", n > 0);
@@ -7143,7 +7155,10 @@ export class CommitViewProvider
       // Full ref name on hover — a narrow sidebar ellipsis-clips the row, so the
       // tooltip is how the whole name (esp. long remote refs) is always readable,
       // and the counts, which a row too narrow for them drops (fitBranchRows).
-      const counts = [ahead ? ahead + " to push" : "", behind ? behind + " to pull" : ""].filter(Boolean).join(", ");
+      const counts = [
+        ahead ? l10nT("{0} to push", ahead) : "",
+        behind ? l10nT("{0} to pull", behind) : "",
+      ].filter(Boolean).join(", ");
       row.title = name + (up ? "  ↔ " + up + (gone ? l10nT(", which no longer exists on the remote") : "") : "") +
         (counts ? " — " + counts : "");
       row.dataset.bmkey = "b:" + kind + ":" + name;
@@ -7153,8 +7168,8 @@ export class CommitViewProvider
       // are arrows and numbers, so they are spelled out.
       row.setAttribute("aria-label", name +
         (current ? l10nT(", current branch") : kind === "remote" ? l10nT(", remote branch") : kind === "tag" ? l10nT(", tag") : "") +
-        (ahead ? ", " + ahead + " to push" : "") +
-        (behind ? ", " + behind + " to pull" : "") +
+        (ahead ? l10nT(", {0} to push", ahead) : "") +
+        (behind ? l10nT(", {0} to pull", behind) : "") +
         (up ? l10nT(", tracks ") + up + (gone ? l10nT(", which no longer exists on the remote") : "") : ""));
       row.addEventListener("click", () => openBranchActions(name, kind, current, row));
       return row;
@@ -7459,11 +7474,11 @@ export class CommitViewProvider
         for (let i = before; i < items.length; i++) items[i].dataset.sub = key;
       });
       const trackedItem = (l) => subItem(l, "cloud",
-        bd && bd.upstream && !gone ? l10nT("Tracked Branch: ") + bd.upstream + "…" : l10nT("Set Tracked Branch…"),
+        bd && bd.upstream && !gone ? l10nT("Tracked Branch: {0}…", bd.upstream) : l10nT("Set Tracked Branch…"),
         () => subAct("gitstudio.branch.setUpstream", name, refType), false,
-        gone ? "'" + bd.upstream + l10nT("', which '") + name + l10nT("' tracked, no longer exists on the remote. Choose the branch it tracks now.")
-          : bd && bd.upstream ? "'" + name + l10nT("' tracks ") + bd.upstream + ". Choose another branch to track."
-          : l10nT("Choose the remote branch '") + name + l10nT("' pulls from and pushes to."));
+        gone ? l10nT("'{0}', which '{1}' tracked, no longer exists on the remote. Choose the branch it tracks now.", bd.upstream, name)
+          : bd && bd.upstream ? l10nT("'{0}' tracks {1}. Choose another branch to track.", name, bd.upstream)
+          : l10nT("Choose the remote branch '{0}' pulls from and pushes to.", name));
 
       // Switch to it, or start something from it.
       if (local && gone) add(0, "tracked", trackedItem);
@@ -7471,32 +7486,36 @@ export class CommitViewProvider
         add(0, "checkout", (l) => subItem(l, "arrow-swap", l10nT("Checkout Tag (detached)"), () => subAct("gitstudio.tag.checkout", name, "tag")));
       } else if (!current) {
         // Not the check: in this menu that marks the branch that IS checked out.
-        add(0, "checkout", (l) => subItem(l, kind === "remote" ? "cloud-download" : "arrow-swap", "Checkout", () =>
+        add(0, "checkout", (l) => subItem(l, kind === "remote" ? "cloud-download" : "arrow-swap", l10nT("Checkout"), () =>
           subAct(kind === "remote" ? "gitstudio.remoteBranch.checkout" : "gitstudio.branch.checkout", name, refType)));
       }
       // Nothing to pull without an upstream, nor from one deleted from its
       // remote: the pull could only fail. Push… can still publish the branch.
       if (current && bd && bd.upstream && !gone) {
-        add(0, "pullRebase", (l) => subItemLive(l, "arrow-down", l10nT("Pull using Rebase"), "Pulling…", "pullRebase", name));
-        add(0, "pullMerge", (l) => subItemLive(l, "arrow-down", l10nT("Pull using Merge"), "Pulling…", "pullMerge", name));
+        add(0, "pullRebase", (l) => subItemLive(l, "arrow-down", l10nT("Pull using Rebase"), l10nT("Pulling…"), "pullRebase", name));
+        add(0, "pullMerge", (l) => subItemLive(l, "arrow-down", l10nT("Pull using Merge"), l10nT("Pulling…"), "pullMerge", name));
       } else if (local && !current && bd && bd.upstream && !gone) {
         // Fast-forward this branch from its upstream WITHOUT checking it out.
         add(0, "pullFf", (l) => subItemLive(l, "arrow-down",
-          "Pull " + (bd.behind ? bd.behind + (bd.behind === 1 ? " Commit " : " Commits ") : "") + l10nT("into '") + name + "'",
-          "Pulling…", "pullFf", name,
-          l10nT("Fast-forwards '") + name + l10nT("' from ") + bd.upstream + l10nT(" — no checkout")));
+          bd.behind
+            ? (bd.behind === 1
+              ? l10nT("Pull 1 Commit into '{0}'", name)
+              : l10nT("Pull {0} Commits into '{1}'", bd.behind, name))
+            : l10nT("Pull into '{0}'", name),
+          l10nT("Pulling…"), "pullFf", name,
+          l10nT("Fast-forwards '{0}' from {1} — no checkout", name, bd.upstream)));
       }
       add(0, "newBranch", (l) => subItem(l, "add", l10nT("New Branch from '") + name + "'…", () => subAct("gitstudio.branch.new", name, refType)));
       add(0, "worktree", (l) => subItem(l, "worktree", l10nT("New Worktree from '") + name + "'…", () => subAct("gitstudio.branch.createWorktree", name, refType)));
 
       // Against what HEAD is on (nothing to compare the current branch with).
       if (!current) {
-        add(1, "compare", (l) => subItem(l, "git-compare", l10nT("Compare with ") + cur, () => subAct("gitstudio.branch.compare", name, refType)));
-        add(1, "merge", (l) => subItem(l, "git-merge", l10nT("Merge '") + name + l10nT("' into ") + cur, () => subAct("gitstudio.branch.merge", name, refType)));
+        add(1, "compare", (l) => subItem(l, "git-compare", l10nT("Compare with {0}", cur), () => subAct("gitstudio.branch.compare", name, refType)));
+        add(1, "merge", (l) => subItem(l, "git-merge", l10nT("Merge '{0}' into {1}", name, cur), () => subAct("gitstudio.branch.merge", name, refType)));
         // Not the pull-request glyph: a rebase opens no pull request. The
         // replayed, reordered list is GitStudio's glyph for a rebase.
         if (kind !== "tag") {
-          add(1, "rebase", (l) => subItem(l, "list-ordered", "Rebase " + cur + l10nT(" onto '") + name + "'", () => subAct("gitstudio.branch.rebase", name, refType)));
+          add(1, "rebase", (l) => subItem(l, "list-ordered", l10nT("Rebase {0} onto '{1}'", cur, name), () => subAct("gitstudio.branch.rebase", name, refType)));
         }
       }
 
@@ -7506,17 +7525,17 @@ export class CommitViewProvider
       } else if (current) {
         // Push opens the review modal (see openPushModal) rather than pushing in
         // place, so every push route funnels through the same confirmation.
-        add(2, "push", (l) => subItem(l, "arrow-up", "Push…", () => {
+        add(2, "push", (l) => subItem(l, "arrow-up", l10nT("Push…"), () => {
           closeBranchMenu();
           vscode.postMessage({ type: "requestPushPreview" });
         }));
       } else if (local) {
-        add(2, "push", (l) => subItem(l, "arrow-up", "Push…", () => subAct("gitstudio.branch.push", name, refType)));
+        add(2, "push", (l) => subItem(l, "arrow-up", l10nT("Push…"), () => subAct("gitstudio.branch.push", name, refType)));
       }
       if ((local || current) && !gone) add(2, "tracked", trackedItem);
 
       // Its name.
-      if (local || current) add(3, "rename", (l) => subItem(l, "edit", "Rename…", () => subAct("gitstudio.branch.rename", name, refType)));
+      if (local || current) add(3, "rename", (l) => subItem(l, "edit", l10nT("Rename…"), () => subAct("gitstudio.branch.rename", name, refType)));
       add(3, "copy", (l) => subItem(l, "copy", kind === "tag" ? l10nT("Copy Tag Name") : l10nT("Copy Branch Name"), () => branchAct("copyName", name)));
       if (local || current) add(3, "favorite", (l) => favoriteItem(l, name, bd));
 
@@ -7652,10 +7671,10 @@ export class CommitViewProvider
     const BM_ACTIONS = [
       // Fetch sits on TOP: it's the read-only "what's out there?" action the
       // rest of the menu builds on.
-      { a: "fetch", icon: "sync", label: "Fetch" },
-      { a: "pull", icon: "arrow-down", label: "Pull", terms: ["update"] },
+      { a: "fetch", icon: "sync", label: l10nT("Fetch") },
+      { a: "pull", icon: "arrow-down", label: l10nT("Pull"), terms: ["update"] },
       // It opens the push review first, so it asks for more, as "…" says.
-      { a: "push", icon: "arrow-up", label: "Push…" },
+      { a: "push", icon: "arrow-up", label: l10nT("Push…") },
       { a: "new", icon: "add", label: l10nT("New Branch…"), terms: ["create branch"] },
       { a: "checkoutRef", icon: "tag", label: l10nT("Checkout Tag or Revision…"), terms: ["detach"] },
     ];
@@ -7694,7 +7713,7 @@ export class CommitViewProvider
         hint: l10nT("Pick a tag or branch, or type any revision (a sha, origin/main~3). Checks out as a detached HEAD."),
         placeholder: l10nT("v1.2.0   a1b2c3d   origin/main~3"),
         value: value || "",
-        confirmLabel: l10n.t("Checkout"),
+        confirmLabel: l10nT("Checkout"),
         candidates: allRefCandidates(),
         allowFreeText: true,
         // git would read it as one of its options.
@@ -7731,7 +7750,11 @@ export class CommitViewProvider
       // Fetch/pull/push all run IN PLACE — the dialog stays open, the item
       // itself spins until the real op finishes, and the branch rows' ↑/↓
       // badges refresh live.
-      const busyLabels = { fetch: "Fetching…", pull: "Pulling…", push: "Pushing…" };
+      const busyLabels = {
+        fetch: l10nT("Fetching…"),
+        pull: l10nT("Pulling…"),
+        push: l10nT("Pushing…"),
+      };
       // Nothing to pull into the branch HEAD is on when it tracks nothing, or
       // tracks a branch gone from its remote — the pull could only fail. Its
       // own actions offer no Pull then either (openBranchActions): one rule.
@@ -7755,10 +7778,10 @@ export class CommitViewProvider
             const line = el("div", "bm-why", bIcon("info") + "<span></span>");
             line.id = "bm-why";
             line.querySelector("span").textContent = detached
-              ? l10nT("Detached at ") + (hs.branch || "HEAD") + l10nT(" — check out a branch to pull or push")
+              ? l10nT("Detached at {0} — check out a branch to pull or push", hs.branch || "HEAD")
               : cur.gone
-                ? "'" + cur.name + l10nT("' tracks ") + cur.upstream + l10nT(", which no longer exists on the remote")
-                : "'" + cur.name + l10nT("' has no upstream to pull from");
+                ? l10nT("'{0}' tracks {1}, which no longer exists on the remote", cur.name, cur.upstream)
+                : l10nT("'{0}' has no upstream to pull from", cur.name);
             list.appendChild(line);
           }
           continue;
@@ -7919,13 +7942,13 @@ export class CommitViewProvider
         list.appendChild(wrap);
       }
 
-      group("favorites", "Favorites", favs);
-      group("recents", "Recents", recents);
-      group("local", "Local", others);
-      for (const g of remotes) group("remote:" + g.remote, "Remote", g.rows, { remote: g.remote, paged: true });
+      group("favorites", l10nT("Favorites"), favs);
+      group("recents", l10nT("Recents"), recents);
+      group("local", l10nT("Local"), others);
+      for (const g of remotes) group("remote:" + g.remote, l10nT("Remote"), g.rows, { remote: g.remote, paged: true });
       // Tags can number in the thousands: paged, never capped, so every tag
       // stays reachable.
-      group("tags", "Tags", tags, { paged: true });
+      group("tags", l10nT("Tags"), tags, { paged: true });
 
       const anyRef = favs.length || recents.length || others.length || tags.length ||
         remotes.some((g) => g.rows.length);
@@ -8283,7 +8306,7 @@ export class CommitViewProvider
         return null;
       },
       nonEmpty: function (v) {
-        return v.trim() ? null : "Required.";
+        return v.trim() ? null : l10nT("Required.");
       },
     };
 
@@ -8383,11 +8406,11 @@ export class CommitViewProvider
     function dialogFoot(panel, confirmLabel, danger, onConfirm) {
       var foot = el("div", "rp-foot");
       var cancel = document.createElement("button");
-      cancel.textContent = "Cancel";
+      cancel.textContent = l10nT("Cancel");
       cancel.addEventListener("click", function () { closeDialog(undefined); });
       var ok = document.createElement("button");
       ok.className = "primary" + (danger ? " danger" : "");
-      ok.textContent = confirmLabel || "OK";
+      ok.textContent = confirmLabel || l10nT("OK");
       ok.addEventListener("click", onConfirm);
       foot.appendChild(cancel);
       foot.appendChild(ok);
@@ -8480,7 +8503,7 @@ export class CommitViewProvider
 
         var useBtn = el("button", "rp-sug-btn");
         useBtn.type = "button";
-        useBtn.textContent = "Use";
+        useBtn.textContent = l10nT("Use");
         useBtn.title = l10nT("Replace what you typed with this");
         useBtn.addEventListener("click", function () {
           input.value = fix;
@@ -8493,12 +8516,12 @@ export class CommitViewProvider
 
         var copyBtn = el("button", "rp-sug-btn");
         copyBtn.type = "button";
-        copyBtn.textContent = "Copy";
+        copyBtn.textContent = l10nT("Copy");
         copyBtn.title = l10nT("Copy it to edit somewhere else");
         copyBtn.addEventListener("click", function () {
           var done = function () {
-            copyBtn.textContent = "Copied";
-            setTimeout(function () { copyBtn.textContent = "Copy"; }, 1200);
+            copyBtn.textContent = l10nT("Copied");
+            setTimeout(function () { copyBtn.textContent = l10nT("Copy"); }, 1200);
           };
           try {
             if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -8669,8 +8692,8 @@ export class CommitViewProvider
         var wrap = el("div", "rp-inputwrap");
         input = document.createElement("input");
         input.type = "text";
-        input.placeholder = "Filter";
-        input.setAttribute("aria-label", "Filter " + spec.title);
+        input.placeholder = l10nT("Filter");
+        input.setAttribute("aria-label", l10nT("Filter {0}", spec.title));
         wrap.appendChild(input);
         panel.appendChild(wrap);
       }
@@ -8682,7 +8705,7 @@ export class CommitViewProvider
       // No confirm button: a pick IS the commit, exactly like the branch menu.
       var foot = el("div", "rp-foot");
       var cancel = document.createElement("button");
-      cancel.textContent = "Cancel";
+      cancel.textContent = l10nT("Cancel");
       cancel.addEventListener("click", function () { closeDialog(undefined); });
       foot.appendChild(cancel);
       panel.appendChild(foot);
@@ -9033,11 +9056,12 @@ export class CommitViewProvider
       const head = el("div", "pm-head");
       head.appendChild(el("i", "codicon codicon-arrow-up"));
       const title = el("div", "pm-title");
-      title.innerHTML = "Push to <b></b>";
+      title.appendChild(document.createTextNode(l10nT("Push to") + " "));
+      title.appendChild(el("b"));
       title.querySelector("b").textContent = data.target;
       head.appendChild(title);
       const close = el("button", "pm-close", '<i class="codicon codicon-close" aria-hidden="true"></i>');
-      close.setAttribute("aria-label", "Close");
+      close.setAttribute("aria-label", l10nT("Close"));
       close.addEventListener("click", () => { if (!pushBusy) closePushModal(); });
       head.appendChild(close);
       modal.appendChild(head);
@@ -9140,7 +9164,7 @@ export class CommitViewProvider
       });
       alt.appendChild(newBranch);
       foot.appendChild(alt);
-      const cancel = el("button", "pm-btn secondary", "Cancel");
+      const cancel = el("button", "pm-btn secondary", l10nT("Cancel"));
       cancel.addEventListener("click", () => { if (!pushBusy) closePushModal(); });
       foot.appendChild(cancel);
       // A plain push CANNOT succeed once the branch diverged in both
@@ -9149,7 +9173,7 @@ export class CommitViewProvider
       // doomed. In that state the button becomes the force, and says so.
       const pushB = el("button", "pm-btn primary" + (data.needsForce ? " danger" : ""),
         '<i class="codicon codicon-' + (data.needsForce ? "repo-force-push" : "arrow-up") + '"></i>');
-      pushB.appendChild(document.createTextNode(data.needsForce ? l10nT("Force push") : "Push"));
+      pushB.appendChild(document.createTextNode(data.needsForce ? l10nT("Force push") : l10nT("Push")));
       pushForce = !!data.needsForce;
       if (data.needsForce) {
         pushB.title =
@@ -9257,8 +9281,8 @@ export class CommitViewProvider
     // ---- Rendering -------------------------------------------------------
     const GROUP_DEFS = [
       { kind: "merge", label: l10nT("Merge Conflicts"), staged: false },
-      { kind: "staged", label: "Staged", staged: true },
-      { kind: "unstaged", label: "Unstaged", staged: false },
+      { kind: "staged", label: l10nT("Staged"), staged: true },
+      { kind: "unstaged", label: l10nT("Unstaged"), staged: false },
     ];
 
     // Signature of everything the file-list render depends on (layout + each
@@ -9415,7 +9439,8 @@ export class CommitViewProvider
       }
       changesTotal.textContent = String(files.size);
       changesTotal.classList.toggle("visible", files.size > 0);
-      changesTotal.setAttribute("aria-label", countWords(files.size, "changed file", "changed files"));
+      changesTotal.setAttribute("aria-label",
+        countWords(files.size, l10nT("changed file"), l10nT("changed files")));
 
       const groups = [];
       if (stagingModel === "checkboxes") {
@@ -9515,7 +9540,7 @@ export class CommitViewProvider
       const masterTip = master.checked ? l10nT("Uncheck all") : l10nT("Check all");
       if (master.dataset.tip !== masterTip) master.dataset.tip = masterTip;
       setAttr(header, "aria-checked", master.indeterminate ? "mixed" : master.checked ? "true" : "false");
-      setAttr(header, "aria-label", "Changes, " + countWords(all.length));
+      setAttr(header, "aria-label", l10nT("Changes, {0}", countWords(all.length)));
       header.querySelector(".gcount").textContent = String(all.length);
 
       const stagedByPath = new Map();
@@ -9610,7 +9635,7 @@ export class CommitViewProvider
       });
       header.__activate = function (how) { if (how === "space") toggleAll(); };
       const glabel = el("span", "glabel");
-      glabel.textContent = "Changes";
+      glabel.textContent = l10nT("Changes");
       const gcount = el("span", "gcount");
       const actions = el("span", "group-actions");
       const discardAllNow = function () {
@@ -9677,7 +9702,7 @@ export class CommitViewProvider
         // The header's own button, for the keyboard (it is out of the tab order).
         items.push({ sep: true });
         items.push({ icon: "discard", label: l10nT("Discard All"), danger: true, fn: discardAllNow });
-        openActionMenu("Changes", items, header, null);
+        openActionMenu(l10nT("Changes"), items, header, null);
       };
       header.__menu = menu;
       header.addEventListener("contextmenu", menu);
@@ -9697,7 +9722,7 @@ export class CommitViewProvider
       // Named by its file for the pointer's tooltip; the ROW is the tick for
       // the keyboard (Space) and for a screen reader (aria-checked), so the
       // box itself is out of the tab order and the accessibility tree.
-      ck.setAttribute("aria-label", "Include " + path + " in the commit");
+      ck.setAttribute("aria-label", l10nT("Include {0} in the commit", path));
       ck.tabIndex = -1;
       ck.setAttribute("aria-hidden", "true");
       ck.checked = state === "staged";
@@ -9875,8 +9900,8 @@ export class CommitViewProvider
         const lines = el("span", "hunk-lines");
         // 1-based, matching what the editor's gutter shows.
         lines.textContent = h.lineCount > 1
-          ? "L" + (h.start + 1) + "–" + (h.end + 1)
-          : "L" + (h.start + 1);
+          ? l10nT("L{0}–{1}", h.start + 1, h.end + 1)
+          : l10nT("L{0}", h.start + 1);
         const prev = el("span", "hunk-preview");
         prev.textContent = h.preview || l10nT("(whitespace only)");
         hrow.append(hck, lines, prev);
@@ -9889,8 +9914,8 @@ export class CommitViewProvider
         hrow.setAttribute("aria-level", String(level));
         hrow.setAttribute("aria-checked", state === "staged" ? "true" : state === "partial" ? "mixed" : "false");
         hrow.setAttribute("aria-label", (h.lineCount > 1
-          ? "Lines " + (h.start + 1) + " to " + (h.end + 1)
-          : "Line " + (h.start + 1)) + ": " + (h.preview || "whitespace only"));
+          ? l10nT("Lines {0} to {1}", h.start + 1, h.end + 1)
+          : l10nT("Line {0}", h.start + 1)) + ": " + (h.preview || l10nT("whitespace only")));
         hrow.dataset.tkey = "h:" + path + ":" + h.index;
         hrow.dataset.tip = l10nT("Open this change in the diff");
         const openHunk = function () {
@@ -9919,7 +9944,7 @@ export class CommitViewProvider
       const header = group.firstChild;
       header.__list = list;
       setAttr(header, "aria-expanded", isCollapsed ? "false" : "true");
-      setAttr(header, "aria-label", def.label + ", " + countWords(list.length));
+      setAttr(header, "aria-label", l10nT("{0}, {1}", def.label, countWords(list.length)));
       const gcount = header.querySelector(".gcount");
       if (gcount.textContent !== String(list.length)) gcount.textContent = String(list.length);
 
@@ -9947,7 +9972,7 @@ export class CommitViewProvider
       const gdot = el("span", "gdot");
       const glabel = el("span", "glabel");
       glabel.textContent = def.label;
-      header.title = def.label + l10nT(" — click to collapse, ") +
+      header.title = l10nT("{0} — click to collapse, ", def.label) +
         l10nT("Ctrl/Cmd-click to select every file in it, right-click for its actions");
       const gcount = el("span", "gcount");
 
@@ -10080,7 +10105,8 @@ export class CommitViewProvider
         row.__paths = collectFolderFiles(dir, []);
         if (row.classList.contains("collapsed") !== isCollapsed) row.classList.toggle("collapsed", isCollapsed);
         setAttr(row, "aria-expanded", isCollapsed ? "false" : "true");
-        setAttr(row, "aria-label", dir.name + l10nT(", folder, ") + countWords(row.__paths.length));
+        setAttr(row, "aria-label",
+          l10nT("{0}, {1}", dir.name + l10nT(", folder"), countWords(row.__paths.length)));
         nodes.push(row);
         if (!isCollapsed) renderNode(nodes, def, dir, depth + 1, opts);
       }
@@ -10296,10 +10322,10 @@ export class CommitViewProvider
         }
         items.push({ sep: true });
         if (def.staged) {
-          items.push({ icon: "remove", label: "Unstage",
+          items.push({ icon: "remove", label: l10nT("Unstage"),
             fn: () => { queueOp(e.path, "unstage"); vscode.postMessage({ type: "unstage", path: e.path }); } });
         } else {
-          items.push({ icon: "add", label: "Stage",
+          items.push({ icon: "add", label: l10nT("Stage"),
             fn: () => { queueOp(e.path, "stage"); vscode.postMessage({ type: "stage", path: e.path }); } });
           if (letter !== "!") {
             items.push({ icon: "discard", label: l10nT("Discard Changes"), danger: true,
@@ -10392,7 +10418,7 @@ export class CommitViewProvider
     function landsIn(files) {
       const staged = files.some((f) => f.staged);
       const unstaged = files.some((f) => f.staged !== "all");
-      const asWas = " as " + (files.length === 1 ? "it was" : "they were") + " stashed";
+      const asWas = files.length === 1 ? l10nT(" as it was stashed") : l10nT(" as they were stashed");
       if (stagingModel === "checkboxes") return l10nT("into Changes") + (staged ? l10nT(", staged") + asWas : "");
       if (!staged) return l10nT("into Unstaged");
       return (unstaged ? l10nT("into Staged and Unstaged") : l10nT("into Staged")) + asWas;
@@ -10404,13 +10430,16 @@ export class CommitViewProvider
     }
     /** Move / Copy's tips, for the files they would bring back ("this file" for one). */
     function tipMove(files) {
-      return l10nT("Move: take ") + (files.length === 1 ? "this file" : "these " + files.length + " files") +
-        l10nT(" out of the stash, back ") + landsIn(files);
+      return l10nT("Move: take {0} out of the stash, back {1}",
+        files.length === 1 ? l10nT("this file") : l10nT("these {0} files", files.length),
+        landsIn(files));
     }
     function tipCopy(files) {
       const one = files.length === 1;
-      return l10nT("Copy: bring ") + (one ? "this file" : "these " + files.length + " files") +
-        " back " + landsIn(files) + l10nT(", and keep ") + (one ? "it" : "them") + " in the stash";
+      return l10nT("Copy: bring {0} back {1}, and keep {2} in the stash",
+        one ? l10nT("this file") : l10nT("these {0} files", files.length),
+        landsIn(files),
+        one ? l10nT("it") : l10nT("them"));
     }
 
     // ---- Stashes group ---------------------------------------------------
@@ -10558,7 +10587,12 @@ export class CommitViewProvider
       return sha ? { sha: sha, paths: paths } : null;
     }
 
-    function countFiles(n) { return n === 1 ? "1 file" : String(n) + " files"; }
+    function countFiles(n) { return countWords(n); }
+
+    /** The selection menu's capitals ("Stage 3 Files"), where the count names a menu item. */
+    function countFilesCap(n) {
+      return n === 1 ? l10nT("1 File") : l10nT("{0} Files", n);
+    }
 
     /**
      * Everything a stash row shows, so an identical re-post touches nothing.
@@ -10640,12 +10674,15 @@ export class CommitViewProvider
       const header = el("div", "group-header");
       stashItem(header, "group:stashes", 1);
       header.setAttribute("aria-expanded", stashGroupCollapsed ? "false" : "true");
-      header.setAttribute("aria-label", "Stashes, " + countWords(list.length, "stash", "stashes"));
+      header.setAttribute("aria-label",
+        l10nT("Stashes, {0}", countWords(list.length, l10nT("stash"), l10nT("stashes"))));
       const glabel = el("span", "glabel");
-      glabel.textContent = "Stashes";
+      glabel.textContent = l10nT("Stashes");
       const gcount = el("span", "gcount");
       gcount.textContent = String(list.length);
-      header.title = l10nT("Stashes — click to ") + (stashGroupCollapsed ? "show" : "hide") + " them";
+      header.title = stashGroupCollapsed
+        ? l10nT("Stashes — click to show them")
+        : l10nT("Stashes — click to hide them");
       header.append(el("span", "twisty", ICON_CHEVRON), el("span", "gdot"), glabel, el("span", "group-actions"));
       // None yet (a drag of the working tree's files shows the header): no "0".
       if (list.length > 0) header.appendChild(gcount);
@@ -10789,11 +10826,11 @@ export class CommitViewProvider
         { icon: "diff-multiple", label: l10nT("Open All Changes"),
           fn: () => vscode.postMessage({ type: "stashOpenAll", sha: s.sha }) },
         { sep: true },
-        { icon: "git-stash-apply", label: "Apply", tip: TIP_APPLY, fn: () => stashAct(s, "apply") },
-        { icon: "git-stash-pop", label: "Pop", tip: TIP_POP, fn: () => stashAct(s, "pop") },
+        { icon: "git-stash-apply", label: l10nT("Apply"), tip: TIP_APPLY, fn: () => stashAct(s, "apply") },
+        { icon: "git-stash-pop", label: l10nT("Pop"), tip: TIP_POP, fn: () => stashAct(s, "pop") },
         { icon: "git-branch", label: l10nT("Create Branch…"), fn: () => stashAct(s, "branch") },
         { sep: true },
-        { icon: "trash", label: "Drop…", danger: true, fn: () => stashAct(s, "drop") },
+        { icon: "trash", label: l10nT("Drop…"), danger: true, fn: () => stashAct(s, "drop") },
       ];
     }
 
@@ -10823,8 +10860,8 @@ export class CommitViewProvider
       // The pointer's buttons, out of the tab order: the keyboard has them
       // in the row's menu (Shift+F10), as a file row's are.
       const actions = el("span", "row-actions");
-      const applyBtn = wordBtn("Apply", TIP_APPLY, (ev) => { ev.stopPropagation(); stashAct(s, "apply"); });
-      const popBtn = wordBtn("Pop", TIP_POP, (ev) => { ev.stopPropagation(); stashAct(s, "pop"); });
+      const applyBtn = wordBtn(l10nT("Apply"), TIP_APPLY, (ev) => { ev.stopPropagation(); stashAct(s, "apply"); });
+      const popBtn = wordBtn(l10nT("Pop"), TIP_POP, (ev) => { ev.stopPropagation(); stashAct(s, "pop"); });
       applyBtn.classList.add("stash-quick");
       applyBtn.dataset.act = "apply";
       popBtn.classList.add("stash-quick");
@@ -10908,8 +10945,8 @@ export class CommitViewProvider
         const inside = insideFiles.map((f) => f.path);
         row.setAttribute("aria-label", dir.name + l10nT(", folder, ") + countWords(inside.length));
         const factions = el("span", "row-actions");
-        const moveBtn = wordBtn("Move", tipMove(insideFiles), (ev) => { ev.stopPropagation(); stashFilesAct(s, inside, "move"); });
-        const copyBtn = wordBtn("Copy", tipCopy(insideFiles), (ev) => { ev.stopPropagation(); stashFilesAct(s, inside, "copy"); });
+        const moveBtn = wordBtn(l10nT("Move"), tipMove(insideFiles), (ev) => { ev.stopPropagation(); stashFilesAct(s, inside, "move"); });
+        const copyBtn = wordBtn(l10nT("Copy"), tipCopy(insideFiles), (ev) => { ev.stopPropagation(); stashFilesAct(s, inside, "copy"); });
         moveBtn.dataset.act = "move";
         copyBtn.dataset.act = "copy";
         factions.append(moveBtn, copyBtn);
@@ -10930,8 +10967,8 @@ export class CommitViewProvider
           if (ev) ev.preventDefault();
           const n = countWords(inside.length);
           openActionMenu(dir.name, [
-            { icon: "git-stash-pop", label: "Move " + n + l10nT(" to Changes"), tip: tipMove(insideFiles), fn: () => stashFilesAct(s, inside, "move") },
-            { icon: "git-stash-apply", label: "Copy " + n + l10nT(" to Changes"), tip: tipCopy(insideFiles), fn: () => stashFilesAct(s, inside, "copy") },
+            { icon: "git-stash-pop", label: l10nT("Move {0} to Changes", n), tip: tipMove(insideFiles), fn: () => stashFilesAct(s, inside, "move") },
+            { icon: "git-stash-apply", label: l10nT("Copy {0} to Changes", n), tip: tipCopy(insideFiles), fn: () => stashFilesAct(s, inside, "copy") },
           ], row, "folder");
         };
         row.addEventListener("contextmenu", row.__menu);
@@ -10964,7 +11001,7 @@ export class CommitViewProvider
       stashRowOrder.push(key);
       paintRowSelected(row);
       if (busy) row.setAttribute("aria-busy", "true");
-      row.title = f.oldPath ? f.path + " (was " + f.oldPath + ")" : f.path;
+      row.title = f.oldPath ? l10nT("{0} (was {1})", f.path, f.oldPath) : f.path;
       row.appendChild(el("span", "file-icon", ICON_FILE));
       const slash = f.path.lastIndexOf("/");
       const name = el("span", "name");
@@ -10982,15 +11019,15 @@ export class CommitViewProvider
       }
       if (f.staged) {
         const w = el("span", "stash-staged");
-        w.textContent = f.staged === "all" ? "staged" : "partly staged";
+        w.textContent = f.staged === "all" ? l10nT("staged") : l10nT("partly staged");
         w.dataset.tip = f.staged === "all"
           ? l10nT("Staged when it was stashed: it comes back staged")
           : l10nT("Staged, then changed again, when it was stashed: both versions come back");
         row.appendChild(w);
       }
       const actions = el("span", "row-actions");
-      const moveBtn = wordBtn("Move", tipMove([f]), (ev) => { ev.stopPropagation(); stashFilesAct(s, [f.path], "move"); });
-      const copyBtn = wordBtn("Copy", tipCopy([f]), (ev) => { ev.stopPropagation(); stashFilesAct(s, [f.path], "copy"); });
+      const moveBtn = wordBtn(l10nT("Move"), tipMove([f]), (ev) => { ev.stopPropagation(); stashFilesAct(s, [f.path], "move"); });
+      const copyBtn = wordBtn(l10nT("Copy"), tipCopy([f]), (ev) => { ev.stopPropagation(); stashFilesAct(s, [f.path], "copy"); });
       moveBtn.dataset.act = "move";
       copyBtn.dataset.act = "copy";
       actions.append(moveBtn, copyBtn);
@@ -11010,8 +11047,8 @@ export class CommitViewProvider
       row.setAttribute("aria-label", [
         slash === -1 ? f.path : f.path.slice(slash + 1),
         folder,
-        statusTitle(letter).toLowerCase() + (f.oldPath ? " from " + f.oldPath : ""),
-        f.staged === "all" ? "staged" : f.staged === "part" ? "partly staged" : "",
+        statusTitle(letter).toLowerCase() + (f.oldPath ? l10nT(" from {0}", f.oldPath) : ""),
+        f.staged === "all" ? l10nT("staged") : f.staged === "part" ? l10nT("partly staged") : "",
       ].filter(Boolean).join(", "));
 
       const open = () => vscode.postMessage({ type: "stashOpenFile", sha: s.sha, path: f.path });
@@ -11021,9 +11058,9 @@ export class CommitViewProvider
         const sel = stashSelection();
         if (sel && sel.sha === s.sha && selectedRows.has(key) && sel.paths.length > 1) {
           const n = countFiles(sel.paths.length);
-          openActionMenu(n + l10nT(" from “") + s.text + "”", [
-            { icon: "git-stash-pop", label: "Move " + n + l10nT(" to Changes"), tip: tipMove(stashFilesOf(s, sel.paths)), fn: () => stashFilesAct(s, sel.paths, "move") },
-            { icon: "git-stash-apply", label: "Copy " + n + l10nT(" to Changes"), tip: tipCopy(stashFilesOf(s, sel.paths)), fn: () => stashFilesAct(s, sel.paths, "copy") },
+          openActionMenu(l10nT("{0} from “{1}”", n, s.text), [
+            { icon: "git-stash-pop", label: l10nT("Move {0} to Changes", n), tip: tipMove(stashFilesOf(s, sel.paths)), fn: () => stashFilesAct(s, sel.paths, "move") },
+            { icon: "git-stash-apply", label: l10nT("Copy {0} to Changes", n), tip: tipCopy(stashFilesOf(s, sel.paths)), fn: () => stashFilesAct(s, sel.paths, "copy") },
             { sep: true },
             { icon: "close", label: l10nT("Clear Selection"), fn: clearSelection },
           ], row);

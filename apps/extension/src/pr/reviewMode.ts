@@ -361,7 +361,7 @@ export class ReviewController implements vscode.Disposable {
   }
 
   private me(): vscode.CommentAuthorInformation {
-    return { name: this.login ? `@${this.login}` : "You" };
+    return { name: this.login ? `@${this.login}` : l10n.t("You") };
   }
 
   /**
@@ -612,7 +612,7 @@ export class ReviewController implements vscode.Disposable {
         ),
     );
     thread.contextValue = t.resolved ? THREAD_RESOLVED : THREAD_OPEN;
-    thread.label = t.resolved ? (t.resolvedBy ? l10n.t("Resolved by {0}", t.resolvedBy) : "Resolved") : undefined;
+    thread.label = t.resolved ? (t.resolvedBy ? l10n.t("Resolved by {0}", t.resolvedBy) : l10n.t("Resolved")) : undefined;
     thread.canReply = t.canReply;
     thread.collapsibleState = t.resolved ? vscode.CommentThreadCollapsibleState.Collapsed : vscode.CommentThreadCollapsibleState.Expanded;
   }

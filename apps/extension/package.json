@@ -26,7 +26,7 @@
     {
       "url": "https://img.shields.io/open-vsx/v/gitstudio/gitstudio?label=Open%20VSX&logo=eclipseide&logoColor=white&color=C36BF0",
       "href": "https://open-vsx.org/extension/gitstudio/gitstudio",
-      "description": "Also on Open VSX — Cursor, VSCodium, Windsurf, Gitpod"
+      "description": "Also on Open VSX \u2014 Cursor, VSCodium, Windsurf, Gitpod"
     },
     {
       "url": "https://img.shields.io/github/actions/workflow/status/GitStudioHQ/gitstudio/ci.yml?branch=main&label=build&logo=githubactions&logoColor=white",
@@ -36,7 +36,7 @@
     {
       "url": "https://img.shields.io/badge/license-Apache--2.0-44a248",
       "href": "https://github.com/GitStudioHQ/gitstudio/blob/main/LICENSE",
-      "description": "Apache-2.0 licensed — free on public and private repos"
+      "description": "Apache-2.0 licensed \u2014 free on public and private repos"
     },
     {
       "url": "https://img.shields.io/badge/Sponsor-EA4AAA?logo=githubsponsors&logoColor=white",

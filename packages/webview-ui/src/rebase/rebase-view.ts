@@ -653,10 +653,10 @@ export class RebaseView extends LitElement {
         <div class="title">
           ${this.headerComment
             ? this.headerComment
-            : html`Rebasing
-                <span class="mono">${total}</span> commit${total === 1
-                  ? ""
-                  : "s"}`}
+            : html`${l10n.t("Rebasing")}
+                <span class="mono">${total}</span> ${total === 1
+                  ? l10n.t("commit")
+                  : l10n.t("commits")}`}
         </div>
         <div class="hint">
           <span>${l10n.t("Drag rows or press")}</span>
@@ -666,7 +666,7 @@ export class RebaseView extends LitElement {
           <span aria-hidden="true">/</span>
           <kbd aria-label="${l10n.t("Down arrow")}">${RebaseView.chevronDown}</kbd>
           <span>${l10n.t("to reorder. Topmost runs first — this is git's todo file, oldest at the top.")}</span>
-          <span>Shift- or ${IS_MAC ? "⌘" : "Ctrl"}-click selects several;</span>
+          <span>${l10n.t("Shift- or {0}-click selects several;", IS_MAC ? "⌘" : "Ctrl")}</span>
           ${PLAN_ACTIONS.map((a) => html`<kbd class="letter" title=${a.label}>${a.key}</kbd>`)}
           <span>${l10n.t("set their action.")}</span>
         </div>
@@ -701,7 +701,7 @@ export class RebaseView extends LitElement {
         @focusin=${this.onListFocusin}
       >
         ${total === 0
-          ? html`<div class="empty">No commits to rebase.</div>`
+          ? html`<div class="empty">${l10n.t("No commits to rebase.")}</div>`
           : this.rows.map((row, index) => this.renderRow(row, index, orphans[index]))}
       </div>
 
@@ -762,7 +762,7 @@ export class RebaseView extends LitElement {
         aria-selected=${selected ? "true" : "false"}
         data-key=${key}
         data-action=${row.action}
-        aria-label=${`Commit ${row.shortSha}, ${row.subject}, action ${row.action}`}
+        aria-label=${l10n.t("Commit {0}, {1}, action {2}", row.shortSha, row.subject, row.action)}
         draggable="true"
         @dragstart=${(e: DragEvent) => this.onDragStart(e, index)}
         @dragover=${(e: DragEvent) => this.onDragOver(e, index)}

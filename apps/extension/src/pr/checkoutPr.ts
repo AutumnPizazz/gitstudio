@@ -287,7 +287,7 @@ async function land(entry: RepoEntry, pr: PullRequest, target: PrBranchTarget, p
                   description: l10n.t("{0}'s own commits stay only in the reflog.", local),
                 },
               ]),
-          { id: "cancel", label: "Cancel", icon: "close", description: l10n.t("Nothing changes.") },
+          { id: "cancel", label: l10n.t("Cancel"), icon: "close", description: l10n.t("Nothing changes.") },
         ],
       });
       if (choice === "keep") {
@@ -329,7 +329,7 @@ async function land(entry: RepoEntry, pr: PullRequest, target: PrBranchTarget, p
           ...(plan.relation && plan.relation !== "diverged" && !plan.worktree
             ? [{ id: "use", label: l10n.t("Use {0}", local), icon: "arrow-swap", description: useWords[plan.relation] }]
             : []),
-          { id: "cancel", label: "Cancel", icon: "close", description: l10n.t("Nothing changes.") },
+          { id: "cancel", label: l10n.t("Cancel"), icon: "close", description: l10n.t("Nothing changes.") },
         ],
       });
       if (choice === "alt" && alt) {
@@ -393,7 +393,7 @@ async function applyCopy(entry: RepoEntry, pr: PullRequest, plan: PrHeadPlan): P
         hint: divergedMessage(n, plan),
         choices: [
           { id: "keep", label: l10n.t("Checkout {0} as it is", local), icon: "git-branch", description: l10n.t("Your commits stay. The PR's newer commits aren't brought in.") },
-          { id: "cancel", label: "Cancel", icon: "close", description: l10n.t("Nothing changes.") },
+          { id: "cancel", label: l10n.t("Cancel"), icon: "close", description: l10n.t("Nothing changes.") },
         ],
       });
       if (choice !== "keep" || plan.checkedOut) return undefined;

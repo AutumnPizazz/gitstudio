@@ -123,7 +123,7 @@ export class WorktreesView {
     this.top.append(this.filterBox);
     this.list = el("div", "wt-list");
     this.list.setAttribute("role", "tree");
-    this.list.setAttribute("aria-label", "Worktrees");
+    this.list.setAttribute("aria-label", l10n.t("Worktrees"));
     // Prune is a quiet link under the list — where the rows it forgets are
     // (the missing sort last) — and there only when git would prune one.
     this.foot = el("div", "wt-foot");
@@ -228,7 +228,7 @@ export class WorktreesView {
       case "busy": {
         const s = this.rows.get(msg.path);
         if (!s) return;
-        s.busy = msg.busy ? (msg.label ?? "Working…") : undefined;
+        s.busy = msg.busy ? (msg.label ?? l10n.t("Working…")) : undefined;
         if (s.busy && this.menuFor === s) {
           // Its menu offers nothing while it runs: gone, the keyboard back on the row.
           const had = !!this.menu?.contains(document.activeElement);
@@ -624,7 +624,7 @@ export class WorktreesView {
     const parts: HTMLElement[] = [];
     const det = s.loaded;
     if (!det) {
-      d.replaceChildren(el("div", "cr-loading wt-loading", "Loading…"));
+      d.replaceChildren(el("div", "cr-loading wt-loading", l10n.t("Loading…")));
       this.syncTreeItems();
       return;
     }
@@ -692,11 +692,11 @@ export class WorktreesView {
     const out = r.ahead > 0 || (r.status?.unpublished ?? 0) > 0;
     const shown: [WorktreeAction, string, string, string][] = [];
     if (caps.pull.ok && r.behind > 0) {
-      shown.push(["pull", "repo-pull", "Pull", r.behind === 1
+      shown.push(["pull", "repo-pull", l10n.t("Pull"), r.behind === 1
         ? l10n.t("Pull 1 commit into {0}, in its own folder", r.name)
         : l10n.t("Pull {0} commits into {1}, in its own folder", r.behind, r.name)]);
     }
-    if (caps.push.ok && out) shown.push(["push", "repo-push", "Push…", l10n.t("Review what {0} would push", r.name)]);
+    if (caps.push.ok && out) shown.push(["push", "repo-push", l10n.t("Push…"), l10n.t("Review what {0} would push", r.name)]);
     if (shown.length === 0) return undefined;
     const strip = el("div", "wt-verbs");
     strip.setAttribute("role", "none");
@@ -760,11 +760,11 @@ export class WorktreesView {
         ["copyPath", "copy", l10n.t("Copy Path"), true],
       ],
       [
-        ["pull", "repo-pull", "Pull", caps.pull],
-        ["push", "repo-push", "Push…", caps.push],
+        ["pull", "repo-pull", l10n.t("Pull"), caps.pull],
+        ["push", "repo-push", l10n.t("Push…"), caps.push],
       ],
       [
-        r.locked ? ["unlock", "unlock", "Unlock", caps.unlock] : ["lock", "lock", "Lock…", caps.lock],
+        r.locked ? ["unlock", "unlock", l10n.t("Unlock"), caps.unlock] : ["lock", "lock", l10n.t("Lock…"), caps.lock],
         caps.forget ? ["forget", "close", l10n.t("Forget Worktree…"), true, true] : ["remove", "trash", l10n.t("Remove Worktree…"), caps.remove, true],
       ],
     ];
@@ -1073,8 +1073,8 @@ function keyOf(n: HTMLElement): string {
 
 /** An open row's uncommitted files, in the groups VS Code's Source Control shows. */
 const FILE_GROUPS: [string, NonNullable<ChangeFile["area"]>[]][] = [
-  ["Conflicts", ["conflicted"]],
+  [l10n.t("Conflicts"), ["conflicted"]],
   [l10n.t("Staged changes"), ["staged"]],
-  ["Changes", ["unstaged", "untracked"]],
+  [l10n.t("Changes"), ["unstaged", "untracked"]],
 ];
 

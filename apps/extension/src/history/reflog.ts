@@ -37,7 +37,7 @@ export async function showReflog(repos: RepoManager): Promise<void> {
   try {
     entries = await loadReflog(active.ctx);
   } catch (err) {
-    void vscode.window.showErrorMessage(failed("Reflog", err instanceof Error ? err.message : String(err)));
+    void vscode.window.showErrorMessage(failed(l10n.t("Reflog"), err instanceof Error ? err.message : String(err)));
     return;
   }
   if (entries.length === 0) {
@@ -80,7 +80,7 @@ async function offerRecoveryActions(
     hint: entry.action,
     choices: [
       { id: "branch", label: l10n.t("Create Branch Here"), icon: "git-branch", description: l10n.t("Give this commit a name so it stops being unreachable.") },
-      { id: "checkout", label: "Checkout", icon: "git-commit", description: l10n.t("Go here on a detached HEAD to look around.") },
+      { id: "checkout", label: l10n.t("Checkout"), icon: "git-commit", description: l10n.t("Go here on a detached HEAD to look around.") },
       { id: "reset", label: l10n.t("Reset Branch to Here"), icon: "history", description: l10n.t("Move the current branch back to this commit.") },
       { id: "copySha", label: l10n.t("Copy SHA"), icon: "copy" },
     ],

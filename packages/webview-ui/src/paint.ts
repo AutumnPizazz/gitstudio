@@ -69,7 +69,7 @@ export function fateWords(
   const word = (side: Side, fate: SideFate | undefined): string | undefined => {
     if (!fate || fate === "pending") return undefined;
     if (same) return fate === "took" ? l10n.t("Took the change (the same on both sides)") : l10n.t("Discarded the change (the same on both sides)");
-    return `${fate === "took" ? "Took" : "Discarded"} ${side === "left" ? names.left : names.right}`;
+    return `${fate === "took" ? l10n.t("Took") : l10n.t("Discarded")} ${side === "left" ? names.left : names.right}`;
   };
   out.left = word("left", fates.left);
   out.right = word("right", fates.right);

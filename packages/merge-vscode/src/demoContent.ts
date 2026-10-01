@@ -26,8 +26,8 @@ import * as l10n from "@vscode/l10n";
  */
 export const DEMO_DIFF = {
   fileName: "authorizeRequest.ts",
-  leftLabel: "Sample · before",
-  rightLabel: "Sample · after",
+  leftLabel: l10n.t("Sample · before"),
+  rightLabel: l10n.t("Sample · after"),
   leftText: `import type { Request, Response, NextFunction } from "express";
 import { verifyJwt } from "./jwt";
 import { findSession } from "./store";
@@ -194,7 +194,7 @@ export async function authorizeRequest(
 }
 `;
 
-const COMMIT = { sha: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678", subject: l10n.t("Bind sessions to the device"), author: "Sample" };
+const COMMIT = { sha: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678", subject: l10n.t("Bind sessions to the device"), author: l10n.t("Sample") };
 
 /**
  * The stop the sample stands for: commit 2 of 3 of feature/session-hardening
@@ -232,7 +232,7 @@ export const SAMPLE_OP: OperationView = {
 export const DEMO_MERGE = {
   fileName: "authorizeRequest.ts",
   /** The editor tab's title. */
-  title: "Sample: authorizeRequest.ts",
+  title: l10n.t("Sample: authorizeRequest.ts"),
   base: BASE,
   yours: YOURS,
   theirs: THEIRS,

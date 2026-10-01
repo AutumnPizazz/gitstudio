@@ -19,7 +19,7 @@ export class ConflictStatusItem implements vscode.Disposable {
       vscode.StatusBarAlignment.Left,
       10000,
     );
-    this.item.name = `${product.displayName}: Conflicts`;
+    this.item.name = l10n.t("{0}: Conflicts", product.displayName);
     this.item.text = l10n.t("$(warning) Resolve Conflicts");
     this.item.command = product.commands.showConflicts;
   }

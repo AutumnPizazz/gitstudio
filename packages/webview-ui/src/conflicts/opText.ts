@@ -26,8 +26,8 @@ export function sha7(sha: string | undefined): string {
 }
 
 /** "Yours" / "Theirs" — the role as a button word. */
-export function roleWord(role: SideRole): "Yours" | "Theirs" {
-  return role === "yours" ? "Yours" : "Theirs";
+export function roleWord(role: SideRole): string {
+  return role === "yours" ? l10n.t("Yours") : l10n.t("Theirs");
 }
 
 /** The side a role names. */
@@ -310,7 +310,7 @@ export function abortConfirm(op: OperationView): { question: string; detail: str
 
 /** Skip's confirm: it drops work, and says whose — and whether anything comes after it. */
 export function skipConfirm(op: OperationView): { question: string; detail: string; confirm: string } {
-  const label = op.verbs.skip ?? "Skip";
+  const label = op.verbs.skip ?? l10n.t("Skip");
   // What comes AFTER it: the rest of the sequence, or the picks queued behind
   // it. With none, "the rest carries on" promised a rest that isn't there.
   const rest = op.step ? op.step.m - op.step.n : (op.queued ?? 0);

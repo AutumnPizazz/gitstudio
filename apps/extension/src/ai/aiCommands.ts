@@ -227,12 +227,13 @@ export async function generateCommitMessageCommand(
     );
     return;
   }
+  const copy = l10n.t("Copy");
   const action = await vscode.window.showInformationMessage(
     message,
     { modal: false },
-    "Copy",
+    copy,
   );
-  if (action === "Copy") {
+  if (action === copy) {
     await vscode.env.clipboard.writeText(message);
     void vscode.window.setStatusBarMessage(l10n.t("$(check) Commit message copied"), 2000);
   }

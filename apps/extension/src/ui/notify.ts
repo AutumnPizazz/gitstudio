@@ -26,7 +26,8 @@ export function notice(text: string): string {
   while (t.startsWith(PREFIX) || t.startsWith("GitStudio:")) t = t.slice(t.indexOf(":") + 1).trim();
   if (!t) return PREFIX.trim();
   t = t.charAt(0).toUpperCase() + t.slice(1);
-  if (!/[.!?…)"”]$/.test(t)) t += ".";
+  // 。？！ end a sentence in the Chinese bundle: no Latin full stop after them.
+  if (!/[.!?…。？！)"”]$/.test(t)) t += ".";
   return PREFIX + t;
 }
 
@@ -37,7 +38,7 @@ export function failed(action: string, reason?: string): string {
     .map((l) => l.trim())
     .filter(Boolean)
     .join(" ");
-  return notice(why ? l10n.t("{0} failed — {1}", action, why) : `${action} failed`);
+  return notice(why ? l10n.t("{0} failed — {1}", action, why) : l10n.t("{0} failed", action));
 }
 
 /** The one sentence for "there is no repository to act on". */

@@ -199,15 +199,15 @@ interface ColumnSpec {
 const COLUMN_SPECS: readonly ColumnSpec[] = [
   // The graph gutter auto-sizes to the lane count; a manual resize overrides
   // that (dbl-click / Home on the grip restores auto). Never hideable.
-  { id: "graph", label: "Graph", cssVar: "--gs-gutter-w", def: MIN_GUTTER_WIDTH, min: MIN_GUTTER_WIDTH, max: 480, hideable: false },
+  { id: "graph", label: l10n.t("Graph"), cssVar: "--gs-gutter-w", def: MIN_GUTTER_WIDTH, min: MIN_GUTTER_WIDTH, max: 480, hideable: false },
   // Branch/Tag is a fixed, resizable track (not auto-fit) so subjects start at
   // the same x on every row — a real scanability win, GitLens-style. Default is
   // lean so empty-ref rows don't waste width; drag wider for busy ref sets.
   { id: "refs", label: l10n.t("Branch / Tag"), cssVar: "--col-refs-w", def: 260, min: 60, max: 640 },
-  { id: "changes", label: "Changes", cssVar: "--col-changes-w", def: 100, min: 76, max: 220 },
-  { id: "author", label: "Author", cssVar: "--col-author-w", def: 112, min: 76, max: 240 },
-  { id: "date", label: "Date", cssVar: "--col-date-w", def: 84, min: 58, max: 170 },
-  { id: "sha", label: "SHA", cssVar: "--col-sha-w", def: 66, min: 58, max: 140 },
+  { id: "changes", label: l10n.t("Changes"), cssVar: "--col-changes-w", def: 100, min: 76, max: 220 },
+  { id: "author", label: l10n.t("Author"), cssVar: "--col-author-w", def: 112, min: 76, max: 240 },
+  { id: "date", label: l10n.t("Date"), cssVar: "--col-date-w", def: 84, min: 58, max: 170 },
+  { id: "sha", label: l10n.t("SHA"), cssVar: "--col-sha-w", def: 66, min: 58, max: 140 },
 ];
 const COLUMN_BY_ID = new Map<string, ColumnSpec>(
   COLUMN_SPECS.map((c) => [c.id, c]),
@@ -3119,7 +3119,7 @@ export class CommitGraph extends LitElement {
     };
     const done = () => {
       cell.classList.add("copied");
-      cell.replaceChildren(glyph("check"), document.createTextNode("Copied"));
+      cell.replaceChildren(glyph("check"), document.createTextNode(l10n.t("Copied")));
       this.copiedTimer = window.setTimeout(() => {
         cell.classList.remove("copied");
         cell.replaceChildren(document.createTextNode(label), glyph("copy"));
@@ -4187,15 +4187,19 @@ export class CommitGraph extends LitElement {
     // Commits only: the "Uncommitted changes" row the host puts on top of a
     // dirty tree is not one, and counting it made 17 commits read "18".
     const n = this.rows.reduce((k, r) => (ZERO_SHA_RE.test(r.sha) ? k : k + 1), 0);
+    const countText = `${n.toLocaleString()}${this.hasMore ? "+" : ""}`;
     const count =
       n === 0
         ? ""
-        : `${n.toLocaleString()}${this.hasMore ? "+" : ""} commit${n === 1 ? "" : "s"}`;
+        : n === 1
+          ? l10n.t("{0} commit", countText)
+          : l10n.t("{0} commits", countText);
     const q = this.searchQuery.trim();
     // The search only sees the rows that are LOADED. Saying "No results" while
     // more history is unread states as fact something we have not looked at —
     // and "3/3" implies the search is finished when it is not. The "+" is the
     // same honesty the commit count beside it already uses.
+    const matchText = `${this.searchMatches.length.toLocaleString()}${this.hasMore ? "+" : ""}`;
     const results = q
       ? this.searchMatches.length
         ? // Before you travel to one, `matchIdx` is -1 — there is no "current"
@@ -4204,7 +4208,9 @@ export class CommitGraph extends LitElement {
           // that cannot exist: every other counter in the app is 1-based, so
           // "0 of 12" says the search found nothing while listing twelve.
           this.matchIdx < 0
-          ? `${this.searchMatches.length.toLocaleString()}${this.hasMore ? "+" : ""} match${this.searchMatches.length === 1 ? "" : "es"}`
+          ? this.searchMatches.length === 1
+            ? l10n.t("{0} match", matchText)
+            : l10n.t("{0} matches", matchText)
           : `${this.matchIdx + 1}/${this.searchMatches.length}${this.hasMore ? "+" : ""}`
         : this.hasMore
           ? l10n.t("No results in {0} loaded", n.toLocaleString())
@@ -4248,19 +4254,19 @@ export class CommitGraph extends LitElement {
               >
               <button
                 class="gh-iconbtn"
-                title="Previous match (Shift+Enter)"
+                title=${l10n.t("Previous match (Shift+Enter)")}
                 @click=${() => this.gotoMatch(-1)}
               >
                 <span class="codicon codicon-chevron-up"></span></button
               ><button
                 class="gh-iconbtn"
-                title="Next match (Enter)"
+                title=${l10n.t("Next match (Enter)")}
                 @click=${() => this.gotoMatch(1)}
               >
                 <span class="codicon codicon-chevron-down"></span></button
               ><button
                 class="gh-iconbtn"
-                title="Clear search (Esc)"
+                title=${l10n.t("Clear search (Esc)")}
                 @click=${() => this.clearSearch()}
               >
                 <span class="codicon codicon-close"></span>
@@ -4270,7 +4276,7 @@ export class CommitGraph extends LitElement {
       ${this.columnsControlHtml()}
       <button
         class="gh-iconbtn gh-refresh${this.status === "loading" && this.rows.length ? " is-refreshing" : ""}"
-        title=${this.status === "loading" && this.rows.length ? "Refreshing…" : "Refresh"}
+        title=${this.status === "loading" && this.rows.length ? l10n.t("Refreshing…") : l10n.t("Refresh")}
         ?disabled=${this.status === "loading" && this.rows.length > 0}
         @click=${() => this.onAction({ type: "refresh" })}
       >
@@ -4299,8 +4305,8 @@ export class CommitGraph extends LitElement {
       <button
         class="gh-scope ${scoped ? "scoped" : ""}"
         type="button"
-        title=${`Search scope: ${cur.label}`}
-        aria-label=${`Search scope: ${cur.label}`}
+        title=${l10n.t("Search scope: {0}", cur.label)}
+        aria-label=${l10n.t("Search scope: {0}", cur.label)}
         aria-haspopup="menu"
         aria-expanded=${this.scopeOpen ? "true" : "false"}
         @click=${this.toggleScopePopover}
@@ -4314,10 +4320,10 @@ export class CommitGraph extends LitElement {
         ? html`<div
             class="gh-pop gh-scope-pop"
             role="menu"
-            aria-label="Search scope"
+            aria-label=${l10n.t("Search scope")}
             @keydown=${this.onPopoverKeyDown}
           >
-            <div class="gh-pop-title">Search in</div>
+            <div class="gh-pop-title">${l10n.t("Search in")}</div>
             ${SEARCH_SCOPES.map(
               (s) => html`<button
                 class="gh-menuitem"
@@ -4348,8 +4354,8 @@ export class CommitGraph extends LitElement {
       <button
         class="gh-scope gh-branches ${filtered ? "scoped" : ""}"
         type="button"
-        title=${`Branches: ${label}`}
-        aria-label=${`Filter branches: ${label}`}
+        title=${l10n.t("Branches: {0}", label)}
+        aria-label=${l10n.t("Filter branches: {0}", label)}
         aria-haspopup="menu"
         aria-expanded=${this.branchesOpen ? "true" : "false"}
         @click=${this.toggleBranchesPopover}
@@ -4422,15 +4428,15 @@ export class CommitGraph extends LitElement {
                 <span class="codicon codicon-check" aria-hidden="true"></span>
                 <span class="codicon codicon-${kindIcon(r.kind)} gh-ref-kind" aria-hidden="true"></span>
                 <span class="lbl gh-ref-name">${refDisplayName(r.fullName)}</span>
-                ${r.isCurrent ? html`<span class="gh-ref-cur">current</span>` : nothing}
+                ${r.isCurrent ? html`<span class="gh-ref-cur">${l10n.t("current")}</span>` : nothing}
               </button>`,
             )}
             ${g.hidden
-              ? html`<div class="gh-pop-hint">${g.hidden} more — type to narrow</div>`
+              ? html`<div class="gh-pop-hint">${l10n.t("{0} more — type to narrow", g.hidden)}</div>`
               : nothing}`,
         )}
         ${groups.length === 0 && refs.length
-          ? html`<div class="gh-pop-hint">No branches match</div>`
+          ? html`<div class="gh-pop-hint">${l10n.t("No branches match")}</div>`
           : nothing}
       </div>
       <div class="gh-pop-sep"></div>
@@ -4465,7 +4471,7 @@ export class CommitGraph extends LitElement {
       class="gh-pop gh-ctx gh-chip-menu"
       role="menu"
       tabindex="-1"
-      aria-label=${`Filter by ${title}`}
+      aria-label=${l10n.t("Filter by {0}", title)}
       style="left:${Math.round(left)}px;top:${Math.round(top)}px"
       @keydown=${this.onPopoverKeyDown}
     >
@@ -4523,7 +4529,7 @@ export class CommitGraph extends LitElement {
       ${known
         ? nothing
         : html`<div class="gh-pop-sep"></div>
-            <div class="gh-pop-hint">Not in the branch list yet — refresh the graph</div>`}
+            <div class="gh-pop-hint">${l10n.t("Not in the branch list yet — refresh the graph")}</div>`}
     </div>`;
   }
 
@@ -4547,10 +4553,10 @@ export class CommitGraph extends LitElement {
         ? html`<div
             class="gh-pop"
             role="menu"
-            aria-label="Toggle columns"
+            aria-label=${l10n.t("Toggle columns")}
             @keydown=${this.onPopoverKeyDown}
           >
-            <div class="gh-pop-title">Columns</div>
+            <div class="gh-pop-title">${l10n.t("Columns")}</div>
             ${COLUMN_SPECS.filter((s) => s.hideable !== false).map((spec) => {
               const visible = !this.hiddenCols.has(spec.id);
               return html`<button
@@ -4567,11 +4573,11 @@ export class CommitGraph extends LitElement {
             <button
               class="gh-menuitem"
               role="menuitem"
-              title="Restore every column to its default width"
+              title=${l10n.t("Restore every column to its default width")}
               @click=${this.resetAllColumnWidths}
             >
               <span class="codicon codicon-discard" aria-hidden="true"></span>
-              <span class="lbl">Reset column widths</span>
+              <span class="lbl">${l10n.t("Reset column widths")}</span>
             </button>
             <div class="gh-pop-sep"></div>
             <div class="gh-pop-hint">
@@ -4867,7 +4873,7 @@ function shaCellHtml(fullSha: string, shortSha: string, isWip: boolean): string 
   const short = esc(shortSha);
   return (
     `<div class="meta sha" data-sha-cell="1" data-label="${short}" ` +
-    `title="Click to copy ${esc(fullSha)}">` +
+    `title="${l10n.t("Click to copy {0}", esc(fullSha))}">` +
     `${short}<span class="codicon codicon-copy" aria-hidden="true"></span>` +
     `</div>`
   );

@@ -310,7 +310,7 @@ export class ConflictsDashboard {
     this.element = el("div", "cd-dash");
     // A label on a plain div is ignored; as a region it is a landmark.
     this.element.setAttribute("role", "region");
-    this.element.setAttribute("aria-label", "Conflicts");
+    this.element.setAttribute("aria-label", l10n.t("Conflicts"));
     this.anchor = anchorElement(() => this.reattached());
     this.element.appendChild(this.anchor);
     this.patchOpts = {
@@ -598,7 +598,7 @@ export class ConflictsDashboard {
 
     if (op.pause) {
       const p = el("div", "cd-pause");
-      p.append(codicon("debug-pause"), el("span", "cd-pause-text", op.pause.detail || "Paused"));
+      p.append(codicon("debug-pause"), el("span", "cd-pause-text", op.pause.detail || l10n.t("Paused")));
       p.appendChild(
         el(
           "span",
@@ -859,7 +859,7 @@ export class ConflictsDashboard {
     const actions = el("span", "cd-tip-actions");
     if (tip.why) {
       const why = tip.why;
-      const b = el("button", "cd-link", "Why?");
+      const b = el("button", "cd-link", l10n.t("Why?"));
       b.type = "button";
       b.dataset.key = "tip-why";
       b.title = why;
@@ -948,7 +948,7 @@ export class ConflictsDashboard {
     const status = el("span", "cd-status");
     if (busy) {
       const s = el("span", "cd-spinner");
-      s.setAttribute("aria-label", "Working");
+      s.setAttribute("aria-label", l10n.t("Working"));
       status.appendChild(s);
     } else if (resolved) {
       const ring = el("span", "cd-check");
@@ -1021,7 +1021,7 @@ export class ConflictsDashboard {
         if (hasText(f.shape)) {
           actions.appendChild(
             this.button(
-              "Merge…",
+              l10n.t("Merge…"),
               l10n.t("Resolve it change by change in the merge editor"),
               `merge:${f.path}`,
               disabled,
@@ -1243,7 +1243,7 @@ export class ConflictsDashboard {
       foot.appendChild(
         // Secondary: beside Continue there is ONE primary action (the verifier
         // found two identical primary buttons on the finished card).
-        this.button("Close", l10n.t("Close this dashboard"), "close", false, () => this.post({ type: "close" })),
+        this.button(l10n.t("Close"), l10n.t("Close this dashboard"), "close", false, () => this.post({ type: "close" })),
       );
     }
     return foot;

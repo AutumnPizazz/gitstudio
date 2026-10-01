@@ -28,14 +28,14 @@ export interface OutcomeLine {
 export function operationNoun(kind: OperationKind): string {
   switch (kind) {
     case "merge":
-      return "Merge";
+      return l10n.t("Merge");
     case "rebase":
     case "rebase-merge-step":
-      return "Rebase";
+      return l10n.t("Rebase");
     case "cherry-pick":
-      return "Cherry-pick";
+      return l10n.t("Cherry-pick");
     case "revert":
-      return "Revert";
+      return l10n.t("Revert");
     case "am":
       return l10n.t("Applying patches");
     case "stash":
@@ -107,7 +107,7 @@ function doneText(
     return l10n.t("The conflicted files are back to their last committed versions.");
   }
   const noun = operationNoun(kind);
-  return verb === "abort" ? l10n.t("{0} cancelled — the repository is back where it was before.", noun) : `${noun} complete.`;
+  return verb === "abort" ? l10n.t("{0} cancelled — the repository is back where it was before.", noun) : l10n.t("{0} complete.", noun);
 }
 
 function stoppedText(view: OperationView): string {

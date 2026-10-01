@@ -329,7 +329,7 @@ export async function saveStash(
     // `git stash push` exits 1 having printed nothing at all, and "Stash
     // failed." on its own leaves nobody anything to look at.
     void vscode.window.showErrorMessage(
-      failed("Stash", result.stderr.trim() || l10n.t("git refused")),
+      failed(l10n.t("Stash"), result.stderr.trim() || l10n.t("git refused")),
     );
     return;
   }
@@ -561,7 +561,7 @@ async function askWithoutStaging(
   lossy: boolean,
   readds: string | null,
 ): Promise<boolean> {
-  const verb = pop ? "Pop" : "Apply";
+  const verb = pop ? l10n.t("Pop") : l10n.t("Apply");
   const choice = await promptPick({
     title: l10n.t("{0} the stash without its staging?", verb),
     hint:
@@ -579,7 +579,7 @@ async function askWithoutStaging(
       },
       {
         id: "cancel",
-        label: "Cancel",
+        label: l10n.t("Cancel"),
         icon: "close",
         description: pop
           ? l10n.t("Nothing runs. Apply keeps the stash, so its staged versions stay in it.")
@@ -600,7 +600,7 @@ async function askPartWithoutStaging(
   move: boolean,
   picked: readonly StashFile[],
 ): Promise<boolean> {
-  const verb = move ? "Move" : "Copy";
+  const verb = move ? l10n.t("Move") : l10n.t("Copy");
   const one = picked.length === 1;
   const back = unstagedWords(readdsNew(picked));
   const them = one ? `“${picked[0].path.split("/").pop()}”` : l10n.t("These {0} files", picked.length);
@@ -624,7 +624,7 @@ async function askPartWithoutStaging(
       },
       {
         id: "cancel",
-        label: "Cancel",
+        label: l10n.t("Cancel"),
         icon: "close",
         description: l10n.t("Nothing runs. {0} in the stash, staging and all.", one ? l10n.t("It stays") : l10n.t("They stay")),
       },

@@ -64,6 +64,17 @@ export function configureL10n(uri: { fsPath: string } | undefined): void {
 }
 
 /**
+ * The placeholder syntax `@vscode/l10n` replaces: `{0}`, `{1}`, `{name}`.
+ *
+ * `String.raw` because the escaped braces must reach the page as written — a
+ * plain template literal would eat the backslashes.
+ */
+const PLACEHOLDER = String.raw`/\{([^}]+)\}/g`;
+
+/** `\u003c`, the JSON escape for `<`, spelled so a template literal cannot cook it. */
+const LESS_THAN = String.raw`\u003c`;
+
+/**
  * The page global that translates one message with `{0}`-style placeholders.
  *
  * It is what the extension's own inline programs call: the pages that carry a
@@ -73,6 +84,11 @@ export function configureL10n(uri: { fsPath: string } | undefined): void {
  * be translated when the host builds the HTML. They call `l10nT("…", arg)`
  * instead, and this helper resolves it against the bundle that travels with the
  * page. In English the bundle is empty and the message is handed straight back.
+ *
+ * Substitution runs in ONE pass, exactly as `@vscode/l10n`'s own `format` does:
+ * `{0}` is looked up in the arguments and the result is never scanned again, so
+ * a value that itself reads `{1}` stays a literal. A placeholder with no
+ * argument keeps its braces, and no argument at all hands the message back.
  *
  * Written in ES5 on purpose: it is inlined into `<script>` in a page whose CSP
  * allows no build step of its own, and it must survive whatever the page's own
@@ -89,13 +105,12 @@ globalThis.l10nT=function(message){
 var args=Array.prototype.slice.call(arguments,1);
 var hit=(globalThis.__gitstudioL10n||{})[message];
 var text=typeof hit==="string"?hit:(hit&&hit.message)||message;
-var i,key;
-if(args.length===1&&args[0]!==null&&typeof args[0]==="object"){
-for(key in args[0]){text=text.split("{"+key+"}").join(String(args[0][key]));}
-return text;
-}
-for(i=0;i<args.length;i++){text=text.split("{"+i+"}").join(String(args[i]));}
-return text;
+var values=args.length===1&&args[0]!==null&&typeof args[0]==="object"?args[0]:args;
+if(Object.keys(values).length===0){return text;}
+return text.replace(${PLACEHOLDER},function(match,key){
+var one=values[key];
+return one===undefined||one===null?match:String(one);
+});
 };`;
 }
 
@@ -116,10 +131,20 @@ export function l10nWebviewScript(nonce: string): string {
   if (scriptCache?.nonce !== nonce) {
     scriptCache = {
       nonce,
-      html: `<script nonce="${nonce}">${webviewHelper(bundleText ?? "{}", locale)}</script>`,
+      html: `<script nonce="${nonce}">${webviewHelper(inlineBundle(bundleText ?? "{}"), locale)}</script>`,
     };
   }
   return scriptCache.html;
+}
+
+/**
+ * The bundle text as it may sit inside a `<script>` element: every `<` becomes
+ * `\u003c`, so a message holding `</script>` cannot end the element early. JSON
+ * reads `\u003c` back as `<`, so the page sees the bundle we wrote — and `\u003c`
+ * cannot appear in the bundle any other way, whichever language it holds.
+ */
+function inlineBundle(json: string): string {
+  return json.replace(/</g, LESS_THAN);
 }
 
 /** The parsed bundle, for tests and diagnostics. `undefined` in English. */

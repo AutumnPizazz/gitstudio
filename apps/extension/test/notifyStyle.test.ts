@@ -36,6 +36,14 @@ test("the sentence: GitStudio once, a capital, a full stop", () => {
   assert.equal(notice("  spaced  "), "GitStudio: Spaced.");
 });
 
+test("the sentence in Chinese: 。？！ end it, so no Latin full stop follows", () => {
+  assert.equal(notice("已切到 main。"), "GitStudio: 已切到 main。");
+  assert.equal(notice("推完了！"), "GitStudio: 推完了！");
+  assert.equal(notice("没问题？"), "GitStudio: 没问题？");
+  assert.equal(notice("GitStudio: 草稿已保存。"), "GitStudio: 草稿已保存。", "the prefix never twice");
+  assert.equal(notice("没有句号"), "GitStudio: 没有句号.", "a sentence that ends in neither still gets one");
+});
+
 test("a failure: the action, then git's reason, whole, on one line", () => {
   assert.equal(
     failed("Push", "rejected: non-fast-forward\nhint: pull first"),
@@ -130,8 +138,8 @@ const EXEMPT: { rel: string; args: RegExp; why: string }[] = [
   },
   {
     rel: "ai/aiCommands.ts",
-    args: /^message,\s*\{ modal: false \},\s*"Copy",?$/,
-    why: "the commit message the AI drafted, offered to copy: the user's words, not GitStudio's",
+    args: /^message,\s*\{ modal: false \},\s*copy,?$/,
+    why: "the commit message the AI drafted, offered to copy: the user's words, not GitStudio's (copy is the button's own label, read once so the choice compares it)",
   },
 ];
 

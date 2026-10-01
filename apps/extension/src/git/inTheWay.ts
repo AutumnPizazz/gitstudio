@@ -199,7 +199,7 @@ async function askStashRetry(v: ChangesInTheWay): Promise<boolean> {
       },
       {
         id: "cancel",
-        label: "Cancel",
+        label: l10n.t("Cancel"),
         icon: "close",
         description: l10n.t("Nothing runs. Commit or stash them yourself first."),
       },

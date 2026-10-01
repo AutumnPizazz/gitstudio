@@ -18,7 +18,7 @@ export const REF_PRESETS: ReadonlyArray<{ id: RefPreset; label: string }> = [
   { id: "current", label: l10n.t("Current branch") },
   { id: "currentUpstream", label: l10n.t("Current + upstream") },
   { id: "local", label: l10n.t("Local only") },
-  { id: "all", label: "All" },
+  { id: "all", label: l10n.t("All") },
 ];
 
 /**
@@ -190,9 +190,9 @@ export function groupRefs(
   const q = query.trim().toLowerCase();
   const matches = q ? refs.filter((r) => r.name.toLowerCase().includes(q)) : [...refs];
   const spec: Array<[RefGroup["id"], string, GraphRefEntry["kind"]]> = [
-    ["local", "Local", "head"],
-    ["remote", "Remote", "remoteHead"],
-    ["tag", "Tags", "tag"],
+    ["local", l10n.t("Local"), "head"],
+    ["remote", l10n.t("Remote"), "remoteHead"],
+    ["tag", l10n.t("Tags"), "tag"],
   ];
   const out: RefGroup[] = [];
   for (const [id, label, kind] of spec) {

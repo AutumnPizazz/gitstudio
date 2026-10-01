@@ -99,7 +99,7 @@ function describe(err: unknown): Described {
 
 /** A first read that failed: why, and the one thing that can put it right. */
 function readFailure(err: Described, repo: string): PrListMessage {
-  const retry = { label: "Retry", icon: "refresh", action: { kind: "retry" } as PrListAction };
+  const retry = { label: l10n.t("Retry"), icon: "refresh", action: { kind: "retry" } as PrListAction };
   if (err.kind === "auth" && err.status === 401) {
     return {
       icon: "github",

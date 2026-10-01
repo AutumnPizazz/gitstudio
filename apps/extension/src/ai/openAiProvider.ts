@@ -130,7 +130,8 @@ export class OpenAiProvider implements AiProvider {
     };
     const key = await this.opts.getKey();
     if (typeof key === "string" && key.trim().length > 0) {
-      headers["Authorization"] = l10n.t("Bearer {0}", key.trim());
+      // English on purpose: an HTTP header value, spoken to a model server.
+    headers["Authorization"] = `Bearer ${key.trim()}`;
     }
     return headers;
   }

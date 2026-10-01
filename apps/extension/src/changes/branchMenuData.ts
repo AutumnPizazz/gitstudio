@@ -120,21 +120,21 @@ export function pickedRefName(
 export function branchActionWords(action: string | undefined, ref?: string): string {
   switch (action) {
     case "fetch":
-      return "Fetch";
+      return l10n.t("Fetch");
     case "pull":
-      return "Pull";
+      return l10n.t("Pull");
     case "pullMerge":
       return l10n.t("Pull using Merge");
     case "pullRebase":
       return l10n.t("Pull using Rebase");
     case "push":
-      return "Push";
+      return l10n.t("Push");
     case "pullFf":
-      return ref ? l10n.t("Pull into '{0}'", ref) : "Pull";
+      return ref ? l10n.t("Pull into '{0}'", ref) : l10n.t("Pull");
     case "new":
       return ref ? l10n.t("New Branch '{0}'", ref.trim()) : l10n.t("New Branch");
     case "checkoutRef":
-      return ref ? l10n.t("Checkout '{0}'", ref.trim()) : "Checkout";
+      return ref ? l10n.t("Checkout '{0}'", ref.trim()) : l10n.t("Checkout");
     default:
       return action ?? l10n.t("The branch action");
   }

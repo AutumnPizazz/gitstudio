@@ -388,7 +388,7 @@ export class MergeShell {
     const toolbar = document.createElement("div");
     toolbar.className = "jb-toolbar";
     toolbar.setAttribute("role", "toolbar");
-    toolbar.setAttribute("aria-label", "Merge");
+    toolbar.setAttribute("aria-label", l10n.t("Merge"));
     this.toolbar = toolbar;
     const mod = this.isMac ? "⌘" : "Ctrl+";
     this.undoBtn = toolbarIconButton(undoIcon, l10n.t("Undo ({0}Z)", mod));
@@ -408,9 +408,9 @@ export class MergeShell {
     this.prevBtn = toolbarIconButton(arrowUp, l10n.t("Previous change (Shift+F7)"));
     this.nextBtn = toolbarIconButton(arrowDown, l10n.t("Next change (F7)"));
     // Left is always Yours (D1), so the toolbar can name the roles.
-    this.applyYoursBtn = toolbarIconTextButton(chevronDoubleRight, "Yours", l10n.t("Apply non-conflicting changes from yours"));
-    this.applyAllBtn = toolbarIconTextButton(chevronsInward, "All", l10n.t("Apply all non-conflicting changes"));
-    this.applyTheirsBtn = toolbarIconTextButton(chevronDoubleLeft, "Theirs", l10n.t("Apply non-conflicting changes from theirs"));
+    this.applyYoursBtn = toolbarIconTextButton(chevronDoubleRight, l10n.t("Yours"), l10n.t("Apply non-conflicting changes from yours"));
+    this.applyAllBtn = toolbarIconTextButton(chevronsInward, l10n.t("All"), l10n.t("Apply all non-conflicting changes"));
+    this.applyTheirsBtn = toolbarIconTextButton(chevronDoubleLeft, l10n.t("Theirs"), l10n.t("Apply non-conflicting changes from theirs"));
     this.applyYoursBtn.classList.add("ms-apply-yours");
     this.applyAllBtn.classList.add("ms-apply-all");
     this.applyTheirsBtn.classList.add("ms-apply-theirs");
@@ -440,7 +440,7 @@ export class MergeShell {
     spacer.className = "jb-spacer";
     this.counter = document.createElement("span");
     this.counter.className = "jb-counter";
-    this.counter.textContent = "Loading…";
+    this.counter.textContent = l10n.t("Loading…");
     this.counter.setAttribute("role", "status");
 
     toolbar.append(
@@ -510,16 +510,16 @@ export class MergeShell {
 
     // Close: ONLY closes the merge editor. Nothing is written, and the
     // operation stays paused; ending it is the conflicts list's to offer.
-    this.closeBtn = toolbarButton("Close", "bordered");
+    this.closeBtn = toolbarButton(l10n.t("Close"), "bordered");
     this.closeBtn.classList.add("ms-close");
 
     // After an Apply the host can take back: the conflict comes back.
-    this.undoApplyBtn = toolbarButton("Undo", "bordered");
+    this.undoApplyBtn = toolbarButton(l10n.t("Undo"), "bordered");
     this.undoApplyBtn.classList.add("ms-undo-apply");
     this.undoApplyBtn.title = l10n.t("Undo the Apply: bring the conflict back into the file");
     this.undoApplyBtn.hidden = true;
 
-    this.applyBtn = toolbarButton("Apply", "primary");
+    this.applyBtn = toolbarButton(l10n.t("Apply"), "primary");
     this.applyBtn.classList.add("ms-apply");
     this.applyBtn.title = l10n.t("Save the result and mark the conflict resolved");
     this.continueBtn = toolbarButton("", "primary");
@@ -1103,7 +1103,7 @@ export class MergeShell {
       this.armTimer = 0;
     }
     this.applyBtn.classList.remove("jb-warn");
-    this.applyBtn.textContent = "Apply";
+    this.applyBtn.textContent = l10n.t("Apply");
     this.applyBtn.removeAttribute("aria-describedby");
   }
 
@@ -1174,7 +1174,7 @@ export class MergeShell {
           ? l10n.t("Deleted the file and staged the deletion.")
           : take
             ? l10n.t("Kept {0}{1} and staged it.", take, this.op ? ` (${take === "yours" ? this.op.yours.name : this.op.theirs.name})` : "")
-            : "Resolved.";
+            : l10n.t("Resolved.");
       this.panel.setResolved(staged ? (message ? `${done} ${message}` : done) : this.appliedWarn, staged);
     } else {
       this.counter.textContent = staged ? l10n.t("Merge applied and staged") : l10n.t("Merge applied");
@@ -1297,8 +1297,8 @@ export class MergeShell {
     text.append(
       glyphEl(warningIcon),
       document.createTextNode(
-        `Close without applying? ${where}${name} keeps its conflict markers; ` +
-          `anything settled here and not saved is not kept.`,
+        l10n.t("Close without applying? {0}{1} keeps its conflict markers; ", where, name) +
+          l10n.t("anything settled here and not saved is not kept."),
       ),
     );
     const keep = toolbarButton(l10n.t("Keep editing"), "bordered");
@@ -1321,7 +1321,7 @@ export class MergeShell {
     // The walkthrough's sample has no operation behind it (kind "none",
     // nothing unmerged); its one verb is how it closes.
     if (op && op.episode === "sample" && op.verbs.abort) return op.verbs.abort;
-    return "Close";
+    return l10n.t("Close");
   }
 
   // ── bottom bar ──
@@ -1376,7 +1376,7 @@ export class MergeShell {
     this.continueBtn.hidden = !showContinue;
     this.continueBtn.disabled = busy;
     if (showContinue && this.op) {
-      this.continueBtn.replaceChildren(glyphEl(continueIcon), document.createTextNode(this.op.verbs.continue ?? "Continue"));
+      this.continueBtn.replaceChildren(glyphEl(continueIcon), document.createTextNode(this.op.verbs.continue ?? l10n.t("Continue")));
       this.continueBtn.title = this.op.title ? `${this.op.verbs.continue} — ${this.op.title}` : (this.op.verbs.continue ?? "");
     } else {
       this.dropConfirming = false;
